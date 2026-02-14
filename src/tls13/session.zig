@@ -1466,6 +1466,12 @@ fn keyUpdateRecord(request: handshake.KeyUpdateRequest) [10]u8 {
     return Engine.buildKeyUpdateRecord(request);
 }
 
+fn keyUpdateRecordWithRawRequest(raw: u8) [10]u8 {
+    var frame = keyUpdateRecord(.update_not_requested);
+    frame[9] = raw;
+    return frame;
+}
+
 fn encryptedExtensionsRecord() [11]u8 {
     // EncryptedExtensions body: extensions_len(2)=0
     var frame: [11]u8 = undefined;
@@ -1817,6 +1823,73 @@ test "keyupdate request is surfaced in action" {
         .sha384 => |b| switch (after) {
             .sha384 => |a| try std.testing.expect(!std.mem.eql(u8, &b, &a)),
             else => return error.TestUnexpectedResult,
+        },
+    }
+}
+
+test "keyupdate update_not_requested does not trigger reciprocal send action" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+    _ = try engine.ingestRecord(&serverHelloRecord());
+    _ = try engine.ingestRecord(&encryptedExtensionsRecord());
+    _ = try engine.ingestRecord(&finishedRecord());
+    const before = engine.latest_secret orelse return error.TestUnexpectedResult;
+
+    const ku = keyUpdateRecord(.update_not_requested);
+    const res = try engine.ingestRecord(&ku);
+
+    try std.testing.expectEqual(@as(usize, 3), res.action_count);
+    switch (res.actions[1]) {
+        .key_update => |req| try std.testing.expectEqual(handshake.KeyUpdateRequest.update_not_requested, req),
+        else => return error.TestUnexpectedResult,
+    }
+
+    const after = engine.latest_secret orelse return error.TestUnexpectedResult;
+    switch (before) {
+        .sha256 => |b| switch (after) {
+            .sha256 => |a| try std.testing.expect(!std.mem.eql(u8, &b, &a)),
+            else => return error.TestUnexpectedResult,
+        },
+        .sha384 => |b| switch (after) {
+            .sha384 => |a| try std.testing.expect(!std.mem.eql(u8, &b, &a)),
+            else => return error.TestUnexpectedResult,
+        },
+    }
+}
+
+test "invalid keyupdate request byte is rejected as invalid request" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+    _ = try engine.ingestRecord(&serverHelloRecord());
+    _ = try engine.ingestRecord(&encryptedExtensionsRecord());
+    _ = try engine.ingestRecord(&finishedRecord());
+
+    const ku = keyUpdateRecordWithRawRequest(2);
+    try std.testing.expectError(error.InvalidRequest, engine.ingestRecord(&ku));
+}
+
+test "invalid keyupdate request maps to illegal_parameter alert intent" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+    _ = try engine.ingestRecord(&serverHelloRecord());
+    _ = try engine.ingestRecord(&encryptedExtensionsRecord());
+    _ = try engine.ingestRecord(&finishedRecord());
+
+    const out = engine.ingestRecordWithAlertIntent(&keyUpdateRecordWithRawRequest(2));
+    switch (out) {
+        .ok => return error.TestUnexpectedResult,
+        .fatal => |fatal| {
+            try std.testing.expectEqual(error.InvalidRequest, fatal.err);
+            try std.testing.expectEqual(alerts.AlertDescription.illegal_parameter, fatal.alert.description);
         },
     }
 }

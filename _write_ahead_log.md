@@ -5261,3 +5261,74 @@ Observed Results
 
 Notes
 - Added regression coverage confirms staged secrets are populated at expected milestones and zeroized on teardown.
+===
+timestamp: 2026-02-15T09:10:00+09:00
+description: Plan KeyUpdate branch hardening for update_not_requested and invalid-request paths
+type: plan
+===
+Motivation
+- `RFC8446-HS-003` coverage includes update-requested response and ratchet behavior, but branch guarantees are incomplete for:
+  - `update_not_requested` semantics (no reciprocal response action)
+  - invalid KeyUpdate request value handling on ingest/classification path
+
+Scope
+- Add regression tests for `update_not_requested` action shape and ratchet behavior.
+- Add regression tests for invalid KeyUpdate request byte handling and fatal alert classification.
+- Update RFC matrix HS-003 coverage wording.
+
+Design
+- Introduce a raw KeyUpdate record fixture helper to inject invalid request byte values.
+- Assert expected behavior:
+  - `update_not_requested`: emits `key_update` without `send_key_update`, and ratchets secret.
+  - invalid request: `ingestRecord` errors with `InvalidRequest`; wrapper maps to `illegal_parameter`.
+
+Risks/Perf Impact
+- Test-only changes; runtime behavior unchanged.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Remove added KeyUpdate branch regression tests and helper fixture.
+
+Commit Plan
+- `MINOR: tls13: expand keyupdate branch validation tests`
+===
+timestamp: 2026-02-15T09:13:00+09:00
+description: Expand KeyUpdate branch regression coverage for no-response and invalid-request paths
+type: code change
+===
+Decisions + Rationale
+- Expanded HS-003 branch assertions beyond update-requested happy path.
+- Added explicit validation that `update_not_requested` does not emit reciprocal `send_key_update` action while still ratcheting traffic secret.
+- Added invalid-request-byte ingestion checks to lock parser/classification semantics.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - Added helper fixture `keyUpdateRecordWithRawRequest` for boundary injection.
+  - Added tests:
+    - `keyupdate update_not_requested does not trigger reciprocal send action`
+    - `invalid keyupdate request byte is rejected as invalid request`
+    - `invalid keyupdate request maps to illegal_parameter alert intent`
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-HS-003` wording/coverage with response-shape and invalid-request branches.
+
+Risks/Perf Notes
+- Test/documentation-only expansion; runtime behavior unchanged.
+===
+timestamp: 2026-02-15T09:14:00+09:00
+description: Validate KeyUpdate branch regression expansion with session and full test suites
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 109/109 tests passed.
+- `zig build test`: passed.
+
+Notes
+- Added coverage now verifies KeyUpdate no-response branch and invalid-request handling/classification path.
