@@ -5939,3 +5939,82 @@ Observed Results
 
 Notes
 - Regression confirms group-mismatch ClientHello now fails with `InvalidKeyShareExtension`.
+===
+timestamp: 2026-02-15T11:43:00+09:00
+description: Plan strict HRR extension payload validation for key_share selected_group and cookie vector
+type: plan
+===
+Motivation
+- HRR path currently enforces extension presence/allowlist but lacks payload-shape validation for HRR-specific extension semantics.
+- Malformed HRR `key_share` or `cookie` data can bypass structural checks and proceed farther than intended.
+
+Scope
+- Validate HRR `key_share` extension payload is exactly 2 bytes (selected_group).
+- Validate optional HRR `cookie` extension payload follows non-empty `opaque cookie<1..2^16-1>` vector encoding.
+- Add negative regression tests for malformed HRR `key_share` and malformed HRR `cookie` payloads.
+- Update RFC matrix HS-002 wording and coverage references.
+
+Design
+- Extend `requireHrrExtensions` to parse extension data and call dedicated validators.
+- Reuse existing `InvalidKeyShareExtension` for malformed HRR key_share payload.
+- Introduce dedicated cookie payload error mapped to `illegal_parameter`.
+
+Risks/Perf Impact
+- Minimal bounded parsing in HRR path only; negligible overhead.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Remove HRR payload validator calls/helpers and associated regression tests.
+
+Commit Plan
+- `MINOR: tls13: validate hrr key_share and cookie payloads`
+===
+timestamp: 2026-02-15T11:49:00+09:00
+description: Harden HRR extension payload validation for key_share selected_group and cookie vector
+type: code change
+===
+Decisions + Rationale
+- Extended HRR validation beyond presence/allowlist checks to enforce payload semantics:
+  - `key_share` in HRR must carry exactly one `selected_group` (2-byte payload) and reject reserved zero group.
+  - Optional `cookie` must be encoded as non-empty `opaque cookie<1..2^16-1>` vector.
+- Added dedicated `InvalidCookieExtension` error for malformed HRR cookie data while reusing `InvalidKeyShareExtension` for malformed HRR key_share.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - `EngineError`: added `InvalidCookieExtension`.
+  - `requireHrrExtensions`: validates HRR key_share payload and optional cookie payload.
+  - `classifyErrorAlert`: maps `InvalidCookieExtension` to `illegal_parameter`.
+  - Added helpers:
+    - `validateHrrKeyShareExtension`
+    - `validateHrrCookieExtension`
+  - Added fixtures/tests:
+    - `hrrServerHelloRecordWithInvalidKeySharePayload`
+    - `hrrServerHelloRecordWithCookie`
+    - `hrrServerHelloRecordWithInvalidCookiePayload`
+    - `client rejects hrr with invalid key_share payload`
+    - `client accepts hrr with valid cookie extension`
+    - `client rejects hrr with invalid cookie payload`
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-HS-002` requirement and test coverage wording for HRR key_share/cookie payload validation.
+
+Risks/Perf Notes
+- Validation is bounded to short HRR extension payloads on handshake path; negligible performance impact.
+- Behavior is intentionally stricter on malformed HRR extension payloads.
+===
+timestamp: 2026-02-15T11:50:00+09:00
+description: Validate HRR payload hardening via session and full test suites
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- Initial run exposed one regression fixture issue (`client rejects hrr with invalid key_share payload` hit `InvalidHelloMessage` due to decode-stage truncation).
+- Adjusted malformed fixture to keep decode-valid structure and fail at semantic validator (`selected_group=0x0000`).
+- Final run: `session.zig` 118/118 tests passed.
+- `zig build test`: passed.

@@ -106,6 +106,7 @@ pub const EngineError = error{
     InvalidAlpnExtension,
     InvalidSupportedGroupsExtension,
     InvalidKeyShareExtension,
+    InvalidCookieExtension,
     MissingRequiredServerHelloExtension,
     MissingRequiredHrrExtension,
     UnexpectedServerHelloExtension,
@@ -621,7 +622,11 @@ pub const Engine = struct {
         try requireAllowedExtensions(extensions, &.{ ext_supported_versions, ext_key_share, ext_cookie }, error.UnexpectedHrrExtension);
         const supported_versions = findExtensionData(extensions, ext_supported_versions) orelse return error.MissingRequiredHrrExtension;
         if (!serverHelloSupportedVersionIsTls13(supported_versions)) return error.InvalidSupportedVersionExtension;
-        if (!hasExtension(extensions, ext_key_share)) return error.MissingRequiredHrrExtension;
+        const key_share = findExtensionData(extensions, ext_key_share) orelse return error.MissingRequiredHrrExtension;
+        try validateHrrKeyShareExtension(key_share);
+        if (findExtensionData(extensions, ext_cookie)) |cookie| {
+            try validateHrrCookieExtension(cookie);
+        }
     }
 };
 
@@ -649,6 +654,7 @@ pub fn classifyErrorAlert(err: anyerror) alerts.Alert {
         error.InvalidAlpnExtension,
         error.InvalidSupportedGroupsExtension,
         error.InvalidKeyShareExtension,
+        error.InvalidCookieExtension,
         error.UnexpectedServerHelloExtension,
         error.UnexpectedHrrExtension,
         error.InvalidCompressionMethod,
@@ -999,6 +1005,19 @@ fn validateClientHelloKeyShareExtension(data: []const u8) EngineError!void {
         i += key_len;
     }
     if (i != end) return error.InvalidKeyShareExtension;
+}
+
+fn validateHrrKeyShareExtension(data: []const u8) EngineError!void {
+    if (data.len != 2) return error.InvalidKeyShareExtension;
+    const selected_group = readU16(data[0..2]);
+    if (selected_group == 0) return error.InvalidKeyShareExtension;
+}
+
+fn validateHrrCookieExtension(data: []const u8) EngineError!void {
+    if (data.len < 3) return error.InvalidCookieExtension;
+    const cookie_len = readU16(data[0..2]);
+    if (cookie_len == 0) return error.InvalidCookieExtension;
+    if (cookie_len + 2 != data.len) return error.InvalidCookieExtension;
 }
 
 fn validateClientHelloKeyShareGroupsSubset(key_share_data: []const u8, supported_groups_data: []const u8) EngineError!void {
@@ -1583,6 +1602,39 @@ fn hrrServerHelloRecordWithUnexpectedExtension() [65]u8 {
     return frame;
 }
 
+fn hrrServerHelloRecordWithInvalidKeySharePayload() [61]u8 {
+    var frame = hrrServerHelloRecord();
+    frame[59] = 0x00;
+    frame[60] = 0x00; // selected_group=0x0000 (invalid)
+    return frame;
+}
+
+fn hrrServerHelloRecordWithCookie() [68]u8 {
+    var frame: [68]u8 = undefined;
+    const base = hrrServerHelloRecord();
+    @memcpy(frame[0..base.len], base[0..]);
+    std.mem.writeInt(u16, frame[3..5], 63, .big);
+    const hs_len = handshake.writeU24(59);
+    @memcpy(frame[6..9], &hs_len);
+    frame[47] = 0x00;
+    frame[48] = 0x13; // extension bytes: 12 + cookie(7)
+    // cookie: type=0x002c len=3 cookie_len=1 cookie=0xaa
+    frame[61] = 0x00;
+    frame[62] = 0x2c;
+    frame[63] = 0x00;
+    frame[64] = 0x03;
+    frame[65] = 0x00;
+    frame[66] = 0x01;
+    frame[67] = 0xaa;
+    return frame;
+}
+
+fn hrrServerHelloRecordWithInvalidCookiePayload() [68]u8 {
+    var frame = hrrServerHelloRecordWithCookie();
+    frame[66] = 0x00; // cookie vector len becomes zero (invalid)
+    return frame;
+}
+
 fn keyUpdateRecord(request: handshake.KeyUpdateRequest) [10]u8 {
     return Engine.buildKeyUpdateRecord(request);
 }
@@ -1908,6 +1960,40 @@ test "client rejects hrr with unexpected extension" {
 
     const hrr = hrrServerHelloRecordWithUnexpectedExtension();
     try std.testing.expectError(error.UnexpectedHrrExtension, engine.ingestRecord(&hrr));
+}
+
+test "client rejects hrr with invalid key_share payload" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const hrr = hrrServerHelloRecordWithInvalidKeySharePayload();
+    try std.testing.expectError(error.InvalidKeyShareExtension, engine.ingestRecord(&hrr));
+}
+
+test "client accepts hrr with valid cookie extension" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const hrr = hrrServerHelloRecordWithCookie();
+    _ = try engine.ingestRecord(&hrr);
+    try std.testing.expectEqual(state.ConnectionState.wait_server_hello, engine.machine.state);
+}
+
+test "client rejects hrr with invalid cookie payload" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const hrr = hrrServerHelloRecordWithInvalidCookiePayload();
+    try std.testing.expectError(error.InvalidCookieExtension, engine.ingestRecord(&hrr));
 }
 
 test "keyupdate request is surfaced in action" {
