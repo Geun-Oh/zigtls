@@ -3017,3 +3017,68 @@ Observed Results
 - NSS script syntax check passed.
 - Preflight syntax and dry-run passed with NSS hook included.
 - Full test target passed.
+===
+timestamp: 2026-02-15T06:18:00+09:00
+description: Plan debug-gated TLS key logging callback support in session engine config
+type: plan
+===
+Motivation
+- `_task.md` API constraints require a debug-only key logging callback gated explicitly.
+- Current session config has no key log callback hook.
+
+Scope
+- Add optional key log callback to session config with explicit `enable_debug_keylog` gate.
+- Emit key log line when application traffic secret is derived.
+- Add tests verifying callback invocation when enabled and suppression when disabled.
+
+Design
+- Callback signature takes static label and secret bytes.
+- Hook only in debug builds and only when `enable_debug_keylog == true`.
+- Keep callback opt-in and side-effect isolated from protocol state logic.
+
+Risks/Perf Impact
+- No impact unless enabled.
+- Must avoid accidental enablement in production defaults.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Remove callback fields and hook if API surface needs redesign.
+
+Commit Plan
+- `MINOR: tls13: add debug-gated keylog callback hook`
+===
+timestamp: 2026-02-15T06:21:00+09:00
+description: Add debug-gated key logging callback hook to session configuration
+type: code change
+===
+Decisions + Rationale
+- Added explicit debug keylog gate in session config with optional callback and userdata.
+- Emitted keylog callback on client application traffic secret derivation transition.
+- Enforced debug-build-only emission and default-disabled behavior to avoid accidental production leakage.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - Added `KeyLogCallback` type
+  - Added config fields: `enable_debug_keylog`, `keylog_callback`, `keylog_userdata`
+  - Added `emitDebugKeyLog` and call-site after connected transition secret derivation
+  - Added enabled/disabled behavior tests.
+
+Risks/Perf Notes
+- No callback invocation unless explicitly enabled.
+- Emission is gated on `builtin.mode == .Debug` for explicit debug-only semantics.
+===
+timestamp: 2026-02-15T06:22:00+09:00
+description: Validate debug keylog callback gating behavior
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 74/74 tests passed including keylog enabled/disabled gating tests.
+- Full test target passed.

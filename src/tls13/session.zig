@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const alerts = @import("alerts.zig");
 const early_data = @import("early_data.zig");
 const handshake = @import("handshake.zig");
@@ -16,11 +17,16 @@ pub const default_signature_algorithms = [_]u16{
     0x0807, // ed25519
 };
 
+pub const KeyLogCallback = *const fn (label: []const u8, secret: []const u8, userdata: usize) void;
+
 pub const Config = struct {
     role: state.Role,
     suite: keyschedule.CipherSuite,
     early_data: EarlyDataConfig = .{},
     allowed_signature_algorithms: []const u16 = &default_signature_algorithms,
+    enable_debug_keylog: bool = false,
+    keylog_callback: ?KeyLogCallback = null,
+    keylog_userdata: usize = 0,
 };
 
 pub const EarlyDataConfig = struct {
@@ -218,6 +224,7 @@ pub const Engine = struct {
                     if (prev_state != .connected and self.machine.state == .connected) {
                         self.metrics.connected_transitions += 1;
                         self.latest_secret = self.deriveApplicationTrafficSecret();
+                        self.emitDebugKeyLog("CLIENT_TRAFFIC_SECRET_0");
                     }
                     cursor = frame.rest;
                 }
@@ -296,6 +303,17 @@ pub const Engine = struct {
                 break :blk .{ .sha384 = keyschedule.deriveLabel(.tls_aes_256_gcm_sha384, secret, "c ap traffic", &digest, 48) };
             },
         };
+    }
+
+    fn emitDebugKeyLog(self: *Engine, label: []const u8) void {
+        if (builtin.mode != .Debug) return;
+        if (!self.config.enable_debug_keylog) return;
+        const cb = self.config.keylog_callback orelse return;
+        const secret = self.latest_secret orelse return;
+        switch (secret) {
+            .sha256 => |s| cb(label, s[0..], self.config.keylog_userdata),
+            .sha384 => |s| cb(label, s[0..], self.config.keylog_userdata),
+        }
     }
 
     fn clearEarlyDataTicket(self: *Engine) void {
@@ -426,6 +444,71 @@ test "clear early data ticket zeroes and clears pointer" {
     try std.testing.expect(engine.early_data_ticket != null);
     engine.clearEarlyDataTicket();
     try std.testing.expect(engine.early_data_ticket == null);
+}
+
+test "debug keylog callback fires when enabled in debug mode" {
+    const Tracker = struct {
+        called: bool = false,
+        label_ok: bool = false,
+        len: usize = 0,
+    };
+    const Hooks = struct {
+        fn onKeyLog(label: []const u8, secret: []const u8, userdata: usize) void {
+            const tracker: *Tracker = @as(*Tracker, @ptrFromInt(userdata));
+            tracker.called = true;
+            tracker.label_ok = std.mem.eql(u8, label, "CLIENT_TRAFFIC_SECRET_0");
+            tracker.len = secret.len;
+        }
+    };
+
+    var tracker = Tracker{};
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+        .enable_debug_keylog = true,
+        .keylog_callback = Hooks.onKeyLog,
+        .keylog_userdata = @intFromPtr(&tracker),
+    });
+    defer engine.deinit();
+
+    _ = try engine.ingestRecord(&serverHelloRecord());
+    _ = try engine.ingestRecord(&encryptedExtensionsRecord());
+    _ = try engine.ingestRecord(&finishedRecord());
+
+    if (builtin.mode == .Debug) {
+        try std.testing.expect(tracker.called);
+        try std.testing.expect(tracker.label_ok);
+        try std.testing.expectEqual(@as(usize, 32), tracker.len);
+    } else {
+        try std.testing.expect(!tracker.called);
+    }
+}
+
+test "debug keylog callback is suppressed when disabled" {
+    const Tracker = struct {
+        called: bool = false,
+    };
+    const Hooks = struct {
+        fn onKeyLog(_: []const u8, _: []const u8, userdata: usize) void {
+            const tracker: *Tracker = @as(*Tracker, @ptrFromInt(userdata));
+            tracker.called = true;
+        }
+    };
+
+    var tracker = Tracker{};
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+        .enable_debug_keylog = false,
+        .keylog_callback = Hooks.onKeyLog,
+        .keylog_userdata = @intFromPtr(&tracker),
+    });
+    defer engine.deinit();
+
+    _ = try engine.ingestRecord(&serverHelloRecord());
+    _ = try engine.ingestRecord(&encryptedExtensionsRecord());
+    _ = try engine.ingestRecord(&finishedRecord());
+    try std.testing.expect(!tracker.called);
 }
 
 fn validatePskOfferExtensions(extensions: []const messages.Extension) EngineError!void {
