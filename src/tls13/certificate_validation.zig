@@ -44,6 +44,7 @@ pub const ValidationError = error{
     UnsupportedChainValidation,
     InvalidChain,
     ChainTooLong,
+    LeafMustNotBeCa,
     IntermediateNotCa,
     IntermediateMissingKeyCertSign,
     PathLenExceeded,
@@ -82,6 +83,7 @@ pub fn validateServerChain(chain: []const CertificateView) ValidationError!void 
     if (chain.len > max_chain_depth) return error.ChainTooLong;
 
     const leaf = chain[0];
+    if (leaf.is_ca) return error.LeafMustNotBeCa;
     try validateLeafServerUsage(leaf);
     try validateCaPathAndNameConstraints(chain);
 }
@@ -91,6 +93,7 @@ pub fn validateClientChain(chain: []const CertificateView) ValidationError!void 
     if (chain.len > max_chain_depth) return error.ChainTooLong;
 
     const leaf = chain[0];
+    if (leaf.is_ca) return error.LeafMustNotBeCa;
     try validateLeafClientUsage(leaf);
     try validateCaPathAndNameConstraints(chain);
 }
@@ -239,6 +242,24 @@ test "server chain rejects non-ca intermediate" {
     };
 
     try std.testing.expectError(error.IntermediateNotCa, validateServerChain(&chain));
+}
+
+test "server chain rejects ca-marked leaf" {
+    const chain = [_]CertificateView{
+        .{
+            .dns_name = "example.com",
+            .is_ca = true,
+            .key_usage = .{ .digital_signature = true },
+            .ext_key_usages = &.{.server_auth},
+        },
+        .{
+            .dns_name = "Root CA",
+            .is_ca = true,
+            .key_usage = .{ .key_cert_sign = true },
+        },
+    };
+
+    try std.testing.expectError(error.LeafMustNotBeCa, validateServerChain(&chain));
 }
 
 test "server chain rejects ca without keyCertSign usage" {
@@ -404,6 +425,24 @@ test "client chain rejects missing client auth eku" {
     };
 
     try std.testing.expectError(error.LeafMissingClientAuthEku, validateClientChain(&chain));
+}
+
+test "client chain rejects ca-marked leaf" {
+    const chain = [_]CertificateView{
+        .{
+            .dns_name = "",
+            .is_ca = true,
+            .key_usage = .{ .digital_signature = true },
+            .ext_key_usages = &.{.client_auth},
+        },
+        .{
+            .dns_name = "Client Issuer",
+            .is_ca = true,
+            .key_usage = .{ .key_cert_sign = true },
+        },
+    };
+
+    try std.testing.expectError(error.LeafMustNotBeCa, validateClientChain(&chain));
 }
 
 test "client chain rejects missing digital signature usage" {

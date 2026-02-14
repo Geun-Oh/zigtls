@@ -3417,3 +3417,1326 @@ Observed Results
   - `client rejects server hello with configured cipher suite mismatch`
   - `server rejects client hello without configured cipher suite offer`
 - Full test target passed.
+===
+timestamp: 2026-02-15T02:05:00+09:00
+description: Plan BoGo summary category-level pass/fail accounting and critical gate visibility
+type: plan
+===
+Motivation
+- `_task.md` 8.2 requires BoGo pass/fail tracking by category plus critical-failure gating.
+- Current `bogo_summary.py` reports aggregate status and suite split only, lacking explicit category breakdown.
+
+Scope
+- Add deterministic category classification for BoGo test names.
+- Emit category-level counters (`pass/fail/skip/...`) in summary output.
+- Extend self-test to validate category accounting and critical-failure counting consistency.
+
+Design
+- Introduce ordered category patterns and a classifier helper.
+- Accumulate `categories: {category -> status counter}` during summarization.
+- Keep existing critical-pattern gate behavior unchanged for compatibility.
+
+Risks/Perf Impact
+- Regex matching cost per test case is minor and offline-only.
+- Category heuristics may need later tuning as BoGo naming evolves.
+
+Test Plan (commands)
+- `python3 scripts/interop/bogo_summary.py --self-test`
+- `zig build test`
+
+Rollback
+- Revert category classifier and return to suite-only summary shape.
+
+Commit Plan
+- `MINOR: interop: add bogo category status accounting`
+===
+timestamp: 2026-02-15T02:09:00+09:00
+description: Add BoGo category-level status accounting in summary tool
+type: code change
+===
+Decisions + Rationale
+- Added deterministic name-based category classifier to satisfy BoGo pass/fail tracking by category.
+- Kept existing critical-failure pattern gate unchanged to avoid breaking current CI gate semantics.
+- Extended summary payload with `categories` map while preserving existing keys for backward compatibility.
+
+Files/Functions Touched
+- `scripts/interop/bogo_summary.py`
+  - Added `CATEGORY_PATTERNS`
+  - Added `classify_test_category`
+  - Added category counter aggregation and output serialization
+  - Expanded `self_test` with category assertions.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-BOGO-001` wording to reflect category-level summary.
+
+Risks/Perf Notes
+- Adds regex matching per test entry in offline summary path only.
+- Category mapping is heuristic and may require updates for new BoGo naming conventions.
+===
+timestamp: 2026-02-15T02:10:00+09:00
+description: Validate BoGo category summary changes
+type: test
+===
+Commands Executed
+- `python3 scripts/interop/bogo_summary.py --self-test`
+- `zig build test`
+
+Observed Results
+- BoGo summary self-test passed with category counters and critical-failure assertions.
+- Full Zig test target passed.
+===
+timestamp: 2026-02-15T02:15:00+09:00
+description: Plan downgrade marker coverage expansion for both TLS1.2 and TLS1.1 sentinels
+type: plan
+===
+Motivation
+- `_task.md` and hardening checklist require robust downgrade protection validation.
+- Current session tests explicitly cover only `DOWNGRD\x01` marker case.
+
+Scope
+- Add explicit negative test for `DOWNGRD\x00` marker rejection on client ServerHello path.
+- Keep runtime logic unchanged if existing implementation already handles both markers.
+- Update RFC matrix test coverage wording to reflect dual-marker validation.
+
+Design
+- Add dedicated fixture helper that injects `DOWNGRD\x00` into ServerHello.random tail.
+- Add regression test expecting `error.DowngradeDetected`.
+
+Risks/Perf Impact
+- Test-only change path; no runtime overhead expected.
+- Low risk since it validates existing behavior.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Revert added test/fixture if compatibility vectors require temporary relaxation.
+
+Commit Plan
+- `MINOR: tls13: cover tls11 downgrade marker rejection`
+===
+timestamp: 2026-02-15T02:18:00+09:00
+description: Add explicit TLS1.1 downgrade sentinel regression coverage
+type: code change
+===
+Decisions + Rationale
+- Added dedicated fixture and regression test for `DOWNGRD\x00` marker to validate both RFC downgrade sentinels.
+- Runtime logic remained unchanged because existing implementation already checks both markers; this change locks behavior with tests.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - Added `serverHelloRecordWithLegacyDowngradeMarker`
+  - Added `client rejects server hello with legacy downgrade marker` test.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-SEC-001` test coverage text to list both marker variants.
+
+Risks/Perf Notes
+- Test/documentation only change; no runtime or hot-path impact.
+===
+timestamp: 2026-02-15T02:19:00+09:00
+description: Validate downgrade marker coverage expansion
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 80/80 tests passed including TLS1.1 downgrade sentinel rejection case.
+- Full test target passed.
+===
+timestamp: 2026-02-15T02:24:00+09:00
+description: Plan fuzz regression corpus category coverage and downgrade vector seed expansion
+type: plan
+===
+Motivation
+- `_task.md` requires regression corpus governance and sustained replay coverage.
+- Current corpus/replay flow has minimal seed coverage and does not assert per-target corpus presence.
+
+Scope
+- Add representative regression seed files under `record/`, `handshake/`, and `session/`.
+- Add session downgrade marker corpus vectors (`DOWNGRD\x01`, `DOWNGRD\x00`) for negative-path retention.
+- Update replay script to report per-target counts and fail when required target corpus buckets are empty.
+
+Design
+- Keep replay harness transport-agnostic and lightweight; maintain existing readability check approach.
+- Track top-level corpus bucket counts (`record`, `handshake`, `session`) during replay.
+- Extend script self-test fixture generation to satisfy new required bucket checks.
+
+Risks/Perf Impact
+- Script-level checks only; negligible runtime overhead.
+- New strictness may fail CI if corpus layout regresses, which is intended.
+
+Test Plan (commands)
+- `bash scripts/fuzz/replay_corpus.sh --self-test`
+- `bash scripts/fuzz/replay_corpus.sh --skip-baseline`
+- `zig build test`
+
+Rollback
+- Revert bucket-presence enforcement and keep best-effort replay only.
+
+Commit Plan
+- `MINOR: fuzz: enforce corpus bucket coverage and add downgrade seeds`
+===
+timestamp: 2026-02-15T02:28:00+09:00
+description: Enforce required fuzz corpus buckets and add downgrade regression seeds
+type: code change
+===
+Decisions + Rationale
+- Strengthened corpus replay governance by requiring non-empty `record/`, `handshake/`, and `session/` buckets.
+- Added deterministic regression seeds for record/header truncation coverage and session downgrade marker vectors.
+- Added explicit corpus inventory in README to keep baseline seed intent auditable.
+
+Files/Functions Touched
+- `scripts/fuzz/replay_corpus.sh`
+  - Added bucket counters and required-bucket enforcement.
+  - Added bucket count summary output.
+  - Expanded self-test fixture setup to include all required buckets.
+- `tests/fuzz/corpus/README.md`
+  - Documented current baseline seed files and intent.
+- Added corpus files:
+  - `tests/fuzz/corpus/record/invalid-legacy-version.bin`
+  - `tests/fuzz/corpus/handshake/truncated-serverhello.bin`
+  - `tests/fuzz/corpus/session/downgrade-tls12-marker.bin`
+  - `tests/fuzz/corpus/session/downgrade-tls11-marker.bin`
+
+Risks/Perf Notes
+- Script strictness increases; replay now fails if corpus layout regresses.
+- Replay remains lightweight and I/O-bound.
+===
+timestamp: 2026-02-15T02:29:00+09:00
+description: Validate fuzz corpus bucket enforcement and seed replay
+type: test
+===
+Commands Executed
+- `bash scripts/fuzz/replay_corpus.sh --self-test`
+- `bash scripts/fuzz/replay_corpus.sh --skip-baseline`
+- `zig build test`
+
+Observed Results
+- Replay script self-test passed.
+- Project corpus replay passed with bucket counts: `record=1 handshake=1 session=3`.
+- Full Zig test target passed.
+===
+timestamp: 2026-02-15T02:36:00+09:00
+description: Plan hello validation hardening for supported_versions semantics and null compression constraints
+type: plan
+===
+Motivation
+- `_task.md` requires strict parser/extension legality and correct TLS 1.3 hello behavior.
+- Current hello checks verify extension presence but not semantic validity of supported_versions/compression fields.
+
+Scope
+- ServerHello/HRR validation: require `supported_versions` extension payload to be exactly TLS 1.3 (`0x0304`).
+- ServerHello validation: require legacy compression method to be `0x00`.
+- ClientHello validation: require compression methods vector to include `0x00` and supported_versions list to contain TLS 1.3.
+- Add explicit error classifications and negative tests.
+
+Design
+- Reuse extension lookup helper and add small payload parsers for supported_versions (CH/SH forms).
+- Extend `requireClientHelloExtensions`, `requireServerHelloExtensions`, and `requireHrrExtensions` with semantic checks.
+
+Risks/Perf Impact
+- Adds small O(n) scans on hello-only path.
+- Tightens rejection behavior and may fail previously accepted malformed vectors.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Revert semantic checks if temporary interop vectors require relaxed acceptance.
+
+Commit Plan
+- `MINOR: tls13: harden hello version and compression validation`
+===
+timestamp: 2026-02-15T02:40:00+09:00
+description: Harden hello validation with supported_versions semantics and null-compression checks
+type: code change
+===
+Decisions + Rationale
+- Added semantic checks for `supported_versions` in both ServerHello/HRR and ClientHello flows.
+- Added explicit null-compression validation for ServerHello (`compression_method == 0`) and ClientHello (`compression_methods` contains 0).
+- Introduced dedicated error types to keep failures distinguishable from structural decode failures.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - `EngineError`: added `InvalidSupportedVersionExtension`, `InvalidCompressionMethod`
+  - `validateHandshakeBody`: added server-side compression check and updated client_hello validation call shape
+  - `requireClientHelloExtensions`: now validates supported_versions list and null compression presence
+  - `requireServerHelloExtensions` / `requireHrrExtensions`: now validate TLS1.3 selected version payload
+  - Added helpers: `containsNullCompressionMethod`, `serverHelloSupportedVersionIsTls13`, `clientHelloSupportedVersionsContainTls13`
+  - Added fixtures/tests for invalid version/compression on client/server/HRR paths.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-HS-001B` wording to include supported_versions/compression semantic checks.
+
+Risks/Perf Notes
+- Adds hello-path-only checks with small linear scans.
+- Tightens malformed hello rejection behavior by design.
+===
+timestamp: 2026-02-15T02:41:00+09:00
+description: Validate hello semantic hardening changes
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 85/85 tests passed, including new invalid-version and invalid-compression negative paths.
+- Full test target passed.
+===
+timestamp: 2026-02-15T02:48:00+09:00
+description: Plan engine error to TLS alert classification helper for fail-closed integration
+type: plan
+===
+Motivation
+- `_task.md` requires alert behavior aligned with TLS 1.3 semantics and fail-closed handling on invalid transitions/inputs.
+- Current engine returns typed errors but lacks a reusable mapping utility to derive outbound fatal alert intent.
+
+Scope
+- Add public helper in `session` to map `EngineError`/parse/transition errors to `alerts.Alert` descriptions.
+- Cover key classes: decode/path parsing, missing extensions, illegal transitions, protocol version/unsupported, and internal fallback.
+- Add unit tests for representative mappings.
+
+Design
+- Implement table-style `switch` over `anyerror` with conservative fallback to `internal_error`.
+- Keep helper transport-agnostic and side-effect free for Sans-I/O integration.
+
+Risks/Perf Impact
+- No hot-path impact unless caller opts to use helper.
+- Mapping choices are policy-sensitive; conservative fatal fallback minimizes under-reporting.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Remove helper and tests if mapping policy diverges.
+
+Commit Plan
+- `MINOR: tls13: add engine error alert classification helper`
+===
+timestamp: 2026-02-15T02:52:00+09:00
+description: Add Engine error to TLS fatal alert classification helper
+type: code change
+===
+Decisions + Rationale
+- Added a transport-agnostic helper to classify engine/parse/transition errors into TLS fatal alerts.
+- Chosen mappings prioritize protocol-safe failure signals: missing_extension, protocol_version, record_overflow, illegal_parameter, decode_error, handshake_failure, and internal fallback.
+- Added representative mapping tests plus unknown-error fallback coverage.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - Added `classifyErrorAlert(err: anyerror) alerts.Alert`
+  - Added unit tests:
+    - `classify error alert maps representative protocol errors`
+    - `classify error alert falls back to internal_error for unknown errors`.
+- `docs/security-hardening-checklist.md`
+  - Marked engine error-to-alert classification helper as done.
+
+Risks/Perf Notes
+- Helper is side-effect free and only used when caller invokes it.
+- Mapping policy is conservative; unknown errors map to `internal_error`.
+===
+timestamp: 2026-02-15T02:53:00+09:00
+description: Validate engine error alert classification helper changes
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 87/87 tests passed including new alert-classification tests.
+- Full test target passed.
+===
+timestamp: 2026-02-15T03:05:00+09:00
+description: Plan deterministic trust store fallback by enforcing absolute custom bundle paths
+type: plan
+===
+Motivation
+- `_task.md` 5.3 requires explicit and testable trust-anchor loading strategy with deterministic fallback behavior.
+- Current API names imply absolute paths but do not enforce this at runtime.
+
+Scope
+- Reject non-absolute paths in trust-store file/dir fallback loaders.
+- Keep `loadWithStrategy` ordering unchanged (system -> pem_file -> pem_dir), but ensure custom fallback path validity is deterministic.
+- Add unit tests for relative path rejection and existing strategy behavior continuity.
+
+Design
+- Introduce `PathNotAbsolute` in trust store error surface.
+- Guard `loadPemFileAbsolute` and `loadPemDirAbsolute` via `std.fs.path.isAbsolute`.
+
+Risks/Perf Impact
+- Negligible path-check overhead on setup path only.
+- Tightened validation may reject previously accepted relative-path calls.
+
+Test Plan (commands)
+- `zig test src/tls13/trust_store.zig`
+- `zig build test`
+
+Rollback
+- Remove absolute-path checks if compatibility requires relative path support.
+
+Commit Plan
+- `MINOR: trust: enforce absolute fallback bundle paths`
+===
+timestamp: 2026-02-15T03:09:00+09:00
+description: Enforce absolute-path validation for trust store custom fallback bundles
+type: code change
+===
+Decisions + Rationale
+- Added runtime absolute-path checks to trust store custom PEM file/dir loaders.
+- Kept strategy ordering unchanged while making fallback input validation explicit and deterministic.
+- Added dedicated relative-path rejection tests for both file and directory loaders.
+
+Files/Functions Touched
+- `src/tls13/trust_store.zig`
+  - Added `TrustStoreError.PathNotAbsolute`
+  - `loadPemFileAbsolute`: reject non-absolute input path
+  - `loadPemDirAbsolute`: reject non-absolute input path
+  - Added tests: relative file/dir path rejection.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-TRUST-001` row text to include absolute-path fallback validation coverage.
+
+Risks/Perf Notes
+- Adds constant-time path predicate check during trust-store setup only.
+- May reject callers that relied on relative custom paths.
+===
+timestamp: 2026-02-15T03:10:00+09:00
+description: Validate trust store absolute-path fallback enforcement
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/trust_store.zig`
+- `zig test src/tls13/trust_store.zig`
+- `zig build test`
+
+Observed Results
+- `trust_store.zig`: 6/6 tests passed including relative-path rejection cases.
+- Full test target passed.
+===
+timestamp: 2026-02-15T03:19:00+09:00
+description: Plan fail-closed ingest wrapper exposing fatal alert intent on Engine errors
+type: plan
+===
+Motivation
+- `_task.md` requires alert behavior aligned with TLS 1.3 semantics and centralized illegal-transition handling.
+- Engine currently returns errors; caller must separately map alert intent.
+
+Scope
+- Add wrapper API that calls `ingestRecord` and, on failure, returns fatal alert intent plus original error.
+- Keep existing `ingestRecord` signature/behavior unchanged for compatibility.
+- Mark state as closing on fatal wrapper path.
+- Add tests for success and failure paths.
+
+Design
+- Introduce `FatalFailure` and `IngestWithAlertOutcome` union types.
+- Implement `ingestRecordWithAlertIntent` using existing `classifyErrorAlert` mapping.
+
+Risks/Perf Impact
+- Wrapper adds optional branch only when used by caller.
+- Existing call sites unaffected.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Remove wrapper and keep explicit external error-to-alert mapping.
+
+Commit Plan
+- `MINOR: tls13: add ingest wrapper with fatal alert intent`
+===
+timestamp: 2026-02-15T03:22:00+09:00
+description: Add ingest wrapper that exposes fatal alert intent on Engine failures
+type: code change
+===
+Decisions + Rationale
+- Added wrapper API for callers that need fail-closed outcome with explicit fatal alert intent.
+- Preserved `ingestRecord` behavior/signature to avoid breaking existing integration points.
+- Wrapper reuses existing `classifyErrorAlert` mapping and marks engine state as closing on fatal branch.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - Added `FatalFailure` and `IngestWithAlertOutcome`
+  - Added `ingestRecordWithAlertIntent`
+  - Added tests:
+    - `ingest wrapper returns ok outcome on success`
+    - `ingest wrapper returns fatal alert intent on decode failure`.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-ALERT-001` to reference session-level failure mapping/wrapper coverage.
+
+Risks/Perf Notes
+- No behavior change for existing `ingestRecord` callers.
+- Wrapper marks state closing on error path by design.
+===
+timestamp: 2026-02-15T03:23:00+09:00
+description: Validate ingest wrapper with fatal alert intent changes
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 89/89 tests passed including ingest wrapper success/failure paths.
+- Full test target passed.
+===
+timestamp: 2026-02-15T03:30:00+09:00
+description: Plan executable-driven corpus replay to replace placeholder readability checks
+type: plan
+===
+Motivation
+- `_task.md` requires replaying regression corpus inputs, not only tracking file presence.
+- Current `replay_corpus.sh` checks readability (`wc -c`) and does not exercise parser/session logic per corpus bucket.
+
+Scope
+- Add a small replay executable that dispatches corpus files to target paths (`record`, `handshake`, `session`).
+- Wire build target for replay executable.
+- Update replay script to invoke executable per corpus file bucket.
+- Keep required-bucket enforcement introduced earlier.
+
+Design
+- `tools/corpus_replay.zig`: CLI `corpus-replay <record|handshake|session> <file>`.
+- Parsing/ingest errors are treated as acceptable outcomes; process fails only for usage/I/O/internal failures.
+- `scripts/fuzz/replay_corpus.sh` invokes built binary while scanning corpus.
+
+Risks/Perf Impact
+- Replay runtime increases proportionally with corpus size; acceptable for CI gate.
+- Introduces extra build artifact target.
+
+Test Plan (commands)
+- `zig build corpus-replay`
+- `bash scripts/fuzz/replay_corpus.sh --self-test`
+- `bash scripts/fuzz/replay_corpus.sh --skip-baseline`
+- `zig build test`
+
+Rollback
+- Revert script/tool wiring and return to readability-only replay.
+
+Commit Plan
+- `MINOR: fuzz: execute corpus inputs through parser/session replay tool`
+===
+timestamp: 2026-02-15T03:36:00+09:00
+description: Add executable-driven corpus replay and wire it into replay script/build graph
+type: code change
+===
+Decisions + Rationale
+- Replaced readability-only replay behavior with executable dispatch into actual parser/session ingest paths.
+- Added dedicated `corpus-replay` build target and install step so script can deterministically use `zig-out/bin/corpus-replay`.
+- Added build-integrated tests for replay executable by wiring tool tests into `zig build test` graph.
+
+Files/Functions Touched
+- `tools/corpus_replay.zig`
+  - Added CLI: `corpus-replay <record|handshake|session> <file>`
+  - Dispatches corpus bytes to `record.parseRecord`, `handshake.parseOne`, `session.Engine.ingestRecord`
+  - Added unit tests for mode parsing and malformed-input no-crash replay behavior.
+- `build.zig`
+  - Added `corpus-replay` executable and top-level step.
+  - Added install step dependency for `corpus-replay` target.
+  - Added test artifact wiring for `tools/corpus_replay.zig` into global `test` step.
+- `scripts/fuzz/replay_corpus.sh`
+  - Builds `corpus-replay` binary and executes it per corpus file bucket.
+  - Skips non-bucket files while preserving required bucket enforcement.
+- `tests/fuzz/corpus/README.md`
+  - Documented executable-driven replay behavior.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-FUZZ-001` row to include replay executable coverage.
+
+Risks/Perf Notes
+- Replay gate runtime increases with corpus size due per-file executable invocation.
+- Behavior is more faithful to real parser/session paths and improves regression confidence.
+===
+timestamp: 2026-02-15T03:37:00+09:00
+description: Validate executable-driven corpus replay integration
+type: test
+===
+Commands Executed
+- `zig fmt tools/corpus_replay.zig`
+- `zig build corpus-replay`
+- `bash scripts/fuzz/replay_corpus.sh --self-test`
+- `bash scripts/fuzz/replay_corpus.sh --skip-baseline`
+- `zig build test`
+
+Observed Results
+- `corpus-replay` binary built and installed to `zig-out/bin/corpus-replay`.
+- Replay script self-test passed.
+- Corpus replay passed with bucket counts: `record=1 handshake=1 session=3`.
+- Full test target passed, including replay tool tests via build graph wiring.
+===
+timestamp: 2026-02-15T03:52:00+09:00
+description: Plan suite-accurate key schedule wiring in session traffic secret derivation/ratchet
+type: plan
+===
+Motivation
+- `_task.md` requires key schedule correctness across mandatory suites.
+- Current session traffic-secret derivation/ratchet paths use SHA-family defaults that may not match configured suite semantics for all SHA256-based suites.
+
+Scope
+- Make application traffic secret derivation and keyupdate ratchet use `Config.suite` explicitly.
+- Add integration tests for CHACHA20 and AES256 handshake paths ensuring connected transition and secret variant correctness.
+- Update RFC matrix KS coverage wording to reflect suite-accurate integration checks.
+
+Design
+- Refactor `deriveApplicationTrafficSecret` and `ratchetLatestTrafficSecret` to switch on configured suite.
+- Reuse existing transcript hashes but bind HKDF suite parameter to config-selected suite.
+- Add suite-specific fixtures for ServerHello cipher suite and Finished length where needed.
+
+Risks/Perf Impact
+- No extra asymptotic cost; only suite dispatch logic in handshake/keyupdate path.
+- Tightened suite binding may surface latent fixture assumptions.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Revert suite dispatch changes and suite-specific tests.
+
+Commit Plan
+- `MINOR: tls13: bind traffic secret derivation to configured suite`
+===
+timestamp: 2026-02-15T03:56:00+09:00
+description: Bind session traffic secret derivation and keyupdate ratchet to configured suite
+type: code change
+===
+Decisions + Rationale
+- Refactored session traffic-secret derivation to dispatch on `Config.suite` instead of SHA-family default constants.
+- Refactored keyupdate ratchet path to use suite-accurate HKDF label derivation for both SHA256 suites and SHA384 suite.
+- Added suite-specific handshake integration tests for CHACHA20 and AES256 to lock end-to-end behavior.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - `deriveApplicationTrafficSecret`: suite-bound derivation dispatch
+  - `ratchetLatestTrafficSecret`: suite-bound ratchet dispatch
+  - Added `finishedRecordSha384` fixture
+  - Added tests:
+    - `client side handshake flow reaches connected for chacha20 suite`
+    - `client side handshake flow reaches connected for aes256 suite`.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-KS-001` wording to reflect suite-bound integration coverage.
+
+Risks/Perf Notes
+- No additional asymptotic cost; only explicit suite dispatch.
+- Uses `unreachable` on impossible transcript/suite mismatches to keep invariants strict.
+===
+timestamp: 2026-02-15T03:57:00+09:00
+description: Validate suite-bound traffic secret derivation changes
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 91/91 tests passed including CHACHA20/AES256 handshake integration cases.
+- Full test target passed.
+===
+timestamp: 2026-02-15T04:02:00+09:00
+description: Plan CI gate expansion for deterministic fuzz/replay governance
+type: plan
+===
+Motivation
+- `_task.md` and hardening checklist require continuous fuzz/regression replay governance in CI.
+- Current CI runs `zig build test` but does not explicitly execute corpus replay script gate.
+
+Scope
+- Add CI steps for:
+  - fuzz replay script syntax check
+  - corpus replay self-test
+  - corpus replay execution on repository corpus (`--skip-baseline`)
+- Keep existing verify steps intact.
+- Update hardening checklist status for continuous replay in CI.
+
+Design
+- Extend `.github/workflows/ci.yml` `verify` job with explicit replay steps.
+- Reuse existing script behavior and `corpus-replay` build wiring.
+
+Risks/Perf Impact
+- CI runtime increases modestly due replay execution.
+- Strengthens regression detection by failing when corpus gate regresses.
+
+Test Plan (commands)
+- `bash -n scripts/fuzz/replay_corpus.sh`
+- `bash scripts/fuzz/replay_corpus.sh --self-test`
+- `bash scripts/fuzz/replay_corpus.sh --skip-baseline`
+- `zig build test`
+
+Rollback
+- Remove added CI steps and keep baseline test-only CI.
+
+Commit Plan
+- `MINOR: ci: add regression corpus replay gate`
+===
+timestamp: 2026-02-15T04:08:00+09:00
+description: Add explicit CI regression corpus replay gate steps
+type: code change
+===
+Decisions + Rationale
+- Expanded CI verify job with explicit fuzz replay syntax/self-test/full-corpus replay steps.
+- Preserved existing baseline test and BoGo summary checks.
+- Promoted hardening checklist entry for continuous fuzz/replay CI gate to done.
+
+Files/Functions Touched
+- `.github/workflows/ci.yml`
+  - Added `Fuzz Replay Script Lint`
+  - Added `Fuzz Replay Self Test`
+  - Added `Regression Corpus Replay` (`--skip-baseline`).
+- `docs/security-hardening-checklist.md`
+  - Marked continuous fuzz/replay CI gate as done with file references.
+
+Risks/Perf Notes
+- CI duration increases slightly due replay steps.
+- CI now fails on corpus replay regressions by design.
+===
+timestamp: 2026-02-15T04:09:00+09:00
+description: Validate CI regression replay gate changes
+type: test
+===
+Commands Executed
+- `bash -n scripts/fuzz/replay_corpus.sh`
+- `bash scripts/fuzz/replay_corpus.sh --self-test`
+- `bash scripts/fuzz/replay_corpus.sh --skip-baseline`
+- `zig build test`
+
+Observed Results
+- Replay script lint passed.
+- Replay self-test passed.
+- Corpus replay passed with bucket counts: `record=1 handshake=1 session=3`.
+- Full test target passed.
+
+Notes
+- Initial sandboxed replay-script runs encountered local Zig toolchain access permission errors; reran replay commands with escalated permissions and observed passing results.
+===
+timestamp: 2026-02-15T04:15:00+09:00
+description: Plan local interop matrix harness with deterministic summary and self-test
+type: plan
+===
+Motivation
+- `_task.md` interop gate requires matrix execution/closure across OpenSSL, rustls, NSS.
+- Current repository has per-target scripts but no unified matrix runner for deterministic pass/fail summary.
+
+Scope
+- Add `scripts/interop/matrix_local.sh` to run local interop scripts and print consolidated result summary.
+- Add `--self-test` mode using local stubs to validate summary/failure propagation without external dependencies.
+- Integrate syntax check into release preflight.
+
+Design
+- Runner iterates fixed targets (`openssl`, `rustls`, `nss`) and executes corresponding scripts.
+- Track per-target status and exit non-zero if any target fails.
+- Self-test creates temporary stub scripts to exercise mixed pass/fail behavior.
+
+Risks/Perf Impact
+- No protocol-path runtime impact.
+- Local run depends on per-target prerequisites; summary layer remains deterministic.
+
+Test Plan (commands)
+- `bash -n scripts/interop/matrix_local.sh`
+- `bash scripts/interop/matrix_local.sh --self-test`
+- `bash scripts/release/preflight.sh --dry-run`
+- `zig build test`
+
+Rollback
+- Remove matrix harness and keep per-script execution.
+
+Commit Plan
+- `MINOR: interop: add local matrix harness script`
+===
+timestamp: 2026-02-15T04:24:00+09:00
+description: Add consolidated local interop matrix harness and preflight integration
+type: code change
+===
+Decisions + Rationale
+- Added unified local interop matrix runner to execute OpenSSL/rustls/NSS scripts with deterministic summary and failure propagation.
+- Added self-test mode using temporary pass/fail stubs to validate matrix aggregation logic without external dependencies.
+- Integrated matrix script lint/self-test into release preflight checks.
+
+Files/Functions Touched
+- `scripts/interop/matrix_local.sh`
+  - New harness script with `run_target`, `run_matrix`, and `--self-test` support.
+- `scripts/release/preflight.sh`
+  - Added matrix harness syntax check and self-test invocations.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-INTOP-001` row to include matrix runner coverage.
+- `docs/release-runbook.md`
+  - Updated interop gate instructions to call matrix harness.
+
+Risks/Perf Notes
+- No protocol runtime impact; script-only tooling change.
+- Local interop run still depends on environment prerequisites of underlying target scripts.
+===
+timestamp: 2026-02-15T04:25:00+09:00
+description: Validate interop matrix harness and preflight wiring
+type: test
+===
+Commands Executed
+- `bash -n scripts/interop/matrix_local.sh`
+- `bash scripts/interop/matrix_local.sh --self-test`
+- `bash scripts/release/preflight.sh --dry-run`
+- `zig build test`
+
+Observed Results
+- Matrix harness syntax check passed.
+- Matrix harness self-test passed.
+- Release preflight dry-run includes matrix harness checks and completed.
+- Full test target passed.
+
+Notes
+- Initial self-test implementation surfaced exit-code propagation bug in harness; fixed in `run_target` and revalidated.
+===
+timestamp: 2026-02-15T04:35:00+09:00
+description: Add node/epoch-scoped anti-replay policy for early data admission
+type: code change
+===
+Decisions + Rationale
+- Added replay-scope keying (`node_id`, `epoch`) to isolate anti-replay domains across distributed nodes and rotation epochs.
+- Session early-data admission now uses scoped replay checks derived from typed config fields.
+- Added cross-node/epoch session test proving duplicate tickets can be accepted in distinct replay scopes while preserving duplicate rejection inside a scope.
+
+Files/Functions Touched
+- `src/tls13/early_data.zig`
+  - Added `ReplayScopeKey`.
+  - Added `seenOrInsertScoped` and scoped hash index path.
+  - Added scoped replay isolation unit test.
+- `src/tls13/session.zig`
+  - `EarlyDataConfig`: added `replay_node_id`, `replay_epoch`.
+  - Early-data ingest path now calls `replay_filter.seenOrInsertScoped`.
+  - Added test: `early data replay scope isolates duplicate tickets across node and epoch`.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-0RTT-002` wording and test coverage text for scoped replay policy.
+- `docs/security-hardening-checklist.md`
+  - Promoted distributed anti-replay policy entry to done.
+
+Risks/Perf Notes
+- Adds fixed-size scope hashing in early-data replay check path.
+- Requires explicit node/epoch policy configuration for distributed deployments.
+===
+timestamp: 2026-02-15T04:36:00+09:00
+description: Validate scoped anti-replay policy changes
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/early_data.zig src/tls13/session.zig`
+- `zig test src/tls13/early_data.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `early_data.zig`: 3/3 tests passed including scoped replay isolation case.
+- `session.zig`: 93/93 tests passed including distributed replay-scope integration case.
+- Full test target passed.
+===
+timestamp: 2026-02-15T04:52:00+09:00
+description: Plan PSK binder length validation against configured suite digest length
+type: plan
+===
+Motivation
+- `_task.md` requires robust PSK binder verification under TLS 1.3 resumption paths.
+- Current session checks enforce PSK binder vector structure and count parity, but not binder length conformance to suite hash length.
+
+Scope
+- Add binder length validation against `keyschedule.digestLen(config.suite)`.
+- Keep existing missing-modes, malformed-vector, and count-mismatch checks.
+- Add dedicated regression test for invalid binder length.
+- Update RFC matrix PSK row wording/test coverage.
+
+Design
+- Extend PSK binder parser output with binder-length conformance flag.
+- Validate in order: malformed -> count mismatch -> binder length mismatch.
+- Add `InvalidPskBinderLength` error classification.
+
+Risks/Perf Impact
+- Adds constant-time checks over binder entries in ClientHello path only.
+- Tightens malformed PSK rejection behavior by design.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Revert binder-length check while retaining structural/count checks.
+
+Commit Plan
+- `MINOR: tls13: validate psk binder length against suite hash`
+===
+timestamp: 2026-02-15T04:57:00+09:00
+description: Enforce PSK binder length against configured suite hash length
+type: code change
+===
+Decisions + Rationale
+- Added binder-length conformance validation to PSK offer checks using configured suite digest length.
+- Preserved validation ordering to keep existing malformed/count-mismatch semantics stable.
+- Added dedicated negative fixture/test for binder-length mismatch.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - `EngineError`: added `InvalidPskBinderLength`
+  - `validatePskOfferExtensions`: now receives suite and enforces binder length
+  - `parsePskBinderVector`: extended to report binder length conformance
+  - Added fixture/test: `clientHelloRecordWithPskInvalidBinderLength` and `server rejects psk binder length mismatch for configured suite`.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-PSK-001` requirement and test coverage wording to include binder-length validation.
+
+Risks/Perf Notes
+- Adds binder length checks over existing binder vector scan only.
+- Tightens PSK rejection behavior for malformed binder lengths.
+===
+timestamp: 2026-02-15T04:58:00+09:00
+description: Validate PSK binder length verification changes
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 94/94 tests passed including PSK binder-length mismatch rejection case.
+- Full test target passed.
+
+Notes
+- Initial compile attempt failed due stale `_ = self` discard in `requireClientHelloExtensions` after `self` became used; removed and revalidated.
+===
+timestamp: 2026-02-15T05:12:00+09:00
+description: Plan RFC5280 CA keyCertSign enforcement in chain validation
+type: plan
+===
+Motivation
+- `_task.md` 5.1 requires Key Usage enforcement in certificate validation contexts.
+- Current chain checks enforce CA bit and path length but do not explicitly require `keyCertSign` for CA issuers.
+
+Scope
+- Require `key_usage.key_cert_sign` for all CA chain elements (`chain[1..]`).
+- Add dedicated validation error and regression tests.
+- Update RFC matrix CERT row wording to reflect CA key usage enforcement.
+
+Design
+- Extend `ValidationError` with CA key usage violation error.
+- Enforce check inside existing `validateCaPathAndNameConstraints` loop.
+
+Risks/Perf Impact
+- O(n) boolean checks over CA chain entries; negligible.
+- Tightens rejection behavior for previously accepted malformed chains.
+
+Test Plan (commands)
+- `zig test src/tls13/certificate_validation.zig`
+- `zig build test`
+
+Rollback
+- Revert CA keyCertSign check if compatibility vectors require temporary leniency.
+
+Commit Plan
+- `MINOR: cert: enforce keyCertSign on CA chain elements`
+===
+timestamp: 2026-02-15T05:03:00+09:00
+description: Enforce CA keyCertSign usage across issuer chain validation
+type: code change
+===
+Decisions + Rationale
+- Added CA key usage enforcement (`keyCertSign`) for issuer chain elements to align with RFC5280 key-usage constraints.
+- Added dedicated validation error and regression test for missing keyCertSign.
+- Updated name-constraints test fixtures to include explicit CA keyCertSign usage, matching tightened policy.
+
+Files/Functions Touched
+- `src/tls13/certificate_validation.zig`
+  - `ValidationError`: added `IntermediateMissingKeyCertSign`
+  - `validateCaPathAndNameConstraints`: requires `cert.key_usage.key_cert_sign` for `chain[1..]`
+  - Added test: `server chain rejects ca without keyCertSign usage`
+  - Updated constrained-CA fixtures to include `key_cert_sign = true`.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-CERT-001` wording/test coverage with CA key usage enforcement.
+- `docs/security-hardening-checklist.md`
+  - Added done item for CA issuer key usage enforcement.
+
+Risks/Perf Notes
+- Adds simple CA-chain boolean check; negligible overhead.
+- Tightens rejection behavior for chains missing CA keyCertSign usage.
+===
+timestamp: 2026-02-15T05:04:00+09:00
+description: Validate CA keyCertSign enforcement changes
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/certificate_validation.zig`
+- `zig test src/tls13/certificate_validation.zig`
+- `zig build test`
+
+Observed Results
+- `certificate_validation.zig`: 22/22 tests passed including missing-keyCertSign rejection case.
+- Full test target passed.
+
+Notes
+- Initial test run surfaced existing constrained-CA fixtures without `key_cert_sign`; fixtures were updated to align with tightened policy.
+===
+timestamp: 2026-02-15T05:20:00+09:00
+description: Plan strict system trust-anchor load error policy for deterministic fallback behavior
+type: plan
+===
+Motivation
+- `_task.md` trust store requirements call for explicit and testable loading strategy.
+- Current strategy silently swallows system-store load errors, which obscures fallback intent under failure conditions.
+
+Scope
+- Add strategy flag to control whether system load errors should fail immediately or allow fallback.
+- Add deterministic unit tests for strict vs non-strict behavior using injected failing system-loader hook.
+- Update RFC matrix trust row wording to include strict-system-error policy handling.
+
+Design
+- Extend `LoadStrategy` with `fail_on_system_error` (default false).
+- Refactor strategy execution through internal helper that accepts a system loader callback for testability.
+- Default public path keeps existing behavior unless strict flag is enabled.
+
+Risks/Perf Impact
+- No hot-path impact; trust-store init/setup only.
+- Default behavior unchanged; strict mode opt-in.
+
+Test Plan (commands)
+- `zig test src/tls13/trust_store.zig`
+- `zig build test`
+
+Rollback
+- Remove strict flag and internal loader hook, revert to always-swallow system errors.
+
+Commit Plan
+- `MINOR: trust: add strict system load error policy`
+===
+timestamp: 2026-02-15T05:24:00+09:00
+description: Add strict/lenient system trust-store load error policy controls
+type: code change
+===
+Decisions + Rationale
+- Added opt-in strict policy for system trust-anchor load errors to make fallback behavior explicit and testable.
+- Kept default behavior lenient (`fail_on_system_error = false`) for compatibility.
+- Introduced internal strategy helper with injectable system loader callback to enable deterministic error-path tests.
+
+Files/Functions Touched
+- `src/tls13/trust_store.zig`
+  - `LoadStrategy`: added `fail_on_system_error`
+  - `loadWithStrategy`: now delegates to internal helper with default system loader
+  - Added `loadWithStrategyInternal` and `defaultSystemLoader`
+  - Added tests for strict error propagation and lenient fallback continuation.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-TRUST-001` wording/test coverage to include strict system-load behavior.
+
+Risks/Perf Notes
+- No runtime hot-path impact; setup-time policy check only.
+- Strict mode can surface system-store issues early by design.
+===
+timestamp: 2026-02-15T05:25:00+09:00
+description: Validate strict system trust-store policy changes
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/trust_store.zig`
+- `zig test src/tls13/trust_store.zig`
+- `zig build test`
+
+Observed Results
+- `trust_store.zig`: 8/8 tests passed including strict/lenient system-load error policy tests.
+- Full test target passed.
+===
+timestamp: 2026-02-15T05:39:00+09:00
+description: Plan defensive certificate chain length ceiling enforcement
+type: plan
+===
+Motivation
+- `_task.md` security hardening requires defensive limits for certificate handling.
+- Current certificate validation accepts arbitrary chain slice length without explicit ceiling.
+
+Scope
+- Add explicit certificate chain depth ceiling constant and fail-closed error when exceeded.
+- Enforce in both server/client chain validation paths.
+- Add regression tests for over-limit server/client chains.
+- Update RFC matrix CERT row wording to include chain depth limit enforcement.
+
+Design
+- Introduce `max_chain_depth` constant in certificate validation module.
+- Add `ChainTooLong` in `ValidationError`.
+- Guard at beginning of `validateServerChain` and `validateClientChain`.
+
+Risks/Perf Impact
+- Constant-time length check only; negligible overhead.
+- Tightens acceptance for oversized chains.
+
+Test Plan (commands)
+- `zig test src/tls13/certificate_validation.zig`
+- `zig build test`
+
+Rollback
+- Revert chain length guard and tests.
+
+Commit Plan
+- `MINOR: cert: enforce certificate chain depth ceiling`
+===
+timestamp: 2026-02-15T05:29:00+09:00
+description: Enforce defensive certificate chain depth ceiling in validation paths
+type: code change
+===
+Decisions + Rationale
+- Added explicit chain depth ceiling to prevent oversized chain acceptance and align with defensive-limit goals.
+- Enforced guard in both server and client chain validation entry points.
+- Added dedicated over-limit regression tests for both validation contexts.
+
+Files/Functions Touched
+- `src/tls13/certificate_validation.zig`
+  - Added `max_chain_depth` constant
+  - Added `ValidationError.ChainTooLong`
+  - `validateServerChain` / `validateClientChain`: reject when `chain.len > max_chain_depth`
+  - Added tests: `server chain rejects excessive chain depth`, `client chain rejects excessive chain depth`.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-CERT-001` wording and coverage text to include chain-depth limit.
+
+Risks/Perf Notes
+- Adds constant-time length check at chain-validation entry.
+- Tightens rejection behavior for oversized certificate chains.
+===
+timestamp: 2026-02-15T05:30:00+09:00
+description: Validate certificate chain depth ceiling changes
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/certificate_validation.zig`
+- `zig test src/tls13/certificate_validation.zig`
+- `zig build test`
+
+Observed Results
+- `certificate_validation.zig`: 24/24 tests passed including chain-depth limit rejections.
+- Full test target passed.
+===
+timestamp: 2026-02-15T06:05:00+09:00
+description: Plan role-aware debug keylog labels for client/server traffic secrets
+type: plan
+===
+Motivation
+- `_task.md` requires clear, auditable API behavior and key schedule handling.
+- Current debug keylog emissions always use `CLIENT_TRAFFIC_SECRET_*` labels, even in server role.
+
+Scope
+- Emit role-appropriate labels:
+  - client: `CLIENT_TRAFFIC_SECRET_0`, `CLIENT_TRAFFIC_SECRET_N`
+  - server: `SERVER_TRAFFIC_SECRET_0`, `SERVER_TRAFFIC_SECRET_N`
+- Add tests for server-role label behavior while preserving existing client tests.
+
+Design
+- Add small helper(s) to select keylog labels from `config.role`.
+- Use helper in connected transition and keyupdate ratchet paths.
+
+Risks/Perf Impact
+- No meaningful runtime impact; string selection only in debug+keylog enabled path.
+- Improves observability correctness.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Revert role-aware labeling helper and tests.
+
+Commit Plan
+- `MINOR: tls13: emit role-aware debug keylog labels`
+===
+timestamp: 2026-02-15T06:10:00+09:00
+description: Emit role-aware debug keylog labels for client/server traffic secrets
+type: code change
+===
+Decisions + Rationale
+- Replaced hardcoded client keylog labels with role-aware label selection helpers.
+- Initial and post-ratchet keylog emissions now use client/server-specific labels based on `Config.role`.
+- Added server-role debug keylog regression test to validate label correctness.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - Connected transition keylog emission now uses `keylogInitialLabel`
+  - Keyupdate ratchet keylog emission now uses `keylogNextLabel`
+  - Added helpers `keylogInitialLabel`, `keylogNextLabel`
+  - Added test `debug keylog callback uses server label in server role`.
+
+Risks/Perf Notes
+- Debug-only/keylog-enabled path only; negligible runtime impact.
+- Improves observability correctness for server-role sessions.
+===
+timestamp: 2026-02-15T06:11:00+09:00
+description: Validate role-aware debug keylog label changes
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 95/95 tests passed including server-role keylog label assertion.
+- Full test target passed.
+===
+timestamp: 2026-02-15T06:28:00+09:00
+description: Plan OCSP policy boundary and error-branch test expansion
+type: plan
+===
+Motivation
+- `_task.md` requires robust revocation/freshness behavior with configurable hard/soft-fail policy.
+- OCSP logic includes multiple branches (unknown status, thisUpdate bounds, nextUpdate window) with limited explicit boundary tests.
+
+Scope
+- Add missing OCSP tests for:
+  - unknown status hard/soft behavior
+  - future thisUpdate hard/soft behavior
+  - invalid nextUpdate window
+  - stale-response boundary acceptance/rejection around clock skew
+- Keep runtime logic unchanged if tests confirm current behavior.
+- Update RFC matrix CERT-002 coverage wording to reflect expanded boundary tests.
+
+Design
+- Extend `src/tls13/ocsp.zig` test suite with deterministic timestamp vectors.
+- Assert both hard-fail errors and soft-fail fallbacks where policy allows.
+
+Risks/Perf Impact
+- Test-only expansion; no runtime impact expected.
+
+Test Plan (commands)
+- `zig test src/tls13/ocsp.zig`
+- `zig test src/tls13/certificate_validation.zig`
+- `zig build test`
+
+Rollback
+- Revert added tests if policy behavior intentionally changes.
+
+Commit Plan
+- `MINOR: tls13: expand ocsp freshness boundary tests`
+===
+timestamp: 2026-02-15T06:36:00+09:00
+description: Expand OCSP hard/soft-fail boundary coverage tests
+type: code change
+===
+Decisions + Rationale
+- Expanded OCSP test matrix to cover previously untested policy branches and boundary conditions.
+- Kept runtime OCSP logic unchanged; tests validate existing branch semantics.
+- Added stale boundary acceptance/rejection checks around max clock skew.
+
+Files/Functions Touched
+- `src/tls13/ocsp.zig`
+  - Added tests:
+    - unknown status hard/soft behavior
+    - future this_update hard/soft behavior
+    - invalid next_update window hard/soft behavior
+    - stale response skew-boundary behavior.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-CERT-002` coverage wording to reflect branch/boundary coverage.
+
+Risks/Perf Notes
+- Test-only changes; no runtime/perf impact.
+===
+timestamp: 2026-02-15T06:37:00+09:00
+description: Validate OCSP boundary test expansion
+ type: test
+===
+Commands Executed
+- `zig fmt src/tls13/ocsp.zig`
+- `zig test src/tls13/ocsp.zig`
+- `zig test src/tls13/certificate_validation.zig`
+- `zig build test`
+
+Observed Results
+- `ocsp.zig`: 9/9 tests passed with expanded boundary/branch coverage.
+- `certificate_validation.zig`: 28/28 tests passed with integrated OCSP policy checks.
+- Full test target passed.
+
+Notes
+- Initial future-this_update test vector hit earlier guard branches; adjusted timestamps to isolate intended branch and revalidated.
+===
+timestamp: 2026-02-15T06:38:00+09:00
+description: Correct metadata key formatting for OCSP boundary validation log entry
+type: test
+===
+Supersedes
+- Previous entry at `2026-02-15T06:37:00+09:00` had malformed metadata key (` type`).
+
+Commands Executed
+- `zig fmt src/tls13/ocsp.zig`
+- `zig test src/tls13/ocsp.zig`
+- `zig test src/tls13/certificate_validation.zig`
+- `zig build test`
+
+Observed Results
+- `ocsp.zig`: 9/9 tests passed with expanded boundary/branch coverage.
+- `certificate_validation.zig`: 28/28 tests passed with integrated OCSP policy checks.
+- Full test target passed.
+
+Notes
+- Initial future-this_update test vector hit earlier guard branches; adjusted timestamps to isolate intended branch and revalidated.
+===
+timestamp: 2026-02-15T06:50:00+09:00
+description: Plan leaf basic-constraints enforcement to reject CA-marked end-entity certificates
+type: plan
+===
+Motivation
+- `_task.md` certificate requirements include Basic Constraints enforcement.
+- Current chain validation enforces CA properties for issuers but does not reject CA-marked leaf certificates.
+
+Scope
+- Reject server/client leaf certificates when `is_ca == true`.
+- Add explicit validation error classification and regression tests for both server/client paths.
+- Update RFC matrix CERT row wording to include leaf basic-constraints guard.
+
+Design
+- Add `LeafMustNotBeCa` in `ValidationError`.
+- Guard in `validateServerChain` and `validateClientChain` before usage checks.
+
+Risks/Perf Impact
+- Single boolean check in chain entry path; negligible.
+- Tightens acceptance behavior for malformed/over-permissive end-entity certs.
+
+Test Plan (commands)
+- `zig test src/tls13/certificate_validation.zig`
+- `zig build test`
+
+Rollback
+- Remove leaf CA guard and new tests.
+
+Commit Plan
+- `MINOR: cert: reject CA-marked leaf certificates`
+===
+timestamp: 2026-02-15T07:05:00+09:00
+description: Enforce leaf basic-constraints policy by rejecting CA-marked end-entity certs
+type: code change
+===
+Decisions + Rationale
+- Enforced Basic Constraints at leaf position for both server/client chain validators.
+- Leaf certificates marked as CA (`is_ca = true`) are now rejected early with explicit classification.
+- This closes a policy gap where issuer CA checks existed but leaf CA role was not rejected.
+
+Files/Functions Touched
+- `src/tls13/certificate_validation.zig`
+  - `ValidationError`: added `LeafMustNotBeCa`.
+  - `validateServerChain`: reject leaf where `is_ca` is true.
+  - `validateClientChain`: reject leaf where `is_ca` is true.
+  - Added regression tests:
+    - `server chain rejects ca-marked leaf`
+    - `client chain rejects ca-marked leaf`
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-CERT-001` wording/coverage to include leaf-CA rejection.
+
+Risks/Perf Notes
+- Adds a single boolean check in chain entry path; no measurable hot-path impact expected.
+===
+timestamp: 2026-02-15T07:06:00+09:00
+description: Validate leaf CA rejection policy with targeted and full test runs
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/certificate_validation.zig`
+- `zig test src/tls13/certificate_validation.zig`
+- `zig build test`
+
+Observed Results
+- `certificate_validation.zig`: 30/30 tests passed.
+- `zig build test`: passed.
+
+Notes
+- New regression coverage confirms CA-marked leaf rejection on both server and client chain validation paths.
