@@ -475,3 +475,70 @@ Commands Executed
 Observed Results
 - Session tests passed with new truncation and clean-close EOF cases.
 - Full package test build passed.
+===
+timestamp: 2026-02-14T22:49:00+09:00
+description: Expand certificate validation core logic (basic constraints and EKU/KU checks)
+type: plan
+===
+Motivation
+- Current certificate validation module only had hostname check plus placeholder chain validation.
+- `_task.md` requires RFC 5280-critical checks as a first-class requirement.
+
+Scope
+- Add parser-independent certificate validation primitives for:
+  - basic constraints path rules
+  - key usage / extended key usage checks for server auth context
+- Keep full ASN.1/X.509 parsing out of scope for this unit.
+- Add unit tests for positive/negative chain and usage-policy cases.
+
+Design
+- Introduce lightweight `CertificateView` data model for validation logic tests.
+- Expose deterministic validation functions independent of transport and parser.
+
+Risks/Perf Impact
+- No hot-path impact yet; this is validation core logic for later parser integration.
+
+Test Plan (commands)
+- `zig test src/tls13/certificate_validation.zig`
+- `zig build test`
+
+Rollback
+- Revert certificate validation logic expansion if API shape conflicts with planned parser integration.
+
+Commit Plan
+- `MEDIUM: tls13: add rfc5280 validation core checks`
+===
+timestamp: 2026-02-14T22:52:00+09:00
+description: Expand certificate validation with basic constraints and server usage checks
+type: code change
+===
+Decisions + Rationale
+- Replaced minimal placeholder-only validation logic with parser-independent RFC5280 core checks.
+- Added `CertificateView` model and validation routines for:
+  - intermediate CA requirement
+  - path length constraint enforcement
+  - leaf digital-signature key usage and server-auth EKU presence
+- Kept ASN.1 parsing and full trust-chain building out of this unit to maintain feature-unit scope.
+
+Files/Functions Touched
+- `src/tls13/certificate_validation.zig`
+  - Added `ExtendedKeyUsage`, `KeyUsage`, `CertificateView`.
+  - Added `validateServerChain` and `validateLeafServerUsage`.
+  - Added test cases for happy path and failure cases.
+
+Risks/Perf Notes
+- Logic currently assumes caller provides parsed certificate views; parser integration remains a later step.
+
+===
+timestamp: 2026-02-14T22:52:30+09:00
+description: Validate certificate validation logic expansion
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/certificate_validation.zig`
+- `zig test src/tls13/certificate_validation.zig`
+- `zig build test`
+
+Observed Results
+- Certificate validation unit tests passed.
+- Full package tests passed.
