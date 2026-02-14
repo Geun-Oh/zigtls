@@ -13,9 +13,28 @@ CRITICAL_PATTERNS = (
     re.compile(r"Resumption", re.IGNORECASE),
 )
 
+CATEGORY_PATTERNS = (
+    ("hrr", re.compile(r"HRR|HelloRetryRequest", re.IGNORECASE)),
+    ("keyupdate", re.compile(r"KeyUpdate", re.IGNORECASE)),
+    ("early_data", re.compile(r"EarlyData|0-RTT", re.IGNORECASE)),
+    ("resumption", re.compile(r"Resumption|SessionTicket|PSK", re.IGNORECASE)),
+    ("certificate", re.compile(r"Certificate|OCSP|X509", re.IGNORECASE)),
+    ("record", re.compile(r"Record", re.IGNORECASE)),
+    ("alert", re.compile(r"Alert|close_notify", re.IGNORECASE)),
+    ("tls13", re.compile(r"TLS13", re.IGNORECASE)),
+    ("basic", re.compile(r"Basic", re.IGNORECASE)),
+)
+
 
 def is_critical_test(name: str) -> bool:
     return any(p.search(name) for p in CRITICAL_PATTERNS)
+
+
+def classify_test_category(name: str) -> str:
+    for category, pattern in CATEGORY_PATTERNS:
+        if pattern.search(name):
+            return category
+    return "misc"
 
 
 def summarize(path: str) -> dict:
@@ -25,14 +44,17 @@ def summarize(path: str) -> dict:
     tests = data.get("tests", []) if isinstance(data, dict) else []
     status_counter = Counter()
     suite_counter = defaultdict(Counter)
+    category_counter = defaultdict(Counter)
     critical_failures = []
 
     for t in tests:
         name = t.get("name", "unknown")
         status = t.get("result", "unknown").lower()
         suite = name.split("/")[0] if "/" in name else "misc"
+        category = classify_test_category(name)
         status_counter[status] += 1
         suite_counter[suite][status] += 1
+        category_counter[category][status] += 1
         if status == "fail" and is_critical_test(name):
             critical_failures.append(name)
 
@@ -40,6 +62,7 @@ def summarize(path: str) -> dict:
         "total": sum(status_counter.values()),
         "status": dict(status_counter),
         "suites": {k: dict(v) for k, v in sorted(suite_counter.items())},
+        "categories": {k: dict(v) for k, v in sorted(category_counter.items())},
         "critical_failures": sorted(critical_failures),
         "critical_failure_count": len(critical_failures),
     }
@@ -50,6 +73,7 @@ def self_test() -> int:
         "tests": [
             {"name": "TLS13/BasicHandshake", "result": "PASS"},
             {"name": "TLS13/HRR", "result": "FAIL"},
+            {"name": "TLS13/KeyUpdate", "result": "PASS"},
             {"name": "Record/Overflow", "result": "PASS"},
         ]
     }
@@ -58,9 +82,12 @@ def self_test() -> int:
         json.dump(sample, f)
 
     out = summarize(path)
-    assert out["total"] == 3
-    assert out["status"].get("pass") == 2
+    assert out["total"] == 4
+    assert out["status"].get("pass") == 3
     assert out["status"].get("fail") == 1
+    assert out["categories"]["hrr"]["fail"] == 1
+    assert out["categories"]["keyupdate"]["pass"] == 1
+    assert out["categories"]["record"]["pass"] == 1
     assert out["critical_failure_count"] == 1
     assert out["critical_failures"][0] == "TLS13/HRR"
     return 0
