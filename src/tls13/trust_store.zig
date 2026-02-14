@@ -1,5 +1,9 @@
 const std = @import("std");
 
+pub const TrustStoreError = error{
+    PathNotAbsolute,
+};
+
 pub const LoadStrategy = struct {
     prefer_system: bool = true,
     fallback_pem_file_absolute: ?[]const u8 = null,
@@ -28,11 +32,13 @@ pub const TrustStore = struct {
         try self.bundle.rescan(allocator);
     }
 
-    pub fn loadPemFileAbsolute(self: *TrustStore, allocator: std.mem.Allocator, abs_path: []const u8) !void {
+    pub fn loadPemFileAbsolute(self: *TrustStore, allocator: std.mem.Allocator, abs_path: []const u8) (TrustStoreError || anyerror)!void {
+        if (!std.fs.path.isAbsolute(abs_path)) return error.PathNotAbsolute;
         try self.bundle.addCertsFromFilePathAbsolute(allocator, abs_path);
     }
 
-    pub fn loadPemDirAbsolute(self: *TrustStore, allocator: std.mem.Allocator, abs_path: []const u8) !void {
+    pub fn loadPemDirAbsolute(self: *TrustStore, allocator: std.mem.Allocator, abs_path: []const u8) (TrustStoreError || anyerror)!void {
+        if (!std.fs.path.isAbsolute(abs_path)) return error.PathNotAbsolute;
         try self.bundle.addCertsFromDirPathAbsolute(allocator, abs_path);
     }
 
@@ -96,4 +102,18 @@ test "strategy propagates fallback file errors deterministically" {
         .prefer_system = false,
         .fallback_pem_file_absolute = "/__zigtls_missing_ca_bundle__.pem",
     }));
+}
+
+test "pem file loader rejects relative path" {
+    var store = TrustStore.initEmpty();
+    defer store.deinit(std.testing.allocator);
+
+    try std.testing.expectError(error.PathNotAbsolute, store.loadPemFileAbsolute(std.testing.allocator, "relative/ca.pem"));
+}
+
+test "pem dir loader rejects relative path" {
+    var store = TrustStore.initEmpty();
+    defer store.deinit(std.testing.allocator);
+
+    try std.testing.expectError(error.PathNotAbsolute, store.loadPemDirAbsolute(std.testing.allocator, "relative/certs"));
 }
