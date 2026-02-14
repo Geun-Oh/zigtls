@@ -102,6 +102,7 @@ pub const EngineError = error{
     InvalidEncryptedExtensionsMessage,
     InvalidNewSessionTicketMessage,
     MissingRequiredClientHelloExtension,
+    InvalidServerNameExtension,
     MissingRequiredServerHelloExtension,
     MissingRequiredHrrExtension,
     UnexpectedServerHelloExtension,
@@ -591,7 +592,8 @@ pub const Engine = struct {
     fn requireClientHelloExtensions(self: Engine, compression_methods: []const u8, extensions: []const messages.Extension) EngineError!void {
         const supported_versions = findExtensionData(extensions, ext_supported_versions) orelse return error.MissingRequiredClientHelloExtension;
         if (!clientHelloSupportedVersionsContainTls13(supported_versions)) return error.InvalidSupportedVersionExtension;
-        if (!hasExtension(extensions, ext_server_name)) return error.MissingRequiredClientHelloExtension;
+        const server_name = findExtensionData(extensions, ext_server_name) orelse return error.MissingRequiredClientHelloExtension;
+        try validateClientHelloServerNameExtension(server_name);
         if (!hasExtension(extensions, ext_supported_groups)) return error.MissingRequiredClientHelloExtension;
         if (!hasExtension(extensions, ext_key_share)) return error.MissingRequiredClientHelloExtension;
         if (!hasExtension(extensions, ext_alpn)) return error.MissingRequiredClientHelloExtension;
@@ -636,6 +638,7 @@ pub fn classifyErrorAlert(err: anyerror) alerts.Alert {
         error.DowngradeDetected,
         error.ConfiguredCipherSuiteMismatch,
         error.InvalidSupportedVersionExtension,
+        error.InvalidServerNameExtension,
         error.UnexpectedServerHelloExtension,
         error.UnexpectedHrrExtension,
         error.InvalidCompressionMethod,
@@ -930,6 +933,18 @@ fn findExtensionData(extensions: []const messages.Extension, extension_type: u16
     return null;
 }
 
+fn validateClientHelloServerNameExtension(data: []const u8) EngineError!void {
+    if (data.len < 5) return error.InvalidServerNameExtension;
+    const list_len = readU16(data[0..2]);
+    if (list_len == 0) return error.InvalidServerNameExtension;
+    if (list_len + 2 != data.len) return error.InvalidServerNameExtension;
+    if (data[2] != 0x00) return error.InvalidServerNameExtension; // host_name
+
+    const host_len = readU16(data[3..5]);
+    if (host_len == 0) return error.InvalidServerNameExtension;
+    if (5 + host_len != data.len) return error.InvalidServerNameExtension;
+}
+
 const PskCounts = struct {
     identity_count: usize,
     binder_count: usize,
@@ -1221,6 +1236,12 @@ fn clientHelloRecordWithoutAlpn() [101]u8 {
     var frame = clientHelloRecord();
     frame[92] = 0xff;
     frame[93] = 0xfe;
+    return frame;
+}
+
+fn clientHelloRecordWithEmptyServerName() [101]u8 {
+    var frame = clientHelloRecord();
+    frame[60] = 0x00; // host_len low byte (was 0x05)
     return frame;
 }
 
@@ -2210,6 +2231,17 @@ test "server rejects client hello without required extension" {
 
     const rec = clientHelloRecordWithoutAlpn();
     try std.testing.expectError(error.MissingRequiredClientHelloExtension, engine.ingestRecord(&rec));
+}
+
+test "server rejects client hello with invalid server_name payload" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const rec = clientHelloRecordWithEmptyServerName();
+    try std.testing.expectError(error.InvalidServerNameExtension, engine.ingestRecord(&rec));
 }
 
 test "server rejects client hello without tls13 supported version" {

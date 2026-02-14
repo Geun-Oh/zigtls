@@ -5633,3 +5633,78 @@ Observed Results
 
 Notes
 - Regression confirms `*.com` style broad wildcard SAN patterns are rejected.
+===
+timestamp: 2026-02-15T10:35:00+09:00
+description: Plan strict ClientHello SNI extension payload validation in hello checks
+type: plan
+===
+Motivation
+- Hello validation currently checks required extension presence only.
+- `server_name` (SNI) extension payload shape is not validated at session policy layer, leaving malformed-but-present extension cases accepted.
+
+Scope
+- Validate ClientHello `server_name` extension payload structure and non-empty host name requirement.
+- Add explicit error classification and regression tests for malformed/empty SNI payload.
+- Update RFC matrix HS-001B wording/coverage.
+
+Design
+- Add `InvalidServerNameExtension` to `EngineError`.
+- In `requireClientHelloExtensions`, parse `server_name` extension data and enforce:
+  - valid vector length consistency
+  - host_name entry type (`0`)
+  - non-empty hostname
+  - exact length alignment
+- Map new error to `illegal_parameter` alert class.
+
+Risks/Perf Impact
+- Small fixed-size parsing in ClientHello validation path; negligible overhead.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Remove SNI payload parser, error type, and added regression tests.
+
+Commit Plan
+- `MINOR: tls13: validate client hello server_name extension payload`
+===
+timestamp: 2026-02-15T10:39:00+09:00
+description: Add strict ClientHello SNI payload validation in session hello checks
+type: code change
+===
+Decisions + Rationale
+- Added payload-level validation for required `server_name` extension to reject malformed-but-present SNI.
+- Kept required-extension presence checks and existing hello constraints intact while tightening extension legality semantics.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - `EngineError`: added `InvalidServerNameExtension`.
+  - `requireClientHelloExtensions`: now validates SNI payload structure.
+  - `classifyErrorAlert`: maps `InvalidServerNameExtension` to `illegal_parameter`.
+  - Added helper `validateClientHelloServerNameExtension`.
+  - Added fixture/test:
+    - `clientHelloRecordWithEmptyServerName`
+    - `server rejects client hello with invalid server_name payload`
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-HS-001B` wording/coverage for invalid-SNI branch.
+
+Risks/Perf Notes
+- Small bounded parsing in ClientHello validation path; negligible overhead.
+- Intentionally rejects malformed SNI payloads that previously could pass presence-only checks.
+===
+timestamp: 2026-02-15T10:40:00+09:00
+description: Validate ClientHello SNI payload hardening with session and full test suites
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 111/111 tests passed.
+- `zig build test`: passed.
+
+Notes
+- Regression confirms malformed SNI payload with empty host length is rejected as `InvalidServerNameExtension`.
