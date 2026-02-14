@@ -42,6 +42,7 @@ pub const ValidationError = error{
     UnsupportedChainValidation,
     InvalidChain,
     IntermediateNotCa,
+    IntermediateMissingKeyCertSign,
     PathLenExceeded,
     NameConstraintsViolation,
     LeafMissingDigitalSignature,
@@ -100,6 +101,7 @@ fn validateCaPathAndNameConstraints(chain: []const CertificateView) ValidationEr
     // `chain[1..]` are intermediates + optional root. Require CA bit for all.
     for (chain[1..], 0..) |cert, idx| {
         if (!cert.is_ca) return error.IntermediateNotCa;
+        if (!cert.key_usage.key_cert_sign) return error.IntermediateMissingKeyCertSign;
 
         if (cert.path_len_constraint) |limit| {
             const below = (chain.len - 2) - idx;
@@ -234,6 +236,24 @@ test "server chain rejects non-ca intermediate" {
     try std.testing.expectError(error.IntermediateNotCa, validateServerChain(&chain));
 }
 
+test "server chain rejects ca without keyCertSign usage" {
+    const chain = [_]CertificateView{
+        .{
+            .dns_name = "example.com",
+            .is_ca = false,
+            .key_usage = .{ .digital_signature = true },
+            .ext_key_usages = &.{.server_auth},
+        },
+        .{
+            .dns_name = "intermediate missing keyCertSign",
+            .is_ca = true,
+            .key_usage = .{},
+        },
+    };
+
+    try std.testing.expectError(error.IntermediateMissingKeyCertSign, validateServerChain(&chain));
+}
+
 test "server chain rejects missing server eku" {
     const chain = [_]CertificateView{
         .{
@@ -258,6 +278,7 @@ test "name constraints allow permitted dns subtree" {
         .{
             .dns_name = "Constrained CA",
             .is_ca = true,
+            .key_usage = .{ .key_cert_sign = true },
             .permitted_dns_suffixes = &.{"example.com"},
         },
     };
@@ -276,6 +297,7 @@ test "name constraints reject dns outside permitted subtree" {
         .{
             .dns_name = "Constrained CA",
             .is_ca = true,
+            .key_usage = .{ .key_cert_sign = true },
             .permitted_dns_suffixes = &.{"example.com"},
         },
     };
@@ -294,6 +316,7 @@ test "name constraints reject excluded dns subtree" {
         .{
             .dns_name = "Constrained CA",
             .is_ca = true,
+            .key_usage = .{ .key_cert_sign = true },
             .permitted_dns_suffixes = &.{"example.com"},
             .excluded_dns_suffixes = &.{"dev.example.com"},
         },
@@ -313,11 +336,13 @@ test "name constraints require match across constrained issuers" {
         .{
             .dns_name = "Intermediate CA",
             .is_ca = true,
+            .key_usage = .{ .key_cert_sign = true },
             .permitted_dns_suffixes = &.{"api.example.com"},
         },
         .{
             .dns_name = "Policy Root",
             .is_ca = true,
+            .key_usage = .{ .key_cert_sign = true },
             .permitted_dns_suffixes = &.{"example.com"},
         },
     };
