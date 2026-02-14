@@ -53,6 +53,8 @@ run_cmd "bash -n scripts/interop/bogo_run.sh"
 run_cmd "bash -n scripts/interop/openssl_local.sh"
 run_cmd "bash -n scripts/interop/rustls_local.sh"
 run_cmd "bash -n scripts/interop/nss_local.sh"
+run_cmd "bash -n scripts/interop/matrix_local.sh"
+run_cmd "bash scripts/interop/matrix_local.sh --self-test"
 run_cmd "bash -n scripts/fuzz/replay_corpus.sh"
 run_cmd "bash scripts/fuzz/replay_corpus.sh --self-test"
 
