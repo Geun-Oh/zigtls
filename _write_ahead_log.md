@@ -4889,3 +4889,84 @@ Observed Results
 
 Notes
 - Regression confirms PSK offers with `psk_ke`-only mode list are rejected with `MissingPskDheKeyExchangeMode`.
+===
+timestamp: 2026-02-15T07:45:00+09:00
+description: Plan ServerHello/HRR extension allowlist validation for strict hello legality checks
+type: plan
+===
+Motivation
+- Hello validation currently enforces required extension presence but does not reject unexpected extension types in ServerHello/HRR.
+- `_task.md` and hardening checklist require strict parser/extension legality behavior on negative paths.
+
+Scope
+- Add explicit allowlist validation for ServerHello and HRR extension sets.
+- Reject unexpected extension types with dedicated error classification.
+- Add regression tests for unexpected extension injection in ServerHello and HRR fixtures.
+- Update RFC matrix wording to reflect extension legality checks.
+
+Design
+- Add `UnexpectedServerHelloExtension` and `UnexpectedHrrExtension` to `EngineError`.
+- In `requireServerHelloExtensions`, allow only `{supported_versions, key_share, pre_shared_key}`.
+- In `requireHrrExtensions`, allow only `{supported_versions, key_share, cookie}`.
+- Map new errors to fatal `illegal_parameter` alert class.
+
+Risks/Perf Impact
+- Small linear scans over tiny extension lists during handshake validation; negligible overhead.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Remove allowlist checks and corresponding regression tests.
+
+Commit Plan
+- `MINOR: tls13: enforce server hello extension allowlists`
+===
+timestamp: 2026-02-15T07:52:00+09:00
+description: Enforce ServerHello/HRR extension allowlists in client hello validation path
+type: code change
+===
+Decisions + Rationale
+- Added extension-type allowlist checks for ServerHello and HRR to reject illegal extension injection early.
+- Preserved existing required-extension checks (`key_share`, `supported_versions`) and updated fixtures so missing-extension tests stay semantically isolated from allowlist violations.
+- Introduced dedicated error classes for clearer policy and alert classification.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - `EngineError`: added `UnexpectedServerHelloExtension`, `UnexpectedHrrExtension`.
+  - Added `ext_cookie` constant for HRR allowlist.
+  - Added helper functions: `requireAllowedExtensions`, `containsU16`.
+  - `requireServerHelloExtensions`: allowlist `{supported_versions, key_share, pre_shared_key}` enforcement.
+  - `requireHrrExtensions`: allowlist `{supported_versions, key_share, cookie}` enforcement.
+  - `classifyErrorAlert`: maps new errors to `illegal_parameter`.
+  - Added fixtures/tests:
+    - `serverHelloRecordWithUnexpectedExtension`
+    - `hrrServerHelloRecordWithUnexpectedExtension`
+    - `client rejects server hello with unexpected extension`
+    - `client rejects hrr with unexpected extension`
+  - Updated missing-key-share fixtures to remain allowlist-legal while exercising missing-required checks.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-HS-001B` and `RFC8446-HS-002` wording/coverage for illegal-extension rejection.
+- `docs/security-hardening-checklist.md`
+  - Updated hello hardening bullet to include ServerHello/HRR allowlist checks.
+
+Risks/Perf Notes
+- Small linear scans on short extension vectors during handshake validation; negligible overhead.
+===
+timestamp: 2026-02-15T07:53:00+09:00
+description: Validate ServerHello/HRR allowlist enforcement with session and full test suites
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- Initial session test run reported 2 failures due to legacy fixtures causing allowlist violations ahead of missing-extension assertions.
+- Adjusted missing-key-share fixtures to use allowlist-legal extension types while omitting `key_share` semantics.
+- Re-ran tests successfully: `session.zig` 100/100 passed; `zig build test` passed.
+
+Notes
+- Added explicit regression tests for unexpected extension rejection on both ServerHello and HRR paths.

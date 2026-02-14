@@ -104,6 +104,8 @@ pub const EngineError = error{
     MissingRequiredClientHelloExtension,
     MissingRequiredServerHelloExtension,
     MissingRequiredHrrExtension,
+    UnexpectedServerHelloExtension,
+    UnexpectedHrrExtension,
     ConfiguredCipherSuiteMismatch,
     InvalidSupportedVersionExtension,
     InvalidCompressionMethod,
@@ -121,6 +123,7 @@ const ext_server_name: u16 = 0x0000;
 const ext_supported_groups: u16 = 0x000a;
 const ext_alpn: u16 = 0x0010;
 const ext_supported_versions: u16 = 0x002b;
+const ext_cookie: u16 = 0x002c;
 const ext_key_share: u16 = 0x0033;
 const ext_pre_shared_key: u16 = 0x0029;
 const ext_psk_key_exchange_modes: u16 = 0x002d;
@@ -504,6 +507,7 @@ pub const Engine = struct {
 
     fn requireServerHelloExtensions(self: Engine, extensions: []const messages.Extension) EngineError!void {
         _ = self;
+        try requireAllowedExtensions(extensions, &.{ ext_supported_versions, ext_key_share, ext_pre_shared_key }, error.UnexpectedServerHelloExtension);
         const supported_versions = findExtensionData(extensions, ext_supported_versions) orelse return error.MissingRequiredServerHelloExtension;
         if (!serverHelloSupportedVersionIsTls13(supported_versions)) return error.InvalidSupportedVersionExtension;
         if (!hasExtension(extensions, ext_key_share)) return error.MissingRequiredServerHelloExtension;
@@ -511,6 +515,7 @@ pub const Engine = struct {
 
     fn requireHrrExtensions(self: Engine, extensions: []const messages.Extension) EngineError!void {
         _ = self;
+        try requireAllowedExtensions(extensions, &.{ ext_supported_versions, ext_key_share, ext_cookie }, error.UnexpectedHrrExtension);
         const supported_versions = findExtensionData(extensions, ext_supported_versions) orelse return error.MissingRequiredHrrExtension;
         if (!serverHelloSupportedVersionIsTls13(supported_versions)) return error.InvalidSupportedVersionExtension;
         if (!hasExtension(extensions, ext_key_share)) return error.MissingRequiredHrrExtension;
@@ -537,6 +542,8 @@ pub fn classifyErrorAlert(err: anyerror) alerts.Alert {
         error.DowngradeDetected,
         error.ConfiguredCipherSuiteMismatch,
         error.InvalidSupportedVersionExtension,
+        error.UnexpectedServerHelloExtension,
+        error.UnexpectedHrrExtension,
         error.InvalidCompressionMethod,
         error.MissingPskKeyExchangeModes,
         error.InvalidPskKeyExchangeModes,
@@ -579,6 +586,23 @@ pub fn classifyErrorAlert(err: anyerror) alerts.Alert {
 fn hasExtension(extensions: []const messages.Extension, extension_type: u16) bool {
     for (extensions) |ext| {
         if (ext.extension_type == extension_type) return true;
+    }
+    return false;
+}
+
+fn requireAllowedExtensions(
+    extensions: []const messages.Extension,
+    allowed: []const u16,
+    comptime unexpected_err: anytype,
+) EngineError!void {
+    for (extensions) |ext| {
+        if (!containsU16(allowed, ext.extension_type)) return unexpected_err;
+    }
+}
+
+fn containsU16(values: []const u16, wanted: u16) bool {
+    for (values) |value| {
+        if (value == wanted) return true;
     }
     return false;
 }
@@ -986,8 +1010,8 @@ fn clientHelloRecord() [101]u8 {
 
 fn serverHelloRecordWithoutKeyShare() [63]u8 {
     var frame = serverHelloRecord();
-    frame[55] = 0xff;
-    frame[56] = 0xfe;
+    frame[55] = 0x00;
+    frame[56] = 0x29;
     return frame;
 }
 
@@ -1008,6 +1032,22 @@ fn serverHelloRecordWithCipherSuite(suite: u16) [63]u8 {
     var frame = serverHelloRecord();
     frame[44] = @intCast((suite >> 8) & 0xff);
     frame[45] = @intCast(suite & 0xff);
+    return frame;
+}
+
+fn serverHelloRecordWithUnexpectedExtension() [67]u8 {
+    var frame: [67]u8 = undefined;
+    const base = serverHelloRecord();
+    @memcpy(frame[0..base.len], base[0..]);
+    std.mem.writeInt(u16, frame[3..5], 62, .big);
+    const hs_len = handshake.writeU24(58);
+    @memcpy(frame[6..9], &hs_len);
+    frame[47] = 0x00;
+    frame[48] = 0x12; // extension bytes: 18
+    frame[63] = 0x00;
+    frame[64] = 0x10; // ALPN not legal in ServerHello
+    frame[65] = 0x00;
+    frame[66] = 0x00;
     return frame;
 }
 
@@ -1243,8 +1283,8 @@ fn hrrServerHelloRecord() [61]u8 {
 
 fn hrrServerHelloRecordWithoutKeyShare() [61]u8 {
     var frame = hrrServerHelloRecord();
-    frame[55] = 0xff;
-    frame[56] = 0xfe;
+    frame[55] = 0x00;
+    frame[56] = 0x2c;
     return frame;
 }
 
@@ -1252,6 +1292,22 @@ fn hrrServerHelloRecordWithBadSupportedVersion() [61]u8 {
     var frame = hrrServerHelloRecord();
     frame[53] = 0x03;
     frame[54] = 0x03;
+    return frame;
+}
+
+fn hrrServerHelloRecordWithUnexpectedExtension() [65]u8 {
+    var frame: [65]u8 = undefined;
+    const base = hrrServerHelloRecord();
+    @memcpy(frame[0..base.len], base[0..]);
+    std.mem.writeInt(u16, frame[3..5], 60, .big);
+    const hs_len = handshake.writeU24(56);
+    @memcpy(frame[6..9], &hs_len);
+    frame[47] = 0x00;
+    frame[48] = 0x10; // extension bytes: 16
+    frame[61] = 0x00;
+    frame[62] = 0x10; // ALPN not legal in HRR
+    frame[63] = 0x00;
+    frame[64] = 0x00;
     return frame;
 }
 
@@ -1517,6 +1573,17 @@ test "client rejects hrr with invalid supported version extension" {
     try std.testing.expectError(error.InvalidSupportedVersionExtension, engine.ingestRecord(&hrr));
 }
 
+test "client rejects hrr with unexpected extension" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const hrr = hrrServerHelloRecordWithUnexpectedExtension();
+    try std.testing.expectError(error.UnexpectedHrrExtension, engine.ingestRecord(&hrr));
+}
+
 test "keyupdate request is surfaced in action" {
     var engine = Engine.init(std.testing.allocator, .{
         .role = .client,
@@ -1761,6 +1828,17 @@ test "client rejects server hello with invalid supported version extension" {
 
     const rec = serverHelloRecordWithBadSupportedVersion();
     try std.testing.expectError(error.InvalidSupportedVersionExtension, engine.ingestRecord(&rec));
+}
+
+test "client rejects server hello with unexpected extension" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const rec = serverHelloRecordWithUnexpectedExtension();
+    try std.testing.expectError(error.UnexpectedServerHelloExtension, engine.ingestRecord(&rec));
 }
 
 test "client rejects server hello with configured cipher suite mismatch" {
