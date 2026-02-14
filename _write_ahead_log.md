@@ -1282,3 +1282,72 @@ Commands Executed
 Observed Results
 - Session tests passed including new KeyUpdate builder parseability test.
 - Full package tests passed.
+===
+timestamp: 2026-02-15T01:08:00+09:00
+description: Add Certificate and CertificateVerify message body decoding and session validation
+type: plan
+===
+Motivation
+- Session ingest now validates hello bodies; certificate-path handshake messages should be validated similarly.
+
+Scope
+- Extend `messages` module with decode support for TLS 1.3 Certificate and CertificateVerify bodies.
+- Wire decode checks into `session.validateHandshakeBody` for `.certificate` and `.certificate_verify`.
+- Add positive/negative tests for codec and session-level rejection behavior.
+
+Design
+- Focus on strict structural validation (length framing and bounds) with parser-independent data views.
+- Keep semantic signature/certificate chain verification as separate layers.
+
+Risks/Perf Impact
+- Additional handshake-path decode overhead only.
+- Certificate body parsing may allocate for entries; acceptable in handshake control path.
+
+Test Plan (commands)
+- `zig test src/tls13/messages.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Revert certificate-body decode wiring if it conflicts with upcoming full handshake integration.
+
+Commit Plan
+- `MINOR: tls13: validate certificate-path handshake message bodies`
+===
+timestamp: 2026-02-15T01:13:00+09:00
+description: Add certificate-path handshake body codecs and session-level validation hooks
+type: code change
+===
+Decisions + Rationale
+- Extended `messages` module with `CertificateMsg.decode` and `CertificateVerifyMsg.decode` for strict structural validation.
+- Integrated certificate-path body validation into `session.validateHandshakeBody` for `.certificate` and `.certificate_verify` message types.
+- Added fixed test frame builders for minimally valid Certificate and CertificateVerify bodies.
+- Added session tests for invalid certificate body rejection, invalid certificate_verify rejection, and valid certificate path progression.
+
+Files/Functions Touched
+- `src/tls13/messages.zig`
+  - Added `CertificateEntry`, `CertificateMsg`, `CertificateVerifyMsg` decoders and tests.
+- `src/tls13/session.zig`
+  - Added `InvalidCertificateMessage` / `InvalidCertificateVerifyMessage` errors.
+  - Added certificate-path body validation in ingest path.
+  - Added certificate/certificate_verify frame helpers and tests.
+
+Risks/Perf Notes
+- Additional decode allocations occur only on certificate-path handshake messages.
+- Semantic checks (signature verification and cert chain policy application) remain layered on top.
+
+===
+timestamp: 2026-02-15T01:13:30+09:00
+description: Validate certificate-path message decoding and session integration
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/messages.zig src/tls13/session.zig`
+- `zig test src/tls13/messages.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- Messages codec tests passed including certificate/certificate_verify decoding.
+- Session tests passed including certificate path positive/negative body-validation cases.
+- Full package tests passed.

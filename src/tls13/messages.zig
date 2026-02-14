@@ -295,6 +295,136 @@ pub fn serverHelloHasHrrRandom(bytes: []const u8) bool {
     return std.mem.eql(u8, bytes[2..34], &hrr_random);
 }
 
+pub const CertificateEntry = struct {
+    cert_data: []u8,
+    extensions: []Extension,
+
+    pub fn deinit(self: *CertificateEntry, allocator: std.mem.Allocator) void {
+        allocator.free(self.cert_data);
+        for (self.extensions) |*ext| ext.deinit(allocator);
+        allocator.free(self.extensions);
+        self.* = undefined;
+    }
+};
+
+pub const CertificateMsg = struct {
+    request_context: []u8,
+    entries: []CertificateEntry,
+
+    pub fn deinit(self: *CertificateMsg, allocator: std.mem.Allocator) void {
+        allocator.free(self.request_context);
+        for (self.entries) |*entry| entry.deinit(allocator);
+        allocator.free(self.entries);
+        self.* = undefined;
+    }
+
+    pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) !CertificateMsg {
+        var i: usize = 0;
+        if (bytes.len < 1 + 3) return error.Truncated;
+
+        const ctx_len = bytes[i];
+        i += 1;
+        if (i + ctx_len > bytes.len) return error.Truncated;
+        const request_context = try allocator.dupe(u8, bytes[i .. i + ctx_len]);
+        errdefer allocator.free(request_context);
+        i += ctx_len;
+
+        const cert_list_len = readU24(bytes[i .. i + 3]);
+        i += 3;
+        if (i + cert_list_len > bytes.len) return error.Truncated;
+        const cert_list_end = i + cert_list_len;
+
+        var entries: std.ArrayList(CertificateEntry) = .empty;
+        errdefer {
+            for (entries.items) |*entry| entry.deinit(allocator);
+            entries.deinit(allocator);
+        }
+
+        while (i < cert_list_end) {
+            if (i + 3 > cert_list_end) return error.Truncated;
+            const cert_len = readU24(bytes[i .. i + 3]);
+            i += 3;
+            if (i + cert_len > cert_list_end) return error.Truncated;
+            const cert_data = try allocator.dupe(u8, bytes[i .. i + cert_len]);
+            i += cert_len;
+
+            if (i + 2 > cert_list_end) {
+                allocator.free(cert_data);
+                return error.Truncated;
+            }
+            const ext_len = readU16(bytes[i .. i + 2]);
+            i += 2;
+            if (i + ext_len > cert_list_end) {
+                allocator.free(cert_data);
+                return error.Truncated;
+            }
+            const ext_end = i + ext_len;
+
+            var exts: std.ArrayList(Extension) = .empty;
+            errdefer {
+                for (exts.items) |*ext| ext.deinit(allocator);
+                exts.deinit(allocator);
+            }
+
+            while (i < ext_end) {
+                if (i + 4 > ext_end) {
+                    allocator.free(cert_data);
+                    return error.Truncated;
+                }
+                const ext_type = readU16(bytes[i .. i + 2]);
+                i += 2;
+                const one_ext_len = readU16(bytes[i .. i + 2]);
+                i += 2;
+                if (i + one_ext_len > ext_end) {
+                    allocator.free(cert_data);
+                    return error.Truncated;
+                }
+                try exts.append(allocator, .{
+                    .extension_type = ext_type,
+                    .data = try allocator.dupe(u8, bytes[i .. i + one_ext_len]),
+                });
+                i += one_ext_len;
+            }
+
+            try entries.append(allocator, .{
+                .cert_data = cert_data,
+                .extensions = try exts.toOwnedSlice(allocator),
+            });
+        }
+
+        if (i != cert_list_end) return error.TrailingBytes;
+        if (i != bytes.len) return error.TrailingBytes;
+
+        return .{
+            .request_context = request_context,
+            .entries = try entries.toOwnedSlice(allocator),
+        };
+    }
+};
+
+pub const CertificateVerifyMsg = struct {
+    algorithm: u16,
+    signature: []u8,
+
+    pub fn deinit(self: *CertificateVerifyMsg, allocator: std.mem.Allocator) void {
+        allocator.free(self.signature);
+        self.* = undefined;
+    }
+
+    pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) !CertificateVerifyMsg {
+        if (bytes.len < 4) return error.Truncated;
+        const algorithm = readU16(bytes[0..2]);
+        const sig_len = readU16(bytes[2..4]);
+        if (sig_len == 0) return error.EmptySignature;
+        if (4 + sig_len != bytes.len) return error.Truncated;
+
+        return .{
+            .algorithm = algorithm,
+            .signature = try allocator.dupe(u8, bytes[4 .. 4 + sig_len]),
+        };
+    }
+};
+
 test "clienthello encode/decode roundtrip" {
     const allocator = std.testing.allocator;
 
@@ -383,6 +513,35 @@ test "serverhello decode roundtrip" {
     try std.testing.expectEqualSlices(u8, sh.session_id_echo, dec.session_id_echo);
 }
 
+test "certificate decode minimal single entry" {
+    const allocator = std.testing.allocator;
+
+    // context_len=0, cert_list_len=6, cert_len=1, cert_data=0xaa, ext_len=0
+    const bytes = [_]u8{ 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x01, 0xaa, 0x00, 0x00 };
+    var msg = try CertificateMsg.decode(allocator, &bytes);
+    defer msg.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), msg.entries.len);
+    try std.testing.expectEqualSlices(u8, &.{0xaa}, msg.entries[0].cert_data);
+}
+
+test "certificate verify decode baseline" {
+    const allocator = std.testing.allocator;
+    const bytes = [_]u8{ 0x04, 0x03, 0x00, 0x02, 0xde, 0xad };
+
+    var msg = try CertificateVerifyMsg.decode(allocator, &bytes);
+    defer msg.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u16, 0x0403), msg.algorithm);
+    try std.testing.expectEqualSlices(u8, &.{ 0xde, 0xad }, msg.signature);
+}
+
+test "certificate verify rejects empty signature" {
+    const allocator = std.testing.allocator;
+    const bytes = [_]u8{ 0x04, 0x03, 0x00, 0x00 };
+    try std.testing.expectError(error.EmptySignature, CertificateVerifyMsg.decode(allocator, &bytes));
+}
+
 fn readU16(bytes: []const u8) u16 {
     return (@as(u16, bytes[0]) << 8) | @as(u16, bytes[1]);
 }
@@ -390,4 +549,8 @@ fn readU16(bytes: []const u8) u16 {
 fn writeU16(bytes: []u8, value: u16) void {
     bytes[0] = @intCast((value >> 8) & 0xff);
     bytes[1] = @intCast(value & 0xff);
+}
+
+fn readU24(bytes: []const u8) usize {
+    return (@as(usize, bytes[0]) << 16) | (@as(usize, bytes[1]) << 8) | @as(usize, bytes[2]);
 }

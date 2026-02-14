@@ -64,6 +64,8 @@ pub const EngineError = error{
     MissingReplayFilter,
     TruncationDetected,
     InvalidHelloMessage,
+    InvalidCertificateMessage,
+    InvalidCertificateVerifyMessage,
 } || record.ParseError || handshake.ParseError || handshake.KeyUpdateError || state.TransitionError || alerts.DecodeError;
 
 const Transcript = union(enum) {
@@ -266,6 +268,14 @@ pub const Engine = struct {
                 var ch = messages.ClientHello.decode(self.allocator, body) catch return error.InvalidHelloMessage;
                 defer ch.deinit(self.allocator);
             },
+            .certificate => {
+                var cert = messages.CertificateMsg.decode(self.allocator, body) catch return error.InvalidCertificateMessage;
+                defer cert.deinit(self.allocator);
+            },
+            .certificate_verify => {
+                var cert_verify = messages.CertificateVerifyMsg.decode(self.allocator, body) catch return error.InvalidCertificateVerifyMessage;
+                defer cert_verify.deinit(self.allocator);
+            },
             else => {},
         }
     }
@@ -364,6 +374,47 @@ fn appDataRecord(comptime data: []const u8) [5 + data.len]u8 {
     frame[2] = 0x03;
     std.mem.writeInt(u16, frame[3..5], data.len, .big);
     @memcpy(frame[5..], data);
+    return frame;
+}
+
+fn certificateRecord() [19]u8 {
+    // Certificate body: context_len(1)=0, list_len(3)=6, cert_len(3)=1, cert_data(1), ext_len(2)=0
+    var frame: [19]u8 = undefined;
+    frame[0] = @intFromEnum(record.ContentType.handshake);
+    frame[1] = 0x03;
+    frame[2] = 0x03;
+    std.mem.writeInt(u16, frame[3..5], 14, .big);
+    frame[5] = @intFromEnum(state.HandshakeType.certificate);
+    const hs_len = handshake.writeU24(10);
+    @memcpy(frame[6..9], &hs_len);
+    frame[9] = 0x00;
+    frame[10] = 0x00;
+    frame[11] = 0x00;
+    frame[12] = 0x06;
+    frame[13] = 0x00;
+    frame[14] = 0x00;
+    frame[15] = 0x01;
+    frame[16] = 0xaa;
+    frame[17] = 0x00;
+    frame[18] = 0x00;
+    return frame;
+}
+
+fn certificateVerifyRecord() [14]u8 {
+    // algorithm=0x0403, sig_len=1, sig=0x5a
+    var frame: [14]u8 = undefined;
+    frame[0] = @intFromEnum(record.ContentType.handshake);
+    frame[1] = 0x03;
+    frame[2] = 0x03;
+    std.mem.writeInt(u16, frame[3..5], 9, .big);
+    frame[5] = @intFromEnum(state.HandshakeType.certificate_verify);
+    const hs_len = handshake.writeU24(5);
+    @memcpy(frame[6..9], &hs_len);
+    frame[9] = 0x04;
+    frame[10] = 0x03;
+    frame[11] = 0x00;
+    frame[12] = 0x01;
+    frame[13] = 0x5a;
     return frame;
 }
 
@@ -580,4 +631,44 @@ test "build keyupdate record is parseable" {
     try std.testing.expectEqual(state.HandshakeType.key_update, hs.header.handshake_type);
     const req = try handshake.parseKeyUpdateRequest(hs.body);
     try std.testing.expectEqual(handshake.KeyUpdateRequest.update_requested, req);
+}
+
+test "invalid certificate body is rejected" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    _ = try engine.ingestRecord(&serverHelloRecord());
+    _ = try engine.ingestRecord(&handshakeRecord(.encrypted_extensions));
+    try std.testing.expectError(error.InvalidCertificateMessage, engine.ingestRecord(&handshakeRecord(.certificate)));
+}
+
+test "certificate path valid bodies progress state" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    _ = try engine.ingestRecord(&serverHelloRecord());
+    _ = try engine.ingestRecord(&handshakeRecord(.encrypted_extensions));
+    _ = try engine.ingestRecord(&certificateRecord());
+    _ = try engine.ingestRecord(&certificateVerifyRecord());
+    _ = try engine.ingestRecord(&handshakeRecord(.finished));
+    try std.testing.expectEqual(state.ConnectionState.connected, engine.machine.state);
+}
+
+test "invalid certificate_verify body is rejected" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    _ = try engine.ingestRecord(&serverHelloRecord());
+    _ = try engine.ingestRecord(&handshakeRecord(.encrypted_extensions));
+    _ = try engine.ingestRecord(&certificateRecord());
+    try std.testing.expectError(error.InvalidCertificateVerifyMessage, engine.ingestRecord(&handshakeRecord(.certificate_verify)));
 }
