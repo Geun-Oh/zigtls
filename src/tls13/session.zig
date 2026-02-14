@@ -107,6 +107,7 @@ pub const EngineError = error{
     InvalidSupportedGroupsExtension,
     InvalidKeyShareExtension,
     InvalidCookieExtension,
+    InvalidPreSharedKeyExtension,
     MissingRequiredServerHelloExtension,
     MissingRequiredHrrExtension,
     UnexpectedServerHelloExtension,
@@ -614,7 +615,11 @@ pub const Engine = struct {
         try requireAllowedExtensions(extensions, &.{ ext_supported_versions, ext_key_share, ext_pre_shared_key }, error.UnexpectedServerHelloExtension);
         const supported_versions = findExtensionData(extensions, ext_supported_versions) orelse return error.MissingRequiredServerHelloExtension;
         if (!serverHelloSupportedVersionIsTls13(supported_versions)) return error.InvalidSupportedVersionExtension;
-        if (!hasExtension(extensions, ext_key_share)) return error.MissingRequiredServerHelloExtension;
+        const key_share = findExtensionData(extensions, ext_key_share) orelse return error.MissingRequiredServerHelloExtension;
+        try validateServerHelloKeyShareExtension(key_share);
+        if (findExtensionData(extensions, ext_pre_shared_key)) |pre_shared_key| {
+            try validateServerHelloPreSharedKeyExtension(pre_shared_key);
+        }
     }
 
     fn requireHrrExtensions(self: Engine, extensions: []const messages.Extension) EngineError!void {
@@ -655,6 +660,7 @@ pub fn classifyErrorAlert(err: anyerror) alerts.Alert {
         error.InvalidSupportedGroupsExtension,
         error.InvalidKeyShareExtension,
         error.InvalidCookieExtension,
+        error.InvalidPreSharedKeyExtension,
         error.UnexpectedServerHelloExtension,
         error.UnexpectedHrrExtension,
         error.InvalidCompressionMethod,
@@ -1007,6 +1013,18 @@ fn validateClientHelloKeyShareExtension(data: []const u8) EngineError!void {
     if (i != end) return error.InvalidKeyShareExtension;
 }
 
+fn validateServerHelloKeyShareExtension(data: []const u8) EngineError!void {
+    if (data.len < 4) return error.InvalidKeyShareExtension;
+    const group = readU16(data[0..2]);
+    if (group == 0) return error.InvalidKeyShareExtension;
+    const key_len = readU16(data[2..4]);
+    if (key_len + 4 != data.len) return error.InvalidKeyShareExtension;
+}
+
+fn validateServerHelloPreSharedKeyExtension(data: []const u8) EngineError!void {
+    if (data.len != 2) return error.InvalidPreSharedKeyExtension;
+}
+
 fn validateHrrKeyShareExtension(data: []const u8) EngineError!void {
     if (data.len != 2) return error.InvalidKeyShareExtension;
     const selected_group = readU16(data[0..2]);
@@ -1267,6 +1285,31 @@ fn serverHelloRecordWithUnexpectedExtension() [67]u8 {
     frame[64] = 0x10; // ALPN not legal in ServerHello
     frame[65] = 0x00;
     frame[66] = 0x00;
+    return frame;
+}
+
+fn serverHelloRecordWithInvalidKeySharePayload() [63]u8 {
+    var frame = serverHelloRecord();
+    frame[59] = 0x00;
+    frame[60] = 0x00; // group=0 (invalid)
+    return frame;
+}
+
+fn serverHelloRecordWithInvalidPreSharedKeyPayload() [68]u8 {
+    var frame: [68]u8 = undefined;
+    const base = serverHelloRecord();
+    @memcpy(frame[0..base.len], base[0..]);
+    std.mem.writeInt(u16, frame[3..5], 63, .big);
+    const hs_len = handshake.writeU24(59);
+    @memcpy(frame[6..9], &hs_len);
+    frame[47] = 0x00;
+    frame[48] = 0x13; // extension bytes: 14 + pre_shared_key(5)
+    // pre_shared_key: type=0x0029 len=1 selected_identity(one-byte, invalid)
+    frame[63] = 0x00;
+    frame[64] = 0x29;
+    frame[65] = 0x00;
+    frame[66] = 0x01;
+    frame[67] = 0x00;
     return frame;
 }
 
@@ -2339,6 +2382,28 @@ test "client rejects server hello with unexpected extension" {
     try std.testing.expectError(error.UnexpectedServerHelloExtension, engine.ingestRecord(&rec));
 }
 
+test "client rejects server hello with invalid key_share payload" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const rec = serverHelloRecordWithInvalidKeySharePayload();
+    try std.testing.expectError(error.InvalidKeyShareExtension, engine.ingestRecord(&rec));
+}
+
+test "client rejects server hello with invalid pre_shared_key payload" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const rec = serverHelloRecordWithInvalidPreSharedKeyPayload();
+    try std.testing.expectError(error.InvalidPreSharedKeyExtension, engine.ingestRecord(&rec));
+}
+
 test "client rejects server hello with configured cipher suite mismatch" {
     var engine = Engine.init(std.testing.allocator, .{
         .role = .client,
@@ -2661,6 +2726,10 @@ test "classify error alert maps representative protocol errors" {
     try std.testing.expectEqual(
         alerts.Alert{ .level = .fatal, .description = .illegal_parameter },
         classifyErrorAlert(error.InvalidPskBinderLength),
+    );
+    try std.testing.expectEqual(
+        alerts.Alert{ .level = .fatal, .description = .illegal_parameter },
+        classifyErrorAlert(error.InvalidPreSharedKeyExtension),
     );
     try std.testing.expectEqual(
         alerts.Alert{ .level = .fatal, .description = .decode_error },

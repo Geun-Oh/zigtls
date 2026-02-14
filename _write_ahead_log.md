@@ -6018,3 +6018,77 @@ Observed Results
 - Adjusted malformed fixture to keep decode-valid structure and fail at semantic validator (`selected_group=0x0000`).
 - Final run: `session.zig` 118/118 tests passed.
 - `zig build test`: passed.
+===
+timestamp: 2026-02-15T12:00:00+09:00
+description: Plan ServerHello key_share and pre_shared_key extension payload validation hardening
+type: plan
+===
+Motivation
+- ServerHello validation currently checks required extension presence and allowlist legality but not extension payload semantics for `key_share` and optional `pre_shared_key`.
+- Decode-valid but semantically malformed extension payloads can survive server-hello extension gate.
+
+Scope
+- Validate ServerHello `key_share` payload structure and reject zero group identifier.
+- Validate optional ServerHello `pre_shared_key` payload length (selected_identity) is exactly 2 bytes.
+- Add targeted negative tests that remain decode-valid but fail semantic extension checks.
+- Update RFC matrix HS-001B wording/coverage to include ServerHello key_share/pre_shared_key payload validation.
+
+Design
+- Extend `requireServerHelloExtensions` to parse extension data and run dedicated validators.
+- Reuse `InvalidKeyShareExtension` for malformed ServerHello key_share payload.
+- Add `InvalidPreSharedKeyExtension` for malformed ServerHello pre_shared_key payload and map to `illegal_parameter`.
+
+Risks/Perf Impact
+- Bounded parsing on ServerHello path only; negligible overhead.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Remove ServerHello payload validators and associated regression fixtures/tests.
+
+Commit Plan
+- `MINOR: tls13: validate server hello key_share and psk payloads`
+===
+timestamp: 2026-02-15T12:05:00+09:00
+description: Validate ServerHello key_share and pre_shared_key extension payload semantics
+type: code change
+===
+Decisions + Rationale
+- Strengthened ServerHello extension checks from presence-only to payload-semantic validation for required `key_share` and optional `pre_shared_key`.
+- Used `InvalidKeyShareExtension` for malformed ServerHello key_share payload and introduced `InvalidPreSharedKeyExtension` for malformed ServerHello pre_shared_key payload.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - `EngineError`: added `InvalidPreSharedKeyExtension`.
+  - `requireServerHelloExtensions`: now validates key_share payload and optional pre_shared_key payload.
+  - `classifyErrorAlert`: maps `InvalidPreSharedKeyExtension` to `illegal_parameter`.
+  - Added helpers:
+    - `validateServerHelloKeyShareExtension`
+    - `validateServerHelloPreSharedKeyExtension`
+  - Added fixtures/tests:
+    - `serverHelloRecordWithInvalidKeySharePayload`
+    - `serverHelloRecordWithInvalidPreSharedKeyPayload`
+    - `client rejects server hello with invalid key_share payload`
+    - `client rejects server hello with invalid pre_shared_key payload`
+  - Extended alert classification representative test to cover new error mapping.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-HS-001B` requirement and test coverage wording for ServerHello key_share/pre_shared_key payload checks.
+
+Risks/Perf Notes
+- Validation is bounded to short ServerHello extension payloads on handshake path; negligible overhead.
+- Behavior intentionally rejects semantically invalid, decode-valid extension payloads earlier.
+===
+timestamp: 2026-02-15T12:06:00+09:00
+description: Verify ServerHello payload validation hardening with session and full suites
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 120/120 tests passed.
+- `zig build test`: passed.
