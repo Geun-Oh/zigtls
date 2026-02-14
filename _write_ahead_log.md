@@ -2621,3 +2621,63 @@ Commands Executed
 Observed Results
 - `session.zig`: 70/70 tests passed, including downgrade-marker rejection case.
 - Full test target passed.
+===
+timestamp: 2026-02-15T04:56:00+09:00
+description: Plan security hardening checklist and release runbook documentation deliverables
+type: plan
+===
+Motivation
+- `_task.md` deliverables include security hardening checklist and release runbook.
+- Current docs set lacks dedicated operational checklist/runbook artifacts.
+
+Scope
+- Add `docs/security-hardening-checklist.md` with status-driven checklist mapped to project controls.
+- Add `docs/release-runbook.md` with preflight, verification gates, and release steps.
+- Link both docs from existing matrix note section.
+
+Design
+- Checklist items explicitly mapped to implemented modules/tests and remaining gaps.
+- Runbook defines concrete command sequence and pass/fail criteria.
+
+Risks/Perf Impact
+- Documentation-only changes.
+
+Test Plan (commands)
+- `zig build test`
+
+Rollback
+- Remove docs files if structure needs consolidation into single operations handbook.
+
+Commit Plan
+- `MINOR: docs: add security checklist and release runbook`
+===
+timestamp: 2026-02-15T04:58:00+09:00
+description: Add security hardening checklist and release runbook deliverable docs
+type: docs
+===
+Decisions + Rationale
+- Added explicit security checklist document to map implemented controls and remaining release blockers.
+- Added release runbook with preflight, verification commands, BoGo/interop gates, security/performance gates, and rollback flow.
+- Linked new docs from RFC matrix notes for discoverability.
+
+Files/Functions Touched
+- `docs/security-hardening-checklist.md` (new)
+- `docs/release-runbook.md` (new)
+- `docs/rfc8446-matrix.md` (notes links)
+
+Risks/Perf Notes
+- Documentation-only change.
+===
+timestamp: 2026-02-15T04:59:00+09:00
+description: Validate documentation deliverables and baseline checks
+type: test
+===
+Commands Executed
+- `zig build test`
+- `python3 scripts/interop/bogo_summary.py --self-test`
+- `bash -n scripts/interop/bogo_run.sh`
+
+Observed Results
+- Full test target passed.
+- BoGo summary self-test passed.
+- BoGo runner shell syntax validation passed.
