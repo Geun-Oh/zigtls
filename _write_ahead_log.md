@@ -1658,3 +1658,84 @@ Observed Results
 - Messages tests passed including duplicate extension and oversized certificate entry cases.
 - Session tests passed with decoder hardening in place.
 - Full package tests passed.
+===
+timestamp: 2026-02-15T01:48:00+09:00
+description: Add integrated peer certificate policy validator combining hostname/chain/ocsp checks
+type: plan
+===
+Motivation
+- Certificate validation logic exists in separate functions; callers need a single policy entrypoint to reduce misuse and missing-step risk.
+
+Scope
+- Add integrated validator in `certificate_validation.zig` that executes:
+  1) server-name verification
+  2) chain policy checks
+  3) OCSP stapling policy checks
+- Add tests for full-pass and representative failure cases.
+
+Design
+- Preserve existing small validators and compose them in a new function.
+- Keep parser-independent data model (CertificateView + OCSP ResponseView).
+
+Risks/Perf Impact
+- No hot-path impact; function composition over existing checks.
+
+Test Plan (commands)
+- `zig test src/tls13/certificate_validation.zig`
+- `zig build test`
+
+Rollback
+- Revert composite API if integration callers require different sequencing semantics.
+
+Commit Plan
+- `MINOR: tls13: add integrated peer certificate policy validator`
+===
+timestamp: 2026-02-15T01:52:00+09:00
+description: Add integrated peer certificate policy validator API
+-type: code change
+===
+Correction
+- This entry supersedes malformed metadata key usage and provides valid WAL compliance context.
+
+Decisions + Rationale
+- Added `validateServerPeer` to compose hostname, chain, and OCSP checks in a single call.
+- Exposed structured input/output (`PeerValidationInput`, `PeerValidationResult`) to reduce caller misuse risk from missing validation steps.
+
+Files/Functions Touched
+- `src/tls13/certificate_validation.zig`
+  - Added integrated policy validation API and tests.
+
+Risks/Perf Notes
+- Composition over existing checks only; negligible overhead.
+===
+timestamp: 2026-02-15T01:52:30+09:00
+description: Supersede malformed metadata key for integrated certificate policy validator entry
+type: code change
+===
+Correction
+- Previous entry at 2026-02-15T01:52:00+09:00 had malformed metadata key (`-type`).
+- This entry supersedes that malformed header for WAL format compliance.
+
+Decisions + Rationale
+- Added `validateServerPeer` to compose hostname, chain, and OCSP checks in one API.
+- Added `PeerValidationInput` and `PeerValidationResult` to make validation sequencing explicit.
+
+Files/Functions Touched
+- `src/tls13/certificate_validation.zig`
+
+Risks/Perf Notes
+- Composition over existing checks only; negligible overhead.
+
+===
+timestamp: 2026-02-15T01:53:00+09:00
+description: Validate integrated peer policy validator
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/certificate_validation.zig`
+- `zig test src/tls13/certificate_validation.zig`
+- `zig build test`
+
+Observed Results
+- Certificate validation tests passed including integrated validator cases.
+- Full package tests passed.

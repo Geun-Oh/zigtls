@@ -45,6 +45,18 @@ pub const ValidationError = error{
     LeafMissingServerAuthEku,
 } || ocsp.CheckError;
 
+pub const PeerValidationInput = struct {
+    expected_server_name: []const u8,
+    chain: []const CertificateView,
+    stapled_ocsp: ?ocsp.ResponseView = null,
+    now_sec: i64,
+    policy: ValidationPolicy = .{},
+};
+
+pub const PeerValidationResult = struct {
+    ocsp_result: ocsp.ValidationResult,
+};
+
 pub fn validateServerName(expected_server_name: []const u8, cert_dns_name: []const u8) ValidationError!void {
     if (expected_server_name.len == 0) return error.EmptyServerName;
 
@@ -87,6 +99,13 @@ pub fn validateStapledOcsp(
     policy: ValidationPolicy,
 ) ValidationError!ocsp.ValidationResult {
     return try ocsp.checkStapled(response, now_sec, policy.allow_soft_fail_ocsp);
+}
+
+pub fn validateServerPeer(input: PeerValidationInput) ValidationError!PeerValidationResult {
+    try validateServerChain(input.chain);
+    try validateServerName(input.expected_server_name, input.chain[0].dns_name);
+    const ocsp_result = try validateStapledOcsp(input.stapled_ocsp, input.now_sec, input.policy);
+    return .{ .ocsp_result = ocsp_result };
 }
 
 fn hasEku(usages: []const ExtendedKeyUsage, target: ExtendedKeyUsage) bool {
@@ -165,4 +184,54 @@ test "ocsp policy delegates hard/soft fail behavior" {
     try std.testing.expectEqual(ocsp.ValidationResult.soft_fail, soft);
 
     try std.testing.expectError(error.MissingResponse, validateStapledOcsp(null, now, .{ .allow_soft_fail_ocsp = false }));
+}
+
+test "integrated peer validator passes on valid inputs" {
+    const now: i64 = 1_700_000_000;
+    const chain = [_]CertificateView{
+        .{
+            .dns_name = "example.com",
+            .is_ca = false,
+            .key_usage = .{ .digital_signature = true },
+            .ext_key_usages = &.{.server_auth},
+        },
+        .{
+            .dns_name = "Root",
+            .is_ca = true,
+            .key_usage = .{ .key_cert_sign = true },
+        },
+    };
+
+    const res = try validateServerPeer(.{
+        .expected_server_name = "example.com",
+        .chain = &chain,
+        .stapled_ocsp = .{
+            .status = .good,
+            .produced_at = now - 60,
+            .this_update = now - 60,
+            .next_update = now + 3600,
+        },
+        .now_sec = now,
+    });
+    try std.testing.expectEqual(ocsp.ValidationResult.accepted, res.ocsp_result);
+}
+
+test "integrated peer validator propagates hostname failure" {
+    const now: i64 = 1_700_000_000;
+    const chain = [_]CertificateView{
+        .{
+            .dns_name = "api.example.com",
+            .is_ca = false,
+            .key_usage = .{ .digital_signature = true },
+            .ext_key_usages = &.{.server_auth},
+        },
+    };
+
+    try std.testing.expectError(error.HostnameMismatch, validateServerPeer(.{
+        .expected_server_name = "example.com",
+        .chain = &chain,
+        .stapled_ocsp = null,
+        .now_sec = now,
+        .policy = .{ .allow_soft_fail_ocsp = true },
+    }));
 }
