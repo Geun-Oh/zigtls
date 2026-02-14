@@ -6,6 +6,8 @@ pub const ValidationPolicy = struct {
     allow_soft_fail_ocsp: bool = false,
 };
 
+pub const max_chain_depth: usize = 8;
+
 pub const ExtendedKeyUsage = enum {
     server_auth,
     client_auth,
@@ -41,6 +43,7 @@ pub const ValidationError = error{
     HostnameMismatch,
     UnsupportedChainValidation,
     InvalidChain,
+    ChainTooLong,
     IntermediateNotCa,
     IntermediateMissingKeyCertSign,
     PathLenExceeded,
@@ -76,6 +79,7 @@ pub fn validateChainPlaceholder(_: ValidationPolicy) ValidationError!void {
 
 pub fn validateServerChain(chain: []const CertificateView) ValidationError!void {
     if (chain.len == 0) return error.InvalidChain;
+    if (chain.len > max_chain_depth) return error.ChainTooLong;
 
     const leaf = chain[0];
     try validateLeafServerUsage(leaf);
@@ -84,6 +88,7 @@ pub fn validateServerChain(chain: []const CertificateView) ValidationError!void 
 
 pub fn validateClientChain(chain: []const CertificateView) ValidationError!void {
     if (chain.len == 0) return error.InvalidChain;
+    if (chain.len > max_chain_depth) return error.ChainTooLong;
 
     const leaf = chain[0];
     try validateLeafClientUsage(leaf);
@@ -267,6 +272,25 @@ test "server chain rejects missing server eku" {
     try std.testing.expectError(error.LeafMissingServerAuthEku, validateServerChain(&chain));
 }
 
+test "server chain rejects excessive chain depth" {
+    var chain: [max_chain_depth + 1]CertificateView = undefined;
+    chain[0] = .{
+        .dns_name = "example.com",
+        .is_ca = false,
+        .key_usage = .{ .digital_signature = true },
+        .ext_key_usages = &.{.server_auth},
+    };
+    for (chain[1..]) |*cert| {
+        cert.* = .{
+            .dns_name = "CA",
+            .is_ca = true,
+            .key_usage = .{ .key_cert_sign = true },
+        };
+    }
+
+    try std.testing.expectError(error.ChainTooLong, validateServerChain(&chain));
+}
+
 test "name constraints allow permitted dns subtree" {
     const chain = [_]CertificateView{
         .{
@@ -393,6 +417,25 @@ test "client chain rejects missing digital signature usage" {
     };
 
     try std.testing.expectError(error.LeafMissingDigitalSignature, validateClientChain(&chain));
+}
+
+test "client chain rejects excessive chain depth" {
+    var chain: [max_chain_depth + 1]CertificateView = undefined;
+    chain[0] = .{
+        .dns_name = "",
+        .is_ca = false,
+        .key_usage = .{ .digital_signature = true },
+        .ext_key_usages = &.{.client_auth},
+    };
+    for (chain[1..]) |*cert| {
+        cert.* = .{
+            .dns_name = "CA",
+            .is_ca = true,
+            .key_usage = .{ .key_cert_sign = true },
+        };
+    }
+
+    try std.testing.expectError(error.ChainTooLong, validateClientChain(&chain));
 }
 
 test "ocsp policy delegates hard/soft fail behavior" {
