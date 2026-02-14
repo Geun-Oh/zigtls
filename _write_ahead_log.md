@@ -6092,3 +6092,72 @@ Commands Executed
 Observed Results
 - `session.zig`: 120/120 tests passed.
 - `zig build test`: passed.
+===
+timestamp: 2026-02-15T12:12:00+09:00
+description: Plan enforce ClientHello pre_shared_key extension last-position rule
+type: plan
+===
+Motivation
+- PSK offer validation checks modes and binders, but does not enforce RFC 8446 rule that `pre_shared_key` must be the last ClientHello extension.
+- Non-compliant extension ordering can currently pass semantic PSK checks.
+
+Scope
+- Enforce `pre_shared_key` as last extension when present in ClientHello.
+- Add dedicated ordering error mapped to `illegal_parameter`.
+- Add decode-valid regression fixture/test where an extension appears after `pre_shared_key`.
+- Update RFC matrix PSK row wording and coverage notes.
+
+Design
+- In `validatePskOfferExtensions`, locate `pre_shared_key` index and reject if it is not `extensions.len - 1`.
+- Keep existing modes/binder validation flow unchanged.
+
+Risks/Perf Impact
+- O(n) scan over small extension list in ClientHello validation path; negligible overhead.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Remove pre_shared_key position check and regression test.
+
+Commit Plan
+- `MINOR: tls13: enforce pre_shared_key as last client extension`
+===
+timestamp: 2026-02-15T12:15:00+09:00
+description: Enforce pre_shared_key last-extension rule in ClientHello PSK validation
+type: code change
+===
+Decisions + Rationale
+- Added RFC-conformant ordering check requiring `pre_shared_key` to be the final ClientHello extension when PSK is offered.
+- Preserved existing PSK mode/binder validation flow and inserted ordering check before those semantic checks.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - `EngineError`: added `InvalidPreSharedKeyPlacement`.
+  - `validatePskOfferExtensions`: now enforces `pre_shared_key` last-extension placement.
+  - Added helper: `indexOfExtension`.
+  - `classifyErrorAlert`: maps `InvalidPreSharedKeyPlacement` to `illegal_parameter`.
+  - Added fixture/test:
+    - `clientHelloRecordWithPskNotLastExtension`
+    - `server rejects psk offer when pre_shared_key is not last extension`
+  - Extended alert classification representative test for new mapping.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-PSK-001` wording/coverage to include pre_shared_key ordering rule.
+
+Risks/Perf Notes
+- Single linear scan over small extension list in handshake validation path; negligible overhead.
+- Behavior intentionally rejects non-compliant extension ordering that previously passed.
+===
+timestamp: 2026-02-15T12:16:00+09:00
+description: Verify pre_shared_key ordering enforcement with session and full suites
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 121/121 tests passed.
+- `zig build test`: passed.

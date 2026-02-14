@@ -118,6 +118,7 @@ pub const EngineError = error{
     MissingPskKeyExchangeModes,
     InvalidPskKeyExchangeModes,
     MissingPskDheKeyExchangeMode,
+    InvalidPreSharedKeyPlacement,
     InvalidPskBinder,
     InvalidPskBinderLength,
     PskBinderCountMismatch,
@@ -667,6 +668,7 @@ pub fn classifyErrorAlert(err: anyerror) alerts.Alert {
         error.MissingPskKeyExchangeModes,
         error.InvalidPskKeyExchangeModes,
         error.MissingPskDheKeyExchangeMode,
+        error.InvalidPreSharedKeyPlacement,
         error.InvalidPskBinder,
         error.InvalidPskBinderLength,
         error.PskBinderCountMismatch,
@@ -916,7 +918,9 @@ test "debug keylog callback uses server label in server role" {
 }
 
 fn validatePskOfferExtensions(extensions: []const messages.Extension, suite: keyschedule.CipherSuite) EngineError!void {
-    const psk = findExtensionData(extensions, ext_pre_shared_key) orelse return;
+    const psk_index = indexOfExtension(extensions, ext_pre_shared_key) orelse return;
+    if (psk_index + 1 != extensions.len) return error.InvalidPreSharedKeyPlacement;
+    const psk = extensions[psk_index].data;
     const psk_modes = findExtensionData(extensions, ext_psk_key_exchange_modes) orelse return error.MissingPskKeyExchangeModes;
     const modes = try validatePskKeyExchangeModes(psk_modes);
     if (!modes.has_psk_dhe_ke) return error.MissingPskDheKeyExchangeMode;
@@ -951,6 +955,13 @@ fn validatePskKeyExchangeModes(data: []const u8) EngineError!PskModes {
 fn findExtensionData(extensions: []const messages.Extension, extension_type: u16) ?[]const u8 {
     for (extensions) |ext| {
         if (ext.extension_type == extension_type) return ext.data;
+    }
+    return null;
+}
+
+fn indexOfExtension(extensions: []const messages.Extension, extension_type: u16) ?usize {
+    for (extensions, 0..) |ext, i| {
+        if (ext.extension_type == extension_type) return i;
     }
     return null;
 }
@@ -1577,6 +1588,19 @@ fn clientHelloRecordWithPskInvalidBinderLength() [124]u8 {
     frame[121] = 0x02;
     frame[122] = 0x01;
     frame[123] = 0x01;
+    return frame;
+}
+
+fn clientHelloRecordWithPskNotLastExtension() [126]u8 {
+    var frame = clientHelloRecordWithPskBinderCountMismatch();
+
+    var psk_ext: [19]u8 = undefined;
+    @memcpy(psk_ext[0..], frame[107..126]);
+    var psk_modes_ext: [6]u8 = undefined;
+    @memcpy(psk_modes_ext[0..], frame[101..107]);
+
+    @memcpy(frame[101..120], psk_ext[0..]);
+    @memcpy(frame[120..126], psk_modes_ext[0..]);
     return frame;
 }
 
@@ -2626,6 +2650,17 @@ test "server rejects psk offer without psk_dhe_ke mode" {
     try std.testing.expectError(error.MissingPskDheKeyExchangeMode, engine.ingestRecord(&rec));
 }
 
+test "server rejects psk offer when pre_shared_key is not last extension" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const rec = clientHelloRecordWithPskNotLastExtension();
+    try std.testing.expectError(error.InvalidPreSharedKeyPlacement, engine.ingestRecord(&rec));
+}
+
 test "server rejects psk identity and binder count mismatch" {
     var engine = Engine.init(std.testing.allocator, .{
         .role = .server,
@@ -2726,6 +2761,10 @@ test "classify error alert maps representative protocol errors" {
     try std.testing.expectEqual(
         alerts.Alert{ .level = .fatal, .description = .illegal_parameter },
         classifyErrorAlert(error.InvalidPskBinderLength),
+    );
+    try std.testing.expectEqual(
+        alerts.Alert{ .level = .fatal, .description = .illegal_parameter },
+        classifyErrorAlert(error.InvalidPreSharedKeyPlacement),
     );
     try std.testing.expectEqual(
         alerts.Alert{ .level = .fatal, .description = .illegal_parameter },
