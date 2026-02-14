@@ -5038,3 +5038,74 @@ Observed Results
 
 Notes
 - New regression confirms multi-entry compression vectors (e.g. `[0x00,0x01]`) are rejected.
+===
+timestamp: 2026-02-15T08:22:00+09:00
+description: Plan downgrade marker boundary regression coverage for ServerHello random handling
+type: plan
+===
+Motivation
+- Current downgrade protection tests validate exact sentinel rejection, but boundary/near-match cases are not explicitly covered.
+- Security hardening requires robust negative-path behavior without over-rejecting valid inputs.
+
+Scope
+- Add regression tests proving downgrade detection triggers only for exact tail-match sentinels.
+- Add fixtures for shifted and partial marker near-match ServerHello.random values.
+- Update RFC matrix SEC-001 coverage wording.
+
+Design
+- Keep runtime logic unchanged (`hasDowngradeMarker` tail exact match).
+- Add test fixtures:
+  - shifted marker position (non-tail)
+  - partial tail marker mismatch
+- Assert client flow accepts these non-matching cases.
+
+Risks/Perf Impact
+- Test-only behavior validation; no runtime impact.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Remove added tests/fixtures and docs wording update.
+
+Commit Plan
+- `MINOR: tls13: expand downgrade marker boundary tests`
+===
+timestamp: 2026-02-15T08:26:00+09:00
+description: Expand downgrade sentinel boundary coverage for exact-tail matching behavior
+type: code change
+===
+Decisions + Rationale
+- Kept downgrade detection logic unchanged and expanded regression coverage to prove exact-tail-only semantics.
+- Added near-match fixtures to prevent future over-detection regressions while preserving mandatory sentinel rejection.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - Added fixtures:
+    - `serverHelloRecordWithShiftedDowngradeLikeBytes`
+    - `serverHelloRecordWithNearMatchDowngradeTail`
+  - Added tests:
+    - `client accepts server hello when downgrade-like bytes are not in tail position`
+    - `client accepts server hello when downgrade tail is near-match only`
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-SEC-001` wording/coverage with exact-tail boundary notes.
+
+Risks/Perf Notes
+- Test/documentation-only expansion; no runtime or hot-path impact.
+===
+timestamp: 2026-02-15T08:27:00+09:00
+description: Validate downgrade boundary regression expansion with session and full test suites
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 103/103 tests passed.
+- `zig build test`: passed.
+
+Notes
+- New boundary tests confirm only exact random-tail downgrade sentinels trigger `DowngradeDetected`.

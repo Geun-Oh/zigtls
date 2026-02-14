@@ -1076,6 +1076,34 @@ fn serverHelloRecordWithLegacyDowngradeMarker() [63]u8 {
     return frame;
 }
 
+fn serverHelloRecordWithShiftedDowngradeLikeBytes() [63]u8 {
+    var frame = serverHelloRecord();
+    // DOWNGRD-like bytes shifted left by one: not a valid tail marker.
+    frame[34] = 0x44;
+    frame[35] = 0x4f;
+    frame[36] = 0x57;
+    frame[37] = 0x4e;
+    frame[38] = 0x47;
+    frame[39] = 0x52;
+    frame[40] = 0x44;
+    frame[41] = 0x01;
+    return frame;
+}
+
+fn serverHelloRecordWithNearMatchDowngradeTail() [63]u8 {
+    var frame = serverHelloRecord();
+    // Tail marker with one-byte mismatch must not be treated as downgrade sentinel.
+    frame[35] = 0x44;
+    frame[36] = 0x4f;
+    frame[37] = 0x57;
+    frame[38] = 0x4e;
+    frame[39] = 0x47;
+    frame[40] = 0x52;
+    frame[41] = 0x44;
+    frame[42] = 0x02;
+    return frame;
+}
+
 fn clientHelloRecordWithoutAlpn() [101]u8 {
     var frame = clientHelloRecord();
     frame[92] = 0xff;
@@ -1894,6 +1922,30 @@ test "client rejects server hello with legacy downgrade marker" {
 
     const rec = serverHelloRecordWithLegacyDowngradeMarker();
     try std.testing.expectError(error.DowngradeDetected, engine.ingestRecord(&rec));
+}
+
+test "client accepts server hello when downgrade-like bytes are not in tail position" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const rec = serverHelloRecordWithShiftedDowngradeLikeBytes();
+    _ = try engine.ingestRecord(&rec);
+    try std.testing.expectEqual(state.ConnectionState.wait_encrypted_extensions, engine.machine.state);
+}
+
+test "client accepts server hello when downgrade tail is near-match only" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const rec = serverHelloRecordWithNearMatchDowngradeTail();
+    _ = try engine.ingestRecord(&rec);
+    try std.testing.expectEqual(state.ConnectionState.wait_encrypted_extensions, engine.machine.state);
 }
 
 test "server rejects client hello without required extension" {
