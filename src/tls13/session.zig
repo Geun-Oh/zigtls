@@ -12,6 +12,9 @@ pub const Config = struct {
 
 pub const Action = union(enum) {
     handshake: state.HandshakeType,
+    hello_retry_request: void,
+    key_update: handshake.KeyUpdateRequest,
+    send_key_update: handshake.KeyUpdateRequest,
     received_alert: alerts.Alert,
     send_alert: alerts.Alert,
     state_changed: state.ConnectionState,
@@ -41,7 +44,7 @@ pub const IngestResult = struct {
 pub const EngineError = error{
     TooManyActions,
     UnsupportedRecordType,
-} || record.ParseError || handshake.ParseError || state.TransitionError || alerts.DecodeError;
+} || record.ParseError || handshake.ParseError || handshake.KeyUpdateError || state.TransitionError || alerts.DecodeError;
 
 const Transcript = union(enum) {
     sha256: std.crypto.hash.sha2.Sha256,
@@ -97,8 +100,19 @@ pub const Engine = struct {
                     const frame_len = 4 + @as(usize, @intCast(frame.header.length));
                     self.transcript.update(cursor[0..frame_len]);
 
-                    try self.machine.onHandshake(frame.header.handshake_type);
+                    const event = handshake.classifyEvent(frame);
+                    try self.machine.onEvent(event);
                     try result.push(.{ .handshake = frame.header.handshake_type });
+                    if (event == .hello_retry_request) {
+                        try result.push(.{ .hello_retry_request = {} });
+                    }
+                    if (frame.header.handshake_type == .key_update) {
+                        const req = try handshake.parseKeyUpdateRequest(frame.body);
+                        try result.push(.{ .key_update = req });
+                        if (req == .update_requested) {
+                            try result.push(.{ .send_key_update = .update_not_requested });
+                        }
+                    }
                     try result.push(.{ .state_changed = self.machine.state });
 
                     if (self.machine.state == .connected) {
@@ -175,6 +189,34 @@ fn handshakeRecord(comptime ty: state.HandshakeType) [9]u8 {
     return frame;
 }
 
+fn hrrServerHelloRecord() [43]u8 {
+    var frame: [43]u8 = undefined;
+    frame[0] = @intFromEnum(record.ContentType.handshake);
+    frame[1] = 0x03;
+    frame[2] = 0x03;
+    std.mem.writeInt(u16, frame[3..5], 38, .big);
+    frame[5] = @intFromEnum(state.HandshakeType.server_hello);
+    const len = handshake.writeU24(34);
+    @memcpy(frame[6..9], &len);
+    frame[9] = 0x03;
+    frame[10] = 0x03;
+    @memcpy(frame[11..43], &handshake.hello_retry_request_random);
+    return frame;
+}
+
+fn keyUpdateRecord(request: handshake.KeyUpdateRequest) [10]u8 {
+    var frame: [10]u8 = undefined;
+    frame[0] = @intFromEnum(record.ContentType.handshake);
+    frame[1] = 0x03;
+    frame[2] = 0x03;
+    std.mem.writeInt(u16, frame[3..5], 5, .big);
+    frame[5] = @intFromEnum(state.HandshakeType.key_update);
+    const len = handshake.writeU24(1);
+    @memcpy(frame[6..9], &len);
+    frame[9] = @intFromEnum(request);
+    return frame;
+}
+
 test "client side handshake flow reaches connected" {
     var engine = Engine.init(std.testing.allocator, .{
         .role = .client,
@@ -208,4 +250,49 @@ test "close_notify transitions to closed" {
 
     _ = try engine.ingestRecord(&frame);
     try std.testing.expectEqual(state.ConnectionState.closed, engine.machine.state);
+}
+
+test "client accepts hrr then server hello" {
+    const hrr = hrrServerHelloRecord();
+    const second_sh = handshakeRecord(.server_hello);
+
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+
+    const res_hrr = try engine.ingestRecord(&hrr);
+    try std.testing.expectEqual(state.ConnectionState.wait_server_hello, engine.machine.state);
+    try std.testing.expectEqual(@as(usize, 3), res_hrr.action_count);
+    switch (res_hrr.actions[1]) {
+        .hello_retry_request => {},
+        else => return error.TestUnexpectedResult,
+    }
+
+    _ = try engine.ingestRecord(&second_sh);
+    try std.testing.expectEqual(state.ConnectionState.wait_encrypted_extensions, engine.machine.state);
+}
+
+test "keyupdate request is surfaced in action" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    _ = try engine.ingestRecord(&handshakeRecord(.server_hello));
+    _ = try engine.ingestRecord(&handshakeRecord(.encrypted_extensions));
+    _ = try engine.ingestRecord(&handshakeRecord(.finished));
+
+    const ku = keyUpdateRecord(.update_requested);
+    const res = try engine.ingestRecord(&ku);
+
+    try std.testing.expectEqual(state.ConnectionState.connected, engine.machine.state);
+    try std.testing.expectEqual(@as(usize, 4), res.action_count);
+    switch (res.actions[1]) {
+        .key_update => |req| try std.testing.expectEqual(handshake.KeyUpdateRequest.update_requested, req),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (res.actions[2]) {
+        .send_key_update => |req| try std.testing.expectEqual(handshake.KeyUpdateRequest.update_not_requested, req),
+        else => return error.TestUnexpectedResult,
+    }
 }

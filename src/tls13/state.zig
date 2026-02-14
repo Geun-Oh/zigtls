@@ -17,6 +17,19 @@ pub const HandshakeType = enum(u8) {
     message_hash = 254,
 };
 
+pub const HandshakeEvent = enum {
+    client_hello,
+    server_hello,
+    hello_retry_request,
+    new_session_ticket,
+    encrypted_extensions,
+    certificate,
+    certificate_verify,
+    finished,
+    key_update,
+    message_hash,
+};
+
 pub const ConnectionState = enum {
     start,
     wait_server_hello,
@@ -47,9 +60,13 @@ pub const Machine = struct {
     }
 
     pub fn onHandshake(self: *Machine, handshake_type: HandshakeType) TransitionError!void {
+        try self.onEvent(fromHandshakeType(handshake_type));
+    }
+
+    pub fn onEvent(self: *Machine, event: HandshakeEvent) TransitionError!void {
         switch (self.role) {
-            .client => try onClientHandshake(self, handshake_type),
-            .server => try onServerHandshake(self, handshake_type),
+            .client => try onClientHandshake(self, event),
+            .server => try onServerHandshake(self, event),
         }
     }
 
@@ -62,24 +79,38 @@ pub const Machine = struct {
     }
 };
 
-fn onClientHandshake(self: *Machine, handshake_type: HandshakeType) TransitionError!void {
+pub fn fromHandshakeType(handshake_type: HandshakeType) HandshakeEvent {
+    return switch (handshake_type) {
+        .client_hello => .client_hello,
+        .server_hello => .server_hello,
+        .new_session_ticket => .new_session_ticket,
+        .encrypted_extensions => .encrypted_extensions,
+        .certificate => .certificate,
+        .certificate_verify => .certificate_verify,
+        .finished => .finished,
+        .key_update => .key_update,
+        .message_hash => .message_hash,
+    };
+}
+
+fn onClientHandshake(self: *Machine, event: HandshakeEvent) TransitionError!void {
     switch (self.state) {
-        .wait_server_hello => if (handshake_type == .server_hello) {
-            self.state = .wait_encrypted_extensions;
-        } else {
-            return error.IllegalTransition;
+        .wait_server_hello => switch (event) {
+            .server_hello => self.state = .wait_encrypted_extensions,
+            .hello_retry_request => {},
+            else => return error.IllegalTransition,
         },
-        .wait_encrypted_extensions => if (handshake_type == .encrypted_extensions) {
+        .wait_encrypted_extensions => if (event == .encrypted_extensions) {
             self.state = .wait_server_finished;
         } else {
             return error.IllegalTransition;
         },
-        .wait_server_finished => if (handshake_type == .finished) {
+        .wait_server_finished => if (event == .finished) {
             self.state = .connected;
         } else {
             return error.IllegalTransition;
         },
-        .connected => switch (handshake_type) {
+        .connected => switch (event) {
             .new_session_ticket, .key_update => {},
             else => return error.IllegalTransition,
         },
@@ -87,19 +118,19 @@ fn onClientHandshake(self: *Machine, handshake_type: HandshakeType) TransitionEr
     }
 }
 
-fn onServerHandshake(self: *Machine, handshake_type: HandshakeType) TransitionError!void {
+fn onServerHandshake(self: *Machine, event: HandshakeEvent) TransitionError!void {
     switch (self.state) {
-        .start => if (handshake_type == .client_hello) {
+        .start => if (event == .client_hello) {
             self.state = .wait_client_finished;
         } else {
             return error.IllegalTransition;
         },
-        .wait_client_finished => if (handshake_type == .finished) {
+        .wait_client_finished => if (event == .finished) {
             self.state = .connected;
         } else {
             return error.IllegalTransition;
         },
-        .connected => switch (handshake_type) {
+        .connected => switch (event) {
             .new_session_ticket, .key_update => {},
             else => return error.IllegalTransition,
         },
@@ -125,4 +156,10 @@ test "server handshake transition happy path" {
 test "unexpected handshake is rejected" {
     var machine = Machine.init(.client);
     try std.testing.expectError(error.IllegalTransition, machine.onHandshake(.finished));
+}
+
+test "client accepts hello retry request and stays waiting server hello" {
+    var machine = Machine.init(.client);
+    try machine.onEvent(.hello_retry_request);
+    try std.testing.expectEqual(ConnectionState.wait_server_hello, machine.state);
 }

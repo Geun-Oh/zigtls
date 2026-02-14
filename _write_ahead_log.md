@@ -262,3 +262,79 @@ Observed Results
 - All module tests passed for implemented baseline.
 - `zig build` initially failed due Zig 0.15 API change in `src/main.zig` (`std.io.getStdOut` removed); fixed by switching to `std.debug.print`.
 - After fix, `zig build` and `zig build test` passed.
+===
+timestamp: 2026-02-14T22:20:00+09:00
+description: Implement Phase 2 protocol features on baseline (HRR and KeyUpdate handling)
+type: plan
+===
+Motivation
+- User requested to continue implementation after baseline commits.
+- `_task.md` Phase 2 requires concrete handling for HRR and KeyUpdate semantics.
+
+Scope
+- Extend handshake parsing/types to represent HelloRetryRequest.
+- Extend state machine transitions for HRR flow and connected-state KeyUpdate handling.
+- Extend session engine action model to surface KeyUpdate request/update behavior.
+- Add/adjust unit tests for normal/error/boundary cases covering HRR and KeyUpdate transitions.
+
+Design
+- Keep changes localized to `state.zig`, `handshake.zig`, and `session.zig`.
+- Maintain Sans-I/O pattern: only parse/transition/action emission, no transport coupling.
+- Preserve strict failure on illegal transitions.
+
+Risks/Perf Impact
+- Risk: Overfitting HRR detection logic. Mitigation: use deterministic structural rule from ServerHello body with retry_random marker.
+- Perf impact is minimal (small parsing checks and enum dispatch additions).
+
+Test Plan (commands)
+- `zig test src/tls13/state.zig`
+- `zig test src/tls13/handshake.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Revert affected module files if semantics are incorrect.
+- Append superseding WAL entries rather than editing previous entries.
+
+Commit Plan
+- Single feature commit:
+  - `MEDIUM: tls13: add HRR and KeyUpdate state handling`
+===
+timestamp: 2026-02-14T22:26:00+09:00
+description: Add HRR classification and KeyUpdate request handling to TLS13 state/session paths
+type: code change
+===
+Decisions + Rationale
+- Introduced handshake event abstraction to distinguish `hello_retry_request` from ordinary `server_hello` while preserving existing handshake type parsing.
+- Extended client FSM to accept HRR in `wait_server_hello` and remain in the same state until a subsequent non-HRR `server_hello`.
+- Added KeyUpdate request parser and surfaced request semantics in session actions.
+- Added `send_key_update` action emission for `update_requested` input to keep Sans-I/O transport independence while making response behavior explicit.
+
+Files/Functions Touched
+- `src/tls13/state.zig`
+  - Added `HandshakeEvent`, `Machine.onEvent`, `fromHandshakeType`, HRR transition rule.
+- `src/tls13/handshake.zig`
+  - Added HRR random marker constant, `classifyEvent`, `parseKeyUpdateRequest`.
+- `src/tls13/session.zig`
+  - Wired event classification into `ingestRecord`, added `hello_retry_request`, `key_update`, and `send_key_update` actions, added HRR/KeyUpdate test frames.
+
+Risks/Perf Notes
+- HRR detection currently uses random-marker rule and minimal ServerHello structure check; full extension-level validation remains pending for later phase.
+- Added checks are constant-size and low overhead.
+
+===
+timestamp: 2026-02-14T22:27:00+09:00
+description: Validate HRR and KeyUpdate implementation with module and integration tests
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/state.zig src/tls13/handshake.zig src/tls13/session.zig`
+- `zig test src/tls13/state.zig`
+- `zig test src/tls13/handshake.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- All state/handshake/session tests passed.
+- Session suite now includes HRR round handling and KeyUpdate request/response-action checks.
+- Full package test build passed.
