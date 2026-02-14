@@ -33,6 +33,7 @@ pub const EarlyDataConfig = struct {
     enabled: bool = false,
     replay_filter: ?*early_data.ReplayFilter = null,
     max_ticket_age_sec: u64 = 600,
+    max_ticket_len: usize = 4096,
 };
 
 pub const Metrics = struct {
@@ -80,6 +81,7 @@ pub const EngineError = error{
     EarlyDataRejected,
     MissingReplayFilter,
     EarlyDataTicketExpired,
+    EarlyDataTicketTooLarge,
     TruncationDetected,
     InvalidHelloMessage,
     InvalidCertificateMessage,
@@ -158,6 +160,7 @@ pub const Engine = struct {
     }
 
     pub fn beginEarlyData(self: *Engine, ticket: []const u8, idempotent: bool) !void {
+        if (ticket.len > self.config.early_data.max_ticket_len) return error.EarlyDataTicketTooLarge;
         self.clearEarlyDataTicket();
         self.early_data_ticket = try self.allocator.alloc(u8, ticket.len);
         @memcpy(self.early_data_ticket.?, ticket);
@@ -404,6 +407,11 @@ pub const Engine = struct {
         if (!hasExtension(extensions, ext_key_share)) return error.MissingRequiredServerHelloExtension;
     }
 };
+
+pub fn estimatedConnectionMemoryCeiling(config: Config) usize {
+    const ticket_cap: usize = if (config.early_data.enabled) config.early_data.max_ticket_len else 0;
+    return @sizeOf(Engine) + ticket_cap;
+}
 
 fn hasExtension(extensions: []const messages.Extension, extension_type: u16) bool {
     for (extensions) |ext| {
@@ -1073,6 +1081,41 @@ test "early data is rejected by default" {
 
     const rec = appDataRecord("hello");
     try std.testing.expectError(error.EarlyDataRejected, engine.ingestRecord(&rec));
+}
+
+test "early data ticket length limit is enforced" {
+    var replay = try early_data.ReplayFilter.init(std.testing.allocator, 4096);
+    defer replay.deinit();
+
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+        .early_data = .{
+            .enabled = true,
+            .replay_filter = &replay,
+            .max_ticket_len = 8,
+        },
+    });
+    defer engine.deinit();
+
+    try std.testing.expectError(error.EarlyDataTicketTooLarge, engine.beginEarlyData("ticket-too-long", true));
+}
+
+test "estimated connection memory ceiling includes early data ticket cap when enabled" {
+    const disabled = estimatedConnectionMemoryCeiling(.{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    const enabled = estimatedConnectionMemoryCeiling(.{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+        .early_data = .{
+            .enabled = true,
+            .max_ticket_len = 2048,
+        },
+    });
+    try std.testing.expectEqual(@as(usize, @sizeOf(Engine)), disabled);
+    try std.testing.expectEqual(@as(usize, @sizeOf(Engine) + 2048), enabled);
 }
 
 test "early data requires idempotent mark and anti-replay" {

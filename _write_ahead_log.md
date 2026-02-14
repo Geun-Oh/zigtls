@@ -3082,3 +3082,70 @@ Commands Executed
 Observed Results
 - `session.zig`: 74/74 tests passed including keylog enabled/disabled gating tests.
 - Full test target passed.
+===
+timestamp: 2026-02-15T06:35:00+09:00
+description: Plan per-connection memory ceiling documentation and early-data ticket allocation limit enforcement
+type: plan
+===
+Motivation
+- `_task.md` explicit allocation discipline requires documented per-connection memory ceiling and enforced limits.
+- Current session allocates early-data ticket buffer without explicit size cap.
+
+Scope
+- Add configurable `max_early_data_ticket_len` limit in `EarlyDataConfig` with safe default.
+- Reject oversized ticket allocation in `beginEarlyData`/`beginEarlyDataWithTimes`.
+- Add documented connection memory ceiling calculation helper and docs file.
+
+Design
+- Introduce `EarlyDataTicketTooLarge` engine error.
+- Add `estimatedConnectionMemoryCeiling()` helper in session module, deterministic and suite-aware.
+- Add `docs/memory-ceiling.md` describing assumptions and enforced limits.
+
+Risks/Perf Impact
+- One length check before ticket allocation; negligible overhead.
+- Tightens behavior for oversized early-data tickets.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Revert ticket length limit if compatibility issues arise, keep docs and helper for future staged rollout.
+
+Commit Plan
+- `MINOR: tls13: enforce early-data ticket memory ceiling`
+===
+timestamp: 2026-02-15T06:39:00+09:00
+description: Enforce early-data ticket size cap and add per-connection memory ceiling helper/docs
+type: code change
+===
+Decisions + Rationale
+- Added explicit early-data ticket allocation cap (`max_ticket_len`) and reject-on-overflow behavior.
+- Added `estimatedConnectionMemoryCeiling(config)` helper to document deterministic per-connection engine footprint.
+- Added dedicated memory ceiling documentation with formula and assumptions.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - `EarlyDataConfig.max_ticket_len` (default 4096)
+  - `EngineError.EarlyDataTicketTooLarge`
+  - `beginEarlyData` ticket length guard
+  - `estimatedConnectionMemoryCeiling`
+  - Added tests for ticket length enforcement and ceiling calculation.
+- `docs/memory-ceiling.md` (new)
+
+Risks/Perf Notes
+- Single integer comparison per early-data ticket admission.
+- Tightens behavior for oversized ticket inputs.
+===
+timestamp: 2026-02-15T06:40:00+09:00
+description: Validate memory ceiling enforcement changes and regression suite
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 76/76 tests passed including new memory ceiling limit tests.
+- Full test target passed.
