@@ -2950,3 +2950,70 @@ Commands Executed
 Observed Results
 - `session.zig`: 72/72 tests passed including PSK count-mismatch negative case.
 - Full test target passed.
+===
+timestamp: 2026-02-15T06:05:00+09:00
+description: Plan NSS local interoperability harness script addition
+type: plan
+===
+Motivation
+- `_task.md` interop matrix requires coverage across OpenSSL, BoringSSL, rustls, and NSS.
+- Repository currently has local harness scripts for OpenSSL/rustls/BoGo only.
+
+Scope
+- Add `scripts/interop/nss_local.sh` scaffold for local NSS TLS1.3 sanity checks.
+- Include deterministic argument validation and baseline command wiring placeholders.
+- Add script syntax check in release preflight script.
+
+Design
+- Follow existing interop script style (`set -euo pipefail`, env-driven paths).
+- Validate required env vars (`NSS_DIR`) and expected binaries.
+- Keep behavior conservative: run command checks and print guidance when environment is incomplete.
+
+Risks/Perf Impact
+- Tooling-only change.
+- Local harness remains environment-dependent by design.
+
+Test Plan (commands)
+- `bash -n scripts/interop/nss_local.sh`
+- `bash -n scripts/release/preflight.sh`
+- `zig build test`
+
+Rollback
+- Remove NSS script and preflight hook if project adopts different NSS interop mechanism.
+
+Commit Plan
+- `MINOR: test: add nss local interop harness script`
+===
+timestamp: 2026-02-15T06:09:00+09:00
+description: Add NSS local interop harness script and preflight integration hook
+type: code change
+===
+Decisions + Rationale
+- Added NSS local harness script to close interop tooling gap for NSS path coverage.
+- Script validates NSS toolchain directories and required binaries (`certutil`, `selfserv`, `tstclnt`).
+- Added optional `NSS_CHECK_ONLY` fast-path and command probes for environment sanity.
+- Wired NSS script syntax check into release preflight automation.
+
+Files/Functions Touched
+- `scripts/interop/nss_local.sh` (new)
+- `scripts/release/preflight.sh` (added NSS syntax check)
+- `docs/rfc8446-matrix.md` (interop row updated)
+
+Risks/Perf Notes
+- Tooling-only change.
+- Full NSS handshake orchestration remains environment-specific follow-up.
+===
+timestamp: 2026-02-15T06:10:00+09:00
+description: Validate NSS interop harness and preflight updates
+type: test
+===
+Commands Executed
+- `bash -n scripts/interop/nss_local.sh`
+- `bash -n scripts/release/preflight.sh`
+- `bash scripts/release/preflight.sh --dry-run`
+- `zig build test`
+
+Observed Results
+- NSS script syntax check passed.
+- Preflight syntax and dry-run passed with NSS hook included.
+- Full test target passed.
