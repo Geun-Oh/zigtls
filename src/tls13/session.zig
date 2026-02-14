@@ -318,15 +318,34 @@ pub const Engine = struct {
     }
 
     fn deriveApplicationTrafficSecret(self: *Engine) TrafficSecret {
-        return switch (self.transcript) {
-            .sha256 => |hasher| blk: {
+        return switch (self.config.suite) {
+            .tls_aes_128_gcm_sha256 => blk: {
+                const hasher = switch (self.transcript) {
+                    .sha256 => |h| h,
+                    .sha384 => unreachable,
+                };
                 var digest: [32]u8 = undefined;
                 var h = hasher;
                 h.final(&digest);
                 const secret = keyschedule.extract(.tls_aes_128_gcm_sha256, "", &digest);
                 break :blk .{ .sha256 = keyschedule.deriveLabel(.tls_aes_128_gcm_sha256, secret, "c ap traffic", &digest, 32) };
             },
-            .sha384 => |hasher| blk: {
+            .tls_chacha20_poly1305_sha256 => blk: {
+                const hasher = switch (self.transcript) {
+                    .sha256 => |h| h,
+                    .sha384 => unreachable,
+                };
+                var digest: [32]u8 = undefined;
+                var h = hasher;
+                h.final(&digest);
+                const secret = keyschedule.extract(.tls_chacha20_poly1305_sha256, "", &digest);
+                break :blk .{ .sha256 = keyschedule.deriveLabel(.tls_chacha20_poly1305_sha256, secret, "c ap traffic", &digest, 32) };
+            },
+            .tls_aes_256_gcm_sha384 => blk: {
+                const hasher = switch (self.transcript) {
+                    .sha256 => unreachable,
+                    .sha384 => |h| h,
+                };
                 var digest: [48]u8 = undefined;
                 var h = hasher;
                 h.final(&digest);
@@ -338,9 +357,19 @@ pub const Engine = struct {
 
     fn ratchetLatestTrafficSecret(self: *Engine) void {
         const cur = self.latest_secret orelse return;
-        self.latest_secret = switch (cur) {
-            .sha256 => |secret| .{ .sha256 = keyschedule.deriveLabel(.tls_aes_128_gcm_sha256, secret, "traffic upd", "", 32) },
-            .sha384 => |secret| .{ .sha384 = keyschedule.deriveLabel(.tls_aes_256_gcm_sha384, secret, "traffic upd", "", 48) },
+        self.latest_secret = switch (self.config.suite) {
+            .tls_aes_128_gcm_sha256 => switch (cur) {
+                .sha256 => |secret| .{ .sha256 = keyschedule.deriveLabel(.tls_aes_128_gcm_sha256, secret, "traffic upd", "", 32) },
+                .sha384 => unreachable,
+            },
+            .tls_chacha20_poly1305_sha256 => switch (cur) {
+                .sha256 => |secret| .{ .sha256 = keyschedule.deriveLabel(.tls_chacha20_poly1305_sha256, secret, "traffic upd", "", 32) },
+                .sha384 => unreachable,
+            },
+            .tls_aes_256_gcm_sha384 => switch (cur) {
+                .sha256 => unreachable,
+                .sha384 => |secret| .{ .sha384 = keyschedule.deriveLabel(.tls_aes_256_gcm_sha384, secret, "traffic upd", "", 48) },
+            },
         };
         self.emitDebugKeyLog("CLIENT_TRAFFIC_SECRET_N");
     }
@@ -1199,6 +1228,19 @@ fn finishedRecord() [41]u8 {
     return frame;
 }
 
+fn finishedRecordSha384() [57]u8 {
+    var frame: [57]u8 = undefined;
+    frame[0] = @intFromEnum(record.ContentType.handshake);
+    frame[1] = 0x03;
+    frame[2] = 0x03;
+    std.mem.writeInt(u16, frame[3..5], 52, .big);
+    frame[5] = @intFromEnum(state.HandshakeType.finished);
+    const hs_len = handshake.writeU24(48);
+    @memcpy(frame[6..9], &hs_len);
+    @memset(frame[9..57], 0x6d);
+    return frame;
+}
+
 test "client side handshake flow reaches connected" {
     var engine = Engine.init(std.testing.allocator, .{
         .role = .client,
@@ -1212,6 +1254,42 @@ test "client side handshake flow reaches connected" {
 
     try std.testing.expectEqual(state.ConnectionState.connected, engine.machine.state);
     try std.testing.expect(engine.latest_secret != null);
+}
+
+test "client side handshake flow reaches connected for chacha20 suite" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_chacha20_poly1305_sha256,
+    });
+    defer engine.deinit();
+
+    _ = try engine.ingestRecord(&serverHelloRecordWithCipherSuite(0x1303));
+    _ = try engine.ingestRecord(&encryptedExtensionsRecord());
+    _ = try engine.ingestRecord(&finishedRecord());
+
+    try std.testing.expectEqual(state.ConnectionState.connected, engine.machine.state);
+    switch (engine.latest_secret orelse return error.TestUnexpectedResult) {
+        .sha256 => {},
+        .sha384 => return error.TestUnexpectedResult,
+    }
+}
+
+test "client side handshake flow reaches connected for aes256 suite" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_256_gcm_sha384,
+    });
+    defer engine.deinit();
+
+    _ = try engine.ingestRecord(&serverHelloRecordWithCipherSuite(0x1302));
+    _ = try engine.ingestRecord(&encryptedExtensionsRecord());
+    _ = try engine.ingestRecord(&finishedRecordSha384());
+
+    try std.testing.expectEqual(state.ConnectionState.connected, engine.machine.state);
+    switch (engine.latest_secret orelse return error.TestUnexpectedResult) {
+        .sha256 => return error.TestUnexpectedResult,
+        .sha384 => {},
+    }
 }
 
 test "unexpected handshake fails with illegal transition" {
