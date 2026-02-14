@@ -1156,3 +1156,69 @@ Commands Executed
 Observed Results
 - Matrix update rendered as expected.
 - Full package tests passed.
+===
+timestamp: 2026-02-15T00:47:00+09:00
+description: Add session-level metrics counters for observability baseline
+type: plan
+===
+Motivation
+- `_task.md` operational requirements call for deterministic metrics hooks (handshake outcomes, alerts, key update events).
+
+Scope
+- Add lightweight metrics counters to session engine state.
+- Count handshake message processing, received alerts, keyupdate messages, and truncation detections.
+- Add tests validating counter increments on representative paths.
+
+Design
+- Keep counters in-memory and read-only via accessor (`snapshotMetrics`).
+- No external logging backend coupling.
+
+Risks/Perf Impact
+- Minimal overhead (integer increments on control paths).
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Revert metrics additions if API shape conflicts with future telemetry integration.
+
+Commit Plan
+- `MINOR: tls13: add session observability counters`
+===
+timestamp: 2026-02-15T00:50:00+09:00
+description: Add session observability counters for handshake/alerts/keyupdate/truncation
+type: code change
+===
+Decisions + Rationale
+- Added in-engine metrics counters to support operational observability requirements without external telemetry coupling.
+- Instrumented control-path events:
+  - handshake messages processed
+  - keyupdate messages seen
+  - alert records received
+  - transitions to connected
+  - truncation detections
+- Exposed immutable snapshot accessor for consumer-side reporting/export.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - Added `Metrics` struct and `snapshotMetrics`.
+  - Added counter increments in ingest/EOF paths.
+  - Added tests for metric behavior.
+
+Risks/Perf Notes
+- Minimal overhead (integer increments in control path).
+
+===
+timestamp: 2026-02-15T00:50:30+09:00
+description: Validate observability counter instrumentation
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- Session tests passed including new metrics assertions.
+- Full package test build passed.

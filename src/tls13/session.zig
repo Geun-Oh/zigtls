@@ -18,6 +18,14 @@ pub const EarlyDataConfig = struct {
     replay_filter: ?*early_data.ReplayFilter = null,
 };
 
+pub const Metrics = struct {
+    handshake_messages: u64 = 0,
+    alerts_received: u64 = 0,
+    keyupdate_messages: u64 = 0,
+    connected_transitions: u64 = 0,
+    truncation_events: u64 = 0,
+};
+
 pub const Action = union(enum) {
     handshake: state.HandshakeType,
     hello_retry_request: void,
@@ -91,6 +99,7 @@ pub const Engine = struct {
     early_data_idempotent: bool = false,
     early_data_ticket: ?[]u8 = null,
     saw_close_notify: bool = false,
+    metrics: Metrics = .{},
 
     pub fn init(allocator: std.mem.Allocator, config: Config) Engine {
         if (config.early_data.enabled and config.early_data.replay_filter == null) {
@@ -116,8 +125,15 @@ pub const Engine = struct {
     }
 
     pub fn onTransportEof(self: *Engine) EngineError!void {
-        if (!self.saw_close_notify) return error.TruncationDetected;
+        if (!self.saw_close_notify) {
+            self.metrics.truncation_events += 1;
+            return error.TruncationDetected;
+        }
         self.machine.markClosed();
+    }
+
+    pub fn snapshotMetrics(self: Engine) Metrics {
+        return self.metrics;
     }
 
     pub fn ingestRecord(self: *Engine, record_bytes: []const u8) EngineError!IngestResult {
@@ -132,7 +148,9 @@ pub const Engine = struct {
                     const frame_len = 4 + @as(usize, @intCast(frame.header.length));
                     self.transcript.update(cursor[0..frame_len]);
                     try self.validateHandshakeBody(frame.header.handshake_type, frame.body);
+                    self.metrics.handshake_messages += 1;
 
+                    const prev_state = self.machine.state;
                     const event = handshake.classifyEvent(frame);
                     try self.machine.onEvent(event);
                     try result.push(.{ .handshake = frame.header.handshake_type });
@@ -140,6 +158,7 @@ pub const Engine = struct {
                         try result.push(.{ .hello_retry_request = {} });
                     }
                     if (frame.header.handshake_type == .key_update) {
+                        self.metrics.keyupdate_messages += 1;
                         const req = try handshake.parseKeyUpdateRequest(frame.body);
                         try result.push(.{ .key_update = req });
                         if (req == .update_requested) {
@@ -148,7 +167,8 @@ pub const Engine = struct {
                     }
                     try result.push(.{ .state_changed = self.machine.state });
 
-                    if (self.machine.state == .connected) {
+                    if (prev_state != .connected and self.machine.state == .connected) {
+                        self.metrics.connected_transitions += 1;
                         self.latest_secret = self.deriveApplicationTrafficSecret();
                     }
                     cursor = frame.rest;
@@ -156,6 +176,7 @@ pub const Engine = struct {
             },
             .alert => {
                 const alert = try alerts.Alert.decode(parsed.payload);
+                self.metrics.alerts_received += 1;
                 try result.push(.{ .received_alert = alert });
                 if (alert.description == .close_notify) {
                     self.saw_close_notify = true;
@@ -512,4 +533,36 @@ test "valid client hello body is accepted for server role" {
 
     _ = try engine.ingestRecord(&clientHelloRecord());
     try std.testing.expectEqual(state.ConnectionState.wait_client_certificate_or_finished, engine.machine.state);
+}
+
+test "metrics counters reflect handshake and alert activity" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    _ = try engine.ingestRecord(&serverHelloRecord());
+    _ = try engine.ingestRecord(&handshakeRecord(.encrypted_extensions));
+    _ = try engine.ingestRecord(&handshakeRecord(.finished));
+    _ = try engine.ingestRecord(&keyUpdateRecord(.update_not_requested));
+    _ = try engine.ingestRecord(&Engine.buildAlertRecord(.{ .level = .warning, .description = .close_notify }));
+
+    const m = engine.snapshotMetrics();
+    try std.testing.expectEqual(@as(u64, 4), m.handshake_messages);
+    try std.testing.expectEqual(@as(u64, 1), m.keyupdate_messages);
+    try std.testing.expectEqual(@as(u64, 1), m.connected_transitions);
+    try std.testing.expectEqual(@as(u64, 1), m.alerts_received);
+}
+
+test "metrics counts truncation events" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    try std.testing.expectError(error.TruncationDetected, engine.onTransportEof());
+    const m = engine.snapshotMetrics();
+    try std.testing.expectEqual(@as(u64, 1), m.truncation_events);
 }
