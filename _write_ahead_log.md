@@ -2089,3 +2089,68 @@ Commands Executed
 Observed Results
 - `session.zig`: 60/60 tests passed (including new missing-required-extension cases).
 - Full test target passed.
+===
+timestamp: 2026-02-15T03:15:00+09:00
+description: Plan PSK offer binder-structure verification hooks in server-side ClientHello validation
+type: plan
+===
+Motivation
+- `_task.md` requires PSK binder verification for resumption.
+- Current server-side ClientHello checks extension presence only and does not validate PSK binder list structure when PSK is offered.
+
+Scope
+- Add optional PSK-offer checks in `session` ClientHello validation:
+  - if `pre_shared_key` exists, require `psk_key_exchange_modes` extension.
+  - parse PSK identities/binders vectors structurally and reject malformed/empty binder vectors.
+- Add negative tests for missing modes and invalid binder layout.
+
+Design
+- Keep checks transport-agnostic and local to session ingest (Sans-I/O).
+- Structural validation only in this step (no cryptographic binder MAC verification due absent ticket secret context in current engine).
+
+Risks/Perf Impact
+- Additional parsing only when PSK extension is present.
+- Behavior tightens malformed PSK offer rejection on server path.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Revert PSK structural checks if interop fixtures rely on malformed legacy vectors; preserve extension-presence baseline.
+
+Commit Plan
+- `MINOR: tls13: validate psk binder structure on clienthello offers`
+===
+timestamp: 2026-02-15T03:19:00+09:00
+description: Add PSK offer binder-structure validation in server-side ClientHello path
+type: code change
+===
+Decisions + Rationale
+- Added conditional PSK offer validation in server-role ClientHello checks.
+- If `pre_shared_key` is present, server now requires `psk_key_exchange_modes` and validates binder vector structure (identities list + non-empty binders list framing).
+- Introduced dedicated error classes for missing modes and malformed binder vectors.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - `EngineError`: `MissingPskKeyExchangeModes`, `InvalidPskBinder`
+  - Added extension IDs for `pre_shared_key` and `psk_key_exchange_modes`
+  - Added helpers: `validatePskOfferExtensions`, `findExtensionData`, `parsePskBinderVector`, local `readU16`
+  - Added PSK-oriented ClientHello fixtures and negative tests.
+
+Risks/Perf Notes
+- Additional parse cost applies only when PSK extension is present.
+- This step validates PSK offer shape, not cryptographic binder MAC proof (requires ticket-secret context wiring).
+===
+timestamp: 2026-02-15T03:20:00+09:00
+description: Validate PSK binder-structure checks with session and full test suite
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 62/62 tests passed, including new PSK missing-modes and malformed-binder negatives.
+- Full test target passed.

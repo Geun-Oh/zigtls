@@ -80,6 +80,8 @@ pub const EngineError = error{
     InvalidNewSessionTicketMessage,
     MissingRequiredClientHelloExtension,
     MissingRequiredServerHelloExtension,
+    MissingPskKeyExchangeModes,
+    InvalidPskBinder,
     UnsupportedSignatureAlgorithm,
 } || record.ParseError || handshake.ParseError || handshake.KeyUpdateError || state.TransitionError || alerts.DecodeError;
 
@@ -88,6 +90,8 @@ const ext_supported_groups: u16 = 0x000a;
 const ext_alpn: u16 = 0x0010;
 const ext_supported_versions: u16 = 0x002b;
 const ext_key_share: u16 = 0x0033;
+const ext_pre_shared_key: u16 = 0x0029;
+const ext_psk_key_exchange_modes: u16 = 0x002d;
 
 const Transcript = union(enum) {
     sha256: std.crypto.hash.sha2.Sha256,
@@ -332,6 +336,7 @@ pub const Engine = struct {
         if (!hasExtension(extensions, ext_supported_groups)) return error.MissingRequiredClientHelloExtension;
         if (!hasExtension(extensions, ext_key_share)) return error.MissingRequiredClientHelloExtension;
         if (!hasExtension(extensions, ext_alpn)) return error.MissingRequiredClientHelloExtension;
+        try validatePskOfferExtensions(extensions);
     }
 
     fn requireServerHelloExtensions(self: Engine, extensions: []const messages.Extension) EngineError!void {
@@ -346,6 +351,62 @@ fn hasExtension(extensions: []const messages.Extension, extension_type: u16) boo
         if (ext.extension_type == extension_type) return true;
     }
     return false;
+}
+
+fn validatePskOfferExtensions(extensions: []const messages.Extension) EngineError!void {
+    const psk = findExtensionData(extensions, ext_pre_shared_key) orelse return;
+    if (!hasExtension(extensions, ext_psk_key_exchange_modes)) return error.MissingPskKeyExchangeModes;
+    _ = parsePskBinderVector(psk) catch return error.InvalidPskBinder;
+}
+
+fn findExtensionData(extensions: []const messages.Extension, extension_type: u16) ?[]const u8 {
+    for (extensions) |ext| {
+        if (ext.extension_type == extension_type) return ext.data;
+    }
+    return null;
+}
+
+fn parsePskBinderVector(bytes: []const u8) !usize {
+    // pre_shared_key (CH): identities<7..2^16-1> + binders<33..2^16-1>
+    var i: usize = 0;
+    if (bytes.len < 2 + 2) return error.Truncated;
+
+    const identities_len = readU16(bytes[i .. i + 2]);
+    i += 2;
+    if (identities_len == 0) return error.InvalidLength;
+    if (i + identities_len + 2 > bytes.len) return error.Truncated;
+    const identities_end = i + identities_len;
+    while (i < identities_end) {
+        if (i + 2 > identities_end) return error.Truncated;
+        const id_len = readU16(bytes[i .. i + 2]);
+        i += 2;
+        if (id_len == 0) return error.InvalidLength;
+        if (i + id_len + 4 > identities_end) return error.Truncated;
+        i += id_len + 4; // identity + obfuscated_ticket_age
+    }
+    if (i != identities_end) return error.Truncated;
+
+    const binders_len = readU16(bytes[i .. i + 2]);
+    i += 2;
+    if (binders_len == 0) return error.InvalidLength;
+    if (i + binders_len != bytes.len) return error.Truncated;
+    const binders_end = i + binders_len;
+    var binder_count: usize = 0;
+    while (i < binders_end) {
+        if (i + 1 > binders_end) return error.Truncated;
+        const binder_len = bytes[i];
+        i += 1;
+        if (binder_len == 0) return error.InvalidLength;
+        if (i + binder_len > binders_end) return error.Truncated;
+        i += binder_len;
+        binder_count += 1;
+    }
+    if (binder_count == 0 or i != binders_end) return error.InvalidLength;
+    return binder_count;
+}
+
+fn readU16(bytes: []const u8) usize {
+    return (@as(usize, bytes[0]) << 8) | @as(usize, bytes[1]);
 }
 
 fn handshakeRecord(comptime ty: state.HandshakeType) [9]u8 {
@@ -490,6 +551,55 @@ fn clientHelloRecordWithoutAlpn() [101]u8 {
     var frame = clientHelloRecord();
     frame[92] = 0xff;
     frame[93] = 0xfe;
+    return frame;
+}
+
+fn clientHelloRecordWithPskWithoutModes() [109]u8 {
+    var frame: [109]u8 = undefined;
+    const base = clientHelloRecord();
+    @memcpy(frame[0..base.len], base[0..]);
+    std.mem.writeInt(u16, frame[3..5], 104, .big);
+    const hs_len = handshake.writeU24(100);
+    @memcpy(frame[6..9], &hs_len);
+    frame[50] = 0x00;
+    frame[51] = 0x39; // 49 + 8
+    // pre_shared_key with malformed minimal payload; absence of modes must fail first.
+    frame[101] = 0x00;
+    frame[102] = 0x29;
+    frame[103] = 0x00;
+    frame[104] = 0x04;
+    frame[105] = 0x00;
+    frame[106] = 0x00;
+    frame[107] = 0x00;
+    frame[108] = 0x00;
+    return frame;
+}
+
+fn clientHelloRecordWithMalformedPskBinder() [115]u8 {
+    var frame: [115]u8 = undefined;
+    const base = clientHelloRecord();
+    @memcpy(frame[0..base.len], base[0..]);
+    std.mem.writeInt(u16, frame[3..5], 110, .big);
+    const hs_len = handshake.writeU24(106);
+    @memcpy(frame[6..9], &hs_len);
+    frame[50] = 0x00;
+    frame[51] = 0x3f; // 49 + 6 + 8
+    // psk_key_exchange_modes extension (valid shape)
+    frame[101] = 0x00;
+    frame[102] = 0x2d;
+    frame[103] = 0x00;
+    frame[104] = 0x02;
+    frame[105] = 0x01;
+    frame[106] = 0x01;
+    // pre_shared_key with invalid identities/binders layout
+    frame[107] = 0x00;
+    frame[108] = 0x29;
+    frame[109] = 0x00;
+    frame[110] = 0x04;
+    frame[111] = 0x00;
+    frame[112] = 0x00;
+    frame[113] = 0x00;
+    frame[114] = 0x00;
     return frame;
 }
 
@@ -801,6 +911,28 @@ test "server rejects client hello without required extension" {
 
     const rec = clientHelloRecordWithoutAlpn();
     try std.testing.expectError(error.MissingRequiredClientHelloExtension, engine.ingestRecord(&rec));
+}
+
+test "server rejects psk offer without psk key exchange modes" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const rec = clientHelloRecordWithPskWithoutModes();
+    try std.testing.expectError(error.MissingPskKeyExchangeModes, engine.ingestRecord(&rec));
+}
+
+test "server rejects malformed psk binder vector" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const rec = clientHelloRecordWithMalformedPskBinder();
+    try std.testing.expectError(error.InvalidPskBinder, engine.ingestRecord(&rec));
 }
 
 test "valid client hello body is accepted for server role" {
