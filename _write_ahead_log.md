@@ -5418,3 +5418,82 @@ Observed Results
 
 Notes
 - Regression confirms client role pre-connected application data is rejected regardless of early-data enablement.
+===
+timestamp: 2026-02-15T09:42:00+09:00
+description: Plan SAN hostname wildcard matching support for certificate server-name validation
+type: plan
+===
+Motivation
+- Current server-name validation is exact case-insensitive match only.
+- CERT-001 requires practical SAN hostname verification semantics; wildcard DNS-ID matching is a common baseline requirement.
+
+Scope
+- Extend `validateServerName` to support left-most single-label wildcard patterns (`*.example.com`).
+- Preserve strict non-empty expected server name check.
+- Add regression tests for wildcard positive and boundary-negative cases.
+- Update RFC matrix CERT-001 wording/coverage.
+
+Design
+- Add helper `dnsNameMatchesServerName(expected, cert_name)` with rules:
+  - exact case-insensitive match allowed.
+  - wildcard only accepted as prefix `*.` with no additional `*`.
+  - wildcard matches exactly one left-most label.
+  - wildcard does not match apex domain and does not span multiple labels.
+- Keep invalid wildcard patterns as mismatch (`HostnameMismatch`).
+
+Risks/Perf Impact
+- Small string checks in certificate-name validation path; negligible overhead.
+- Tightens semantics for invalid wildcard SAN entries.
+
+Test Plan (commands)
+- `zig test src/tls13/certificate_validation.zig`
+- `zig build test`
+
+Rollback
+- Revert wildcard helper and related tests.
+
+Commit Plan
+- `MINOR: cert: add wildcard SAN hostname matching rules`
+===
+timestamp: 2026-02-15T09:46:00+09:00
+description: Add wildcard SAN hostname matching semantics for server-name validation
+type: code change
+===
+Decisions + Rationale
+- Extended hostname validation to support left-most wildcard SAN DNS-ID patterns (`*.example.com`).
+- Enforced conservative wildcard semantics: exact match fallback, wildcard prefix-only, no additional `*`, one-label match only.
+- Added boundary tests for apex and multi-label mismatch cases.
+
+Files/Functions Touched
+- `src/tls13/certificate_validation.zig`
+  - `validateServerName`: now delegates to `dnsNameMatchesServerName`.
+  - Added `dnsNameMatchesServerName` helper.
+  - Added tests:
+    - `server name wildcard matches single label`
+    - `server name wildcard does not match apex`
+    - `server name wildcard does not match multiple labels`
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-CERT-001` wording/coverage to include wildcard hostname validation.
+
+Risks/Perf Notes
+- Small string checks in cert-name validation path; negligible overhead.
+- Tightens invalid wildcard acceptance behavior.
+===
+timestamp: 2026-02-15T09:47:00+09:00
+description: Validate wildcard SAN hostname matching with certificate and full test suites
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/certificate_validation.zig`
+- `zig test src/tls13/certificate_validation.zig`
+- `zig build test`
+
+Observed Results
+- Initial wildcard multi-label negative test failed due insufficient prefix-label guard in wildcard matcher.
+- Updated matcher to reject prefix segments containing `.` before wildcard suffix.
+- Re-ran tests successfully:
+  - `certificate_validation.zig`: 33/33 passed.
+  - `zig build test`: passed.
+
+Notes
+- Wildcard matching now accepts single-label wildcard only and rejects apex/multi-label overmatch.

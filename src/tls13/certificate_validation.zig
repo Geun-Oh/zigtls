@@ -69,7 +69,7 @@ pub const PeerValidationResult = struct {
 pub fn validateServerName(expected_server_name: []const u8, cert_dns_name: []const u8) ValidationError!void {
     if (expected_server_name.len == 0) return error.EmptyServerName;
 
-    if (!std.ascii.eqlIgnoreCase(expected_server_name, cert_dns_name)) {
+    if (!dnsNameMatchesServerName(expected_server_name, cert_dns_name)) {
         return error.HostnameMismatch;
     }
 }
@@ -171,6 +171,25 @@ fn hasEku(usages: []const ExtendedKeyUsage, target: ExtendedKeyUsage) bool {
     return false;
 }
 
+fn dnsNameMatchesServerName(expected_raw: []const u8, cert_raw: []const u8) bool {
+    const expected = trimTrailingDot(expected_raw);
+    const cert = trimTrailingDot(cert_raw);
+    if (expected.len == 0 or cert.len == 0) return false;
+
+    if (std.ascii.eqlIgnoreCase(expected, cert)) return true;
+
+    if (!(cert.len >= 3 and cert[0] == '*' and cert[1] == '.')) return false;
+    if (std.mem.indexOfScalar(u8, cert[1..], '*') != null) return false;
+
+    const suffix = cert[1..]; // ".example.com"
+    if (expected.len <= suffix.len) return false;
+    const suffix_start = expected.len - suffix.len;
+    if (!std.ascii.eqlIgnoreCase(expected[suffix_start..], suffix)) return false;
+    if (std.mem.indexOfScalar(u8, expected[0..suffix_start], '.') != null) return false; // wildcard must match exactly one label
+
+    return true;
+}
+
 fn dnsMatchesConstraint(hostname_raw: []const u8, constraint_raw: []const u8) bool {
     const hostname = trimTrailingDot(hostname_raw);
     var constraint = trimTrailingDot(constraint_raw);
@@ -201,6 +220,18 @@ test "server name validation ignores case" {
 
 test "server name mismatch fails" {
     try std.testing.expectError(error.HostnameMismatch, validateServerName("example.com", "api.example.com"));
+}
+
+test "server name wildcard matches single label" {
+    try validateServerName("api.example.com", "*.example.com");
+}
+
+test "server name wildcard does not match apex" {
+    try std.testing.expectError(error.HostnameMismatch, validateServerName("example.com", "*.example.com"));
+}
+
+test "server name wildcard does not match multiple labels" {
+    try std.testing.expectError(error.HostnameMismatch, validateServerName("a.b.example.com", "*.example.com"));
 }
 
 test "server chain validation happy path" {
