@@ -711,3 +711,56 @@ Observed Results
 - State tests passed for certificate-authenticated and PSK-like paths.
 - Session integration tests passed with updated FSM semantics.
 - Full package test build passed.
+===
+timestamp: 2026-02-14T23:28:00+09:00
+description: Add fuzz-style parser/session robustness tests
+type: plan
+===
+Motivation
+- `_task.md` requires fuzzing and robustness validation on parsers/state mutation paths.
+
+Scope
+- Add a dedicated `src/tls13/fuzz.zig` test module with randomized inputs for record/handshake/session ingest.
+- Ensure tests assert non-crashing behavior and bounded error handling.
+- Wire module export via `src/tls13.zig`.
+
+Design
+- Use deterministic PRNG seed for reproducible test behavior.
+- Keep runtime small while covering variable lengths and random byte patterns.
+
+Risks/Perf Impact
+- Test-time overhead only; no production runtime impact.
+
+Test Plan (commands)
+- `zig test src/tls13/fuzz.zig`
+- `zig build test`
+
+Rollback
+- Revert fuzz module if it introduces flaky behavior.
+
+Commit Plan
+- `MINOR: tls13: add fuzz-style robustness tests`
+===
+timestamp: 2026-02-14T23:31:00+09:00
+description: Add deterministic fuzz-style robustness tests for parser/session paths
+type: test
+===
+Decisions + Rationale
+- Added dedicated fuzz-style test module to exercise parser/session input handling against randomized byte streams.
+- Used deterministic PRNG seeds to keep failures reproducible while increasing input variety.
+- Focused on non-crash robustness and bounded error behavior.
+
+Files/Functions Touched
+- New file:
+  - `src/tls13/fuzz.zig`
+- Updated:
+  - `src/tls13.zig` (module export)
+
+Commands Executed
+- `zig fmt src/tls13/fuzz.zig src/tls13.zig`
+- `zig test src/tls13/fuzz.zig`
+- `zig build test`
+
+Observed Results
+- Fuzz-style tests passed (record parser, handshake parser, session ingest).
+- Full package test build passed.

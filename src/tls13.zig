@@ -1,6 +1,7 @@
 pub const alerts = @import("tls13/alerts.zig");
 pub const certificate_validation = @import("tls13/certificate_validation.zig");
 pub const early_data = @import("tls13/early_data.zig");
+pub const fuzz = @import("tls13/fuzz.zig");
 pub const handshake = @import("tls13/handshake.zig");
 pub const keyschedule = @import("tls13/keyschedule.zig");
 pub const ocsp = @import("tls13/ocsp.zig");
