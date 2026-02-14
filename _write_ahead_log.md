@@ -542,3 +542,41 @@ Commands Executed
 Observed Results
 - Certificate validation unit tests passed.
 - Full package tests passed.
+===
+timestamp: 2026-02-14T23:00:00+09:00
+description: Add OCSP stapling policy checks and trust-store loading abstraction
+type: code change
+===
+Decisions + Rationale
+- Added `ocsp` module to evaluate stapled response freshness/status under hard-fail or soft-fail policy.
+- Added `trust_store` module wrapping `std.crypto.Certificate.Bundle` for system rescan and absolute PEM file/dir loading.
+- Integrated OCSP policy evaluation into certificate validation via `validateStapledOcsp` using existing validation policy (`allow_soft_fail_ocsp`).
+- Exported both modules via `src/tls13.zig` for package consumers.
+
+Files/Functions Touched
+- New files:
+  - `src/tls13/ocsp.zig`
+  - `src/tls13/trust_store.zig`
+- Updated:
+  - `src/tls13/certificate_validation.zig`
+  - `src/tls13.zig`
+
+Risks/Perf Notes
+- OCSP module validates policy/time semantics on a parsed view; ASN.1 OCSP parsing remains future work.
+- Trust-store loader delegates to std bundle behavior; platform-specific certificate availability still environment-dependent.
+
+===
+timestamp: 2026-02-14T23:00:30+09:00
+description: Validate OCSP and trust-store modules plus integration tests
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/ocsp.zig src/tls13/trust_store.zig src/tls13/certificate_validation.zig src/tls13.zig`
+- `zig test src/tls13/ocsp.zig`
+- `zig test src/tls13/trust_store.zig`
+- `zig test src/tls13/certificate_validation.zig`
+- `zig build test`
+
+Observed Results
+- All OCSP/trust-store/certificate-validation tests passed.
+- Full package test build passed.

@@ -1,4 +1,5 @@
 const std = @import("std");
+const ocsp = @import("ocsp.zig");
 
 pub const ValidationPolicy = struct {
     allow_expired: bool = false,
@@ -42,7 +43,7 @@ pub const ValidationError = error{
     PathLenExceeded,
     LeafMissingDigitalSignature,
     LeafMissingServerAuthEku,
-};
+} || ocsp.CheckError;
 
 pub fn validateServerName(expected_server_name: []const u8, cert_dns_name: []const u8) ValidationError!void {
     if (expected_server_name.len == 0) return error.EmptyServerName;
@@ -78,6 +79,14 @@ pub fn validateServerChain(chain: []const CertificateView) ValidationError!void 
 pub fn validateLeafServerUsage(leaf: CertificateView) ValidationError!void {
     if (!leaf.key_usage.digital_signature) return error.LeafMissingDigitalSignature;
     if (!hasEku(leaf.ext_key_usages, .server_auth)) return error.LeafMissingServerAuthEku;
+}
+
+pub fn validateStapledOcsp(
+    response: ?ocsp.ResponseView,
+    now_sec: i64,
+    policy: ValidationPolicy,
+) ValidationError!ocsp.ValidationResult {
+    return try ocsp.checkStapled(response, now_sec, policy.allow_soft_fail_ocsp);
 }
 
 fn hasEku(usages: []const ExtendedKeyUsage, target: ExtendedKeyUsage) bool {
@@ -147,4 +156,13 @@ test "server chain rejects missing server eku" {
     };
 
     try std.testing.expectError(error.LeafMissingServerAuthEku, validateServerChain(&chain));
+}
+
+test "ocsp policy delegates hard/soft fail behavior" {
+    const now: i64 = 1_700_000_000;
+
+    const soft = try validateStapledOcsp(null, now, .{ .allow_soft_fail_ocsp = true });
+    try std.testing.expectEqual(ocsp.ValidationResult.soft_fail, soft);
+
+    try std.testing.expectError(error.MissingResponse, validateStapledOcsp(null, now, .{ .allow_soft_fail_ocsp = false }));
 }
