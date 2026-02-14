@@ -5867,3 +5867,75 @@ Observed Results
 
 Notes
 - Regression confirms malformed `supported_groups` and `key_share` payload vectors are rejected with dedicated error classes.
+===
+timestamp: 2026-02-15T11:28:00+09:00
+description: Plan key_share group consistency validation against supported_groups in ClientHello
+type: plan
+===
+Motivation
+- ClientHello extension validators now check payload structure, but do not enforce semantic consistency between `key_share` groups and `supported_groups` list.
+- A malformed/inconsistent hello can pass structural checks while violating extension cross-consistency expectations.
+
+Scope
+- Enforce that each ClientHello key_share entry group is present in supported_groups.
+- Reuse key_share invalid classification path for consistency and minimal taxonomy churn.
+- Add regression fixture/test for group-mismatch scenario.
+- Update RFC matrix HS-001B coverage wording.
+
+Design
+- Parse group IDs from supported_groups payload and validate each key_share entry group membership.
+- Integrate cross-check inside `requireClientHelloExtensions` after individual payload validators.
+- On mismatch, return `InvalidKeyShareExtension`.
+
+Risks/Perf Impact
+- Small linear scans over short vectors in hello validation path; negligible overhead.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Remove cross-consistency check and associated regression test.
+
+Commit Plan
+- `MINOR: tls13: enforce key_share groups subset of supported_groups`
+===
+timestamp: 2026-02-15T11:35:00+09:00
+description: Enforce ClientHello key_share group membership against supported_groups
+type: code change
+===
+Decisions + Rationale
+- Added semantic cross-validation after structural extension checks so each ClientHello `key_share` entry must reference a group present in `supported_groups`.
+- Reused existing `InvalidKeyShareExtension` classification to avoid unnecessary error-surface expansion and keep alert mapping stable.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - `requireClientHelloExtensions`: invokes key_share/supported_groups subset validation.
+  - Added helpers:
+    - `validateClientHelloKeyShareGroupsSubset`
+    - `supportedGroupsContain`
+  - Added fixture/test:
+    - `clientHelloRecordWithKeyShareGroupOutsideSupportedGroups`
+    - `server rejects client hello when key_share group is outside supported_groups`
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-HS-001B` wording/coverage to include key_share-group mismatch branch.
+
+Risks/Perf Notes
+- Additional parsing is bounded by small ClientHello vectors and runs on handshake path only; hot-path impact is negligible.
+- Behavior change is intentionally stricter: inconsistent group signaling is rejected as illegal_parameter via existing mapping.
+===
+timestamp: 2026-02-15T11:36:00+09:00
+description: Verify key_share/supported_groups consistency validation via targeted and full suites
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 115/115 tests passed.
+- `zig build test`: passed.
+
+Notes
+- Regression confirms group-mismatch ClientHello now fails with `InvalidKeyShareExtension`.

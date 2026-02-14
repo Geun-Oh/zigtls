@@ -601,6 +601,7 @@ pub const Engine = struct {
         try validateClientHelloSupportedGroupsExtension(supported_groups);
         const key_share = findExtensionData(extensions, ext_key_share) orelse return error.MissingRequiredClientHelloExtension;
         try validateClientHelloKeyShareExtension(key_share);
+        try validateClientHelloKeyShareGroupsSubset(key_share, supported_groups);
         const alpn = findExtensionData(extensions, ext_alpn) orelse return error.MissingRequiredClientHelloExtension;
         try validateClientHelloAlpnExtension(alpn);
         if (!isStrictTls13LegacyCompressionVector(compression_methods)) return error.InvalidCompressionMethod;
@@ -1000,6 +1001,25 @@ fn validateClientHelloKeyShareExtension(data: []const u8) EngineError!void {
     if (i != end) return error.InvalidKeyShareExtension;
 }
 
+fn validateClientHelloKeyShareGroupsSubset(key_share_data: []const u8, supported_groups_data: []const u8) EngineError!void {
+    var i: usize = 2;
+    const end = key_share_data.len;
+    while (i < end) {
+        const group = readU16(key_share_data[i .. i + 2]);
+        if (!supportedGroupsContain(supported_groups_data, group)) return error.InvalidKeyShareExtension;
+        const key_len = readU16(key_share_data[i + 2 .. i + 4]);
+        i += 4 + key_len;
+    }
+}
+
+fn supportedGroupsContain(data: []const u8, wanted: usize) bool {
+    var i: usize = 2;
+    while (i < data.len) : (i += 2) {
+        if (readU16(data[i .. i + 2]) == wanted) return true;
+    }
+    return false;
+}
+
 const PskCounts = struct {
     identity_count: usize,
     binder_count: usize,
@@ -1309,6 +1329,12 @@ fn clientHelloRecordWithInvalidSupportedGroupsPayload() [101]u8 {
 fn clientHelloRecordWithInvalidKeySharePayload() [101]u8 {
     var frame = clientHelloRecord();
     frame[90] = 0x00; // key_exchange_len low byte (invalid zero length)
+    return frame;
+}
+
+fn clientHelloRecordWithKeyShareGroupOutsideSupportedGroups() [101]u8 {
+    var frame = clientHelloRecord();
+    frame[88] = 0x17; // key_share group low byte = secp256r1 (supported_groups only has x25519)
     return frame;
 }
 
@@ -2347,6 +2373,17 @@ test "server rejects client hello with invalid key_share payload" {
     defer engine.deinit();
 
     const rec = clientHelloRecordWithInvalidKeySharePayload();
+    try std.testing.expectError(error.InvalidKeyShareExtension, engine.ingestRecord(&rec));
+}
+
+test "server rejects client hello when key_share group is outside supported_groups" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const rec = clientHelloRecordWithKeyShareGroupOutsideSupportedGroups();
     try std.testing.expectError(error.InvalidKeyShareExtension, engine.ingestRecord(&rec));
 }
 
