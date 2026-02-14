@@ -2356,3 +2356,72 @@ Commands Executed
 Observed Results
 - `certificate_validation.zig`: 18/18 tests passed.
 - Full test target passed.
+===
+timestamp: 2026-02-15T04:12:00+09:00
+description: Plan BoGo critical-failure gate enforcement in interop summary tooling
+type: plan
+===
+Motivation
+- `_task.md` BoGo requirement calls for no unresolved critical failures.
+- Current BoGo wrapper prints summary but does not enforce a critical-failure gate.
+
+Scope
+- Extend `bogo_summary.py` to classify critical failing tests and support threshold gating.
+- Wire `bogo_run.sh` to invoke summary gate and fail when critical failures exceed threshold.
+- Keep self-test coverage for new summary/gate behavior.
+
+Design
+- Critical heuristic (scaffold): failing test names matching TLS1.3 core categories (`TLS13`, `HRR`, `KeyUpdate`, `EarlyData`, `Resumption`).
+- CLI options: `--max-critical` (default none), `--self-test`.
+- `bogo_run.sh` respects optional `BOGO_MAX_CRITICAL` (default 0) and returns non-zero when gate fails.
+
+Risks/Perf Impact
+- Tooling-only changes; no library runtime impact.
+- Heuristic classification may need iterative tuning as real BoGo data accumulates.
+
+Test Plan (commands)
+- `python3 scripts/interop/bogo_summary.py --self-test`
+- `bash -n scripts/interop/bogo_run.sh`
+- `zig build test`
+
+Rollback
+- Disable gate invocation in `bogo_run.sh` while preserving plain summary output.
+
+Commit Plan
+- `MINOR: test: enforce bogo critical failure gate`
+===
+timestamp: 2026-02-15T04:14:00+09:00
+description: Enforce BoGo critical-failure summary gate in interop tooling
+type: code change
+===
+Decisions + Rationale
+- Extended BoGo summary tooling to classify critical failing tests using TLS1.3-centric heuristics.
+- Added gate option (`--max-critical`) and integrated it into runner wrapper with default strict threshold 0.
+- Changed runner behavior to fail when summary/gate check fails instead of warning-only mode.
+
+Files/Functions Touched
+- `scripts/interop/bogo_summary.py`
+  - Added critical classification patterns and gate exit path.
+  - Extended summary output with `critical_failure_count` and list.
+  - Updated self-test for critical count assertions.
+- `scripts/interop/bogo_run.sh`
+  - Added `BOGO_MAX_CRITICAL` env var support.
+  - Enforced summary gate as hard failure.
+
+Risks/Perf Notes
+- Tooling-only change.
+- Critical classification is heuristic and intentionally conservative; threshold remains operator-configurable.
+===
+timestamp: 2026-02-15T04:15:00+09:00
+description: Validate BoGo critical-failure gate tooling updates
+type: test
+===
+Commands Executed
+- `python3 scripts/interop/bogo_summary.py --self-test`
+- `bash -n scripts/interop/bogo_run.sh`
+- `zig build test`
+
+Observed Results
+- Summary self-test passed.
+- Runner shell syntax check passed.
+- Full test target passed.

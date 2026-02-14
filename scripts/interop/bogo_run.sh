@@ -7,10 +7,12 @@ set -euo pipefail
 # Optional env vars:
 #   BOGO_FILTER: regex filter for test names
 #   BOGO_OUTPUT: output json file (default: bogo-results.json)
+#   BOGO_MAX_CRITICAL: maximum allowed critical failures in summary (default: 0)
 
 : "${BORINGSSL_DIR:?BORINGSSL_DIR is required}"
 BOGO_FILTER="${BOGO_FILTER:-}"
 BOGO_OUTPUT="${BOGO_OUTPUT:-bogo-results.json}"
+BOGO_MAX_CRITICAL="${BOGO_MAX_CRITICAL:-0}"
 
 RUNNER="$BORINGSSL_DIR/ssl/test/runner"
 if [[ ! -d "$RUNNER" ]]; then
@@ -43,8 +45,9 @@ echo "Results: $RUNNER/$BOGO_OUTPUT"
 
 if [[ -f "$RUNNER/$BOGO_OUTPUT" ]]; then
   echo "BoGo summary:"
-  if ! python3 "$(dirname "$0")/bogo_summary.py" "$RUNNER/$BOGO_OUTPUT"; then
+  if ! python3 "$(dirname "$0")/bogo_summary.py" --max-critical "$BOGO_MAX_CRITICAL" "$RUNNER/$BOGO_OUTPUT"; then
     echo "warning: failed to summarize BoGo output" >&2
+    exit 1
   fi
 fi
 
