@@ -46,6 +46,7 @@ pub const ValidationError = error{
     NameConstraintsViolation,
     LeafMissingDigitalSignature,
     LeafMissingServerAuthEku,
+    LeafMissingClientAuthEku,
 } || ocsp.CheckError;
 
 pub const PeerValidationInput = struct {
@@ -77,7 +78,22 @@ pub fn validateServerChain(chain: []const CertificateView) ValidationError!void 
 
     const leaf = chain[0];
     try validateLeafServerUsage(leaf);
-    try validateNameConstraints(leaf.dns_name, chain[1..]);
+    try validateCaPathAndNameConstraints(chain);
+}
+
+pub fn validateClientChain(chain: []const CertificateView) ValidationError!void {
+    if (chain.len == 0) return error.InvalidChain;
+
+    const leaf = chain[0];
+    try validateLeafClientUsage(leaf);
+    try validateCaPathAndNameConstraints(chain);
+}
+
+fn validateCaPathAndNameConstraints(chain: []const CertificateView) ValidationError!void {
+    const leaf = chain[0];
+    if (leaf.dns_name.len > 0) {
+        try validateNameConstraints(leaf.dns_name, chain[1..]);
+    }
 
     if (chain.len == 1) return;
 
@@ -116,6 +132,11 @@ fn validateNameConstraints(leaf_dns_name: []const u8, cas: []const CertificateVi
 pub fn validateLeafServerUsage(leaf: CertificateView) ValidationError!void {
     if (!leaf.key_usage.digital_signature) return error.LeafMissingDigitalSignature;
     if (!hasEku(leaf.ext_key_usages, .server_auth)) return error.LeafMissingServerAuthEku;
+}
+
+pub fn validateLeafClientUsage(leaf: CertificateView) ValidationError!void {
+    if (!leaf.key_usage.digital_signature) return error.LeafMissingDigitalSignature;
+    if (!hasEku(leaf.ext_key_usages, .client_auth)) return error.LeafMissingClientAuthEku;
 }
 
 pub fn validateStapledOcsp(
@@ -302,6 +323,51 @@ test "name constraints require match across constrained issuers" {
     };
 
     try validateServerChain(&chain);
+}
+
+test "client chain validation happy path" {
+    const chain = [_]CertificateView{
+        .{
+            .dns_name = "",
+            .is_ca = false,
+            .key_usage = .{ .digital_signature = true },
+            .ext_key_usages = &.{.client_auth},
+        },
+        .{
+            .dns_name = "Client Issuer",
+            .is_ca = true,
+            .path_len_constraint = 0,
+            .key_usage = .{ .key_cert_sign = true },
+        },
+    };
+
+    try validateClientChain(&chain);
+}
+
+test "client chain rejects missing client auth eku" {
+    const chain = [_]CertificateView{
+        .{
+            .dns_name = "",
+            .is_ca = false,
+            .key_usage = .{ .digital_signature = true },
+            .ext_key_usages = &.{.server_auth},
+        },
+    };
+
+    try std.testing.expectError(error.LeafMissingClientAuthEku, validateClientChain(&chain));
+}
+
+test "client chain rejects missing digital signature usage" {
+    const chain = [_]CertificateView{
+        .{
+            .dns_name = "",
+            .is_ca = false,
+            .key_usage = .{},
+            .ext_key_usages = &.{.client_auth},
+        },
+    };
+
+    try std.testing.expectError(error.LeafMissingDigitalSignature, validateClientChain(&chain));
 }
 
 test "ocsp policy delegates hard/soft fail behavior" {

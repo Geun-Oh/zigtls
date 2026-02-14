@@ -2291,3 +2291,68 @@ Commands Executed
 Observed Results
 - `session.zig`: 67/67 tests passed, including stale/boundary ticket-age tests.
 - Full test target passed.
+===
+timestamp: 2026-02-15T04:00:00+09:00
+description: Plan client-auth certificate usage validation alongside server-auth policy checks
+type: plan
+===
+Motivation
+- `_task.md` requires Key Usage / EKU enforcement for both server auth and client auth contexts.
+- Current validator enforces only server-auth leaf usage semantics.
+
+Scope
+- Add `validateClientChain` and `validateLeafClientUsage` APIs.
+- Reuse existing CA/path-length and name-constraints checks where applicable.
+- Add unit tests for positive and negative client-auth EKU/KU cases.
+
+Design
+- Keep separate explicit entrypoints (`validateServerChain`, `validateClientChain`) for policy clarity.
+- Client-auth leaf policy: require `digitalSignature` + `clientAuth` EKU.
+- CA/path constraints remain shared via internal helper.
+
+Risks/Perf Impact
+- No measurable perf impact; validation-only path.
+- Potential behavior tightening where callers adopt new client-auth validator.
+
+Test Plan (commands)
+- `zig test src/tls13/certificate_validation.zig`
+- `zig build test`
+
+Rollback
+- Remove client-auth entrypoint while preserving server-auth behavior if integration contract changes.
+
+Commit Plan
+- `MINOR: tls13: add client-auth certificate usage validator`
+===
+timestamp: 2026-02-15T04:04:00+09:00
+description: Add client-auth certificate usage validation entrypoint and tests
+type: code change
+===
+Decisions + Rationale
+- Added explicit client-auth chain validator to enforce KU/EKU requirements in client-auth context.
+- Refactored CA/path + name-constraints logic into shared helper used by both server/client validators.
+- Kept server-auth behavior unchanged while extending policy surface for mTLS-style client cert validation.
+
+Files/Functions Touched
+- `src/tls13/certificate_validation.zig`
+  - `ValidationError`: added `LeafMissingClientAuthEku`
+  - Added `validateClientChain`, `validateLeafClientUsage`
+  - Added shared helper `validateCaPathAndNameConstraints`
+  - Added client-auth positive/negative tests.
+
+Risks/Perf Notes
+- Validation-only control flow change; no record/data-plane impact.
+- Name-constraints checks on client validator apply when leaf DNS name is present.
+===
+timestamp: 2026-02-15T04:05:00+09:00
+description: Validate client-auth certificate validator expansion
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/certificate_validation.zig`
+- `zig test src/tls13/certificate_validation.zig`
+- `zig build test`
+
+Observed Results
+- `certificate_validation.zig`: 18/18 tests passed.
+- Full test target passed.
