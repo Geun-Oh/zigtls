@@ -641,3 +641,73 @@ Commands Executed
 Observed Results
 - Shell syntax checks passed.
 - Full package tests passed after adding docs/scripts.
+===
+timestamp: 2026-02-14T23:18:00+09:00
+description: Expand handshake FSM to support certificate/certificate_verify flows
+type: plan
+===
+Motivation
+- Current FSM primarily models a reduced handshake path and underrepresents certificate-authenticated flows.
+
+Scope
+- Extend client/server state transitions to allow certificate-authenticated handshake sequence.
+- Preserve PSK-like shortcut path where Finished can arrive without certificate path.
+- Add unit tests for new positive and negative transition cases.
+
+Design
+- Add intermediate states for certificate and certificate_verify processing.
+- Keep strict illegal-transition rejection semantics.
+
+Risks/Perf Impact
+- More states increase transition complexity; mitigated with explicit tests.
+- Negligible runtime overhead (enum dispatch only).
+
+Test Plan (commands)
+- `zig test src/tls13/state.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Revert state-machine changes if integration assumptions break existing flows.
+
+Commit Plan
+- `MEDIUM: tls13: extend fsm for certificate-authenticated handshake`
+===
+timestamp: 2026-02-14T23:22:00+09:00
+description: Extend FSM for certificate-authenticated and PSK-like handshake variants
+type: code change
+===
+Decisions + Rationale
+- Expanded client/server FSM with explicit intermediate states for certificate/certificate_verify processing.
+- Preserved support for PSK-like shortcut path where `finished` can follow encrypted extensions (client) or client hello (server).
+- Kept strict illegal transition rejection while broadening valid handshake variants.
+
+Files/Functions Touched
+- `src/tls13/state.zig`
+  - Added states:
+    - `wait_server_certificate`
+    - `wait_server_certificate_verify`
+    - `wait_client_certificate_or_finished`
+    - `wait_client_certificate_verify`
+    - `wait_client_finished_after_cert`
+  - Updated transition logic and expanded tests.
+
+Risks/Perf Notes
+- More states increase transition table complexity but improve protocol coverage and auditability.
+- No meaningful performance impact expected.
+
+===
+timestamp: 2026-02-14T23:22:30+09:00
+description: Validate expanded FSM against module and integration tests
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/state.zig`
+- `zig test src/tls13/state.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- State tests passed for certificate-authenticated and PSK-like paths.
+- Session integration tests passed with updated FSM semantics.
+- Full package test build passed.
