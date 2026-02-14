@@ -84,6 +84,7 @@ pub const EngineError = error{
     MissingRequiredServerHelloExtension,
     MissingPskKeyExchangeModes,
     InvalidPskBinder,
+    DowngradeDetected,
     UnsupportedSignatureAlgorithm,
 } || record.ParseError || handshake.ParseError || handshake.KeyUpdateError || state.TransitionError || alerts.DecodeError;
 
@@ -318,6 +319,9 @@ pub const Engine = struct {
             .server_hello => {
                 var sh = messages.ServerHello.decode(self.allocator, body) catch return error.InvalidHelloMessage;
                 defer sh.deinit(self.allocator);
+                if (self.config.role == .client and hasDowngradeMarker(sh.random)) {
+                    return error.DowngradeDetected;
+                }
                 if (self.config.role == .client and !messages.serverHelloHasHrrRandom(body)) {
                     try self.requireServerHelloExtensions(sh.extensions);
                 }
@@ -381,6 +385,13 @@ fn hasExtension(extensions: []const messages.Extension, extension_type: u16) boo
         if (ext.extension_type == extension_type) return true;
     }
     return false;
+}
+
+fn hasDowngradeMarker(random: [32]u8) bool {
+    const tls12_marker = [_]u8{ 0x44, 0x4f, 0x57, 0x4e, 0x47, 0x52, 0x44, 0x01 }; // "DOWNGRD\x01"
+    const tls11_marker = [_]u8{ 0x44, 0x4f, 0x57, 0x4e, 0x47, 0x52, 0x44, 0x00 }; // "DOWNGRD\x00"
+    const tail = random[24..32];
+    return std.mem.eql(u8, tail, &tls12_marker) or std.mem.eql(u8, tail, &tls11_marker);
 }
 
 test "zeroize latest secret clears secret bytes and resets option" {
@@ -601,6 +612,20 @@ fn serverHelloRecordWithoutKeyShare() [63]u8 {
     var frame = serverHelloRecord();
     frame[55] = 0xff;
     frame[56] = 0xfe;
+    return frame;
+}
+
+fn serverHelloRecordWithDowngradeMarker() [63]u8 {
+    var frame = serverHelloRecord();
+    // ServerHello.random tail sentinel "DOWNGRD\x01"
+    frame[35] = 0x44;
+    frame[36] = 0x4f;
+    frame[37] = 0x57;
+    frame[38] = 0x4e;
+    frame[39] = 0x47;
+    frame[40] = 0x52;
+    frame[41] = 0x44;
+    frame[42] = 0x01;
     return frame;
 }
 
@@ -995,6 +1020,17 @@ test "client rejects server hello without required extension" {
 
     const rec = serverHelloRecordWithoutKeyShare();
     try std.testing.expectError(error.MissingRequiredServerHelloExtension, engine.ingestRecord(&rec));
+}
+
+test "client rejects server hello with downgrade marker" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const rec = serverHelloRecordWithDowngradeMarker();
+    try std.testing.expectError(error.DowngradeDetected, engine.ingestRecord(&rec));
 }
 
 test "server rejects client hello without required extension" {

@@ -2557,3 +2557,67 @@ Commands Executed
 Observed Results
 - `session.zig`: 69/69 tests passed, including zeroization-focused tests.
 - Full test target passed.
+===
+timestamp: 2026-02-15T04:46:00+09:00
+description: Plan server_hello downgrade marker rejection in client-side validation
+type: plan
+===
+Motivation
+- `_task.md` security hardening checklist requires downgrade protections validation.
+- Current client-side ServerHello validation checks structure/extensions but not downgrade sentinels in random.
+
+Scope
+- Add downgrade marker detection for `ServerHello.random` TLS1.2/TLS1.1 sentinel patterns.
+- Reject marked ServerHello on client side with explicit error.
+- Add regression test for downgrade marker rejection.
+
+Design
+- Implement random-tail check in `session.validateHandshakeBody` after decode.
+- Keep HRR detection path unchanged.
+- Expose helper for readability and testability.
+
+Risks/Perf Impact
+- Constant-time small byte comparisons on handshake path; negligible overhead.
+- Tightens malformed/malicious ServerHello rejection behavior.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Remove marker check if compatibility issue appears in interop vectors; keep extension validation baseline.
+
+Commit Plan
+- `MINOR: tls13: reject serverhello downgrade markers`
+===
+timestamp: 2026-02-15T04:49:00+09:00
+description: Reject ServerHello downgrade sentinels in client-side handshake validation
+type: code change
+===
+Decisions + Rationale
+- Added client-side downgrade marker detection for ServerHello random tail sentinels (`DOWNGRD\x01`, `DOWNGRD\x00`).
+- Rejects sentinel-bearing ServerHello with explicit `DowngradeDetected` error.
+- Keeps existing HRR/extension validation flow unchanged.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - `EngineError`: added `DowngradeDetected`
+  - `validateHandshakeBody`: added downgrade marker check in client role server_hello path
+  - Added helpers and regression fixture/test for downgrade-marker ServerHello.
+
+Risks/Perf Notes
+- Adds fixed-size byte-tail comparisons during server_hello validation only.
+- Tightens malicious-downgrade signal rejection behavior.
+===
+timestamp: 2026-02-15T04:50:00+09:00
+description: Validate downgrade marker rejection hardening
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 70/70 tests passed, including downgrade-marker rejection case.
+- Full test target passed.
