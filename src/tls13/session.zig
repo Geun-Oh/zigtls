@@ -1712,6 +1712,20 @@ fn keyUpdateRecordWithRawRequest(raw: u8) [10]u8 {
     return frame;
 }
 
+fn keyUpdateRecordWithBodyLenTwo() [11]u8 {
+    var frame: [11]u8 = undefined;
+    frame[0] = @intFromEnum(record.ContentType.handshake);
+    frame[1] = 0x03;
+    frame[2] = 0x03;
+    std.mem.writeInt(u16, frame[3..5], 6, .big);
+    frame[5] = @intFromEnum(state.HandshakeType.key_update);
+    const hs_len = handshake.writeU24(2);
+    @memcpy(frame[6..9], &hs_len);
+    frame[9] = 0x00;
+    frame[10] = 0x00;
+    return frame;
+}
+
 fn encryptedExtensionsRecord() [11]u8 {
     // EncryptedExtensions body: extensions_len(2)=0
     var frame: [11]u8 = undefined;
@@ -2148,6 +2162,20 @@ test "invalid keyupdate request byte is rejected as invalid request" {
     try std.testing.expectError(error.InvalidRequest, engine.ingestRecord(&ku));
 }
 
+test "invalid keyupdate body length is rejected as invalid length" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+    _ = try engine.ingestRecord(&serverHelloRecord());
+    _ = try engine.ingestRecord(&encryptedExtensionsRecord());
+    _ = try engine.ingestRecord(&finishedRecord());
+
+    const ku = keyUpdateRecordWithBodyLenTwo();
+    try std.testing.expectError(error.InvalidLength, engine.ingestRecord(&ku));
+}
+
 test "invalid keyupdate request maps to illegal_parameter alert intent" {
     var engine = Engine.init(std.testing.allocator, .{
         .role = .client,
@@ -2164,6 +2192,27 @@ test "invalid keyupdate request maps to illegal_parameter alert intent" {
         .fatal => |fatal| {
             try std.testing.expectEqual(error.InvalidRequest, fatal.err);
             try std.testing.expectEqual(alerts.AlertDescription.illegal_parameter, fatal.alert.description);
+        },
+    }
+}
+
+test "invalid keyupdate body length maps to decode_error alert intent" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+    _ = try engine.ingestRecord(&serverHelloRecord());
+    _ = try engine.ingestRecord(&encryptedExtensionsRecord());
+    _ = try engine.ingestRecord(&finishedRecord());
+
+    const out = engine.ingestRecordWithAlertIntent(&keyUpdateRecordWithBodyLenTwo());
+    switch (out) {
+        .ok => return error.TestUnexpectedResult,
+        .fatal => |failure| {
+            try std.testing.expectEqual(error.InvalidLength, failure.err);
+            try std.testing.expectEqual(alerts.AlertLevel.fatal, failure.alert.level);
+            try std.testing.expectEqual(alerts.AlertDescription.decode_error, failure.alert.description);
         },
     }
 }
@@ -2769,6 +2818,10 @@ test "classify error alert maps representative protocol errors" {
     try std.testing.expectEqual(
         alerts.Alert{ .level = .fatal, .description = .illegal_parameter },
         classifyErrorAlert(error.InvalidPreSharedKeyExtension),
+    );
+    try std.testing.expectEqual(
+        alerts.Alert{ .level = .fatal, .description = .decode_error },
+        classifyErrorAlert(error.InvalidLength),
     );
     try std.testing.expectEqual(
         alerts.Alert{ .level = .fatal, .description = .decode_error },

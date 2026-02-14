@@ -6161,3 +6161,67 @@ Commands Executed
 Observed Results
 - `session.zig`: 121/121 tests passed.
 - `zig build test`: passed.
+===
+timestamp: 2026-02-15T12:27:00+09:00
+description: Plan KeyUpdate body-length boundary validation regression coverage
+type: plan
+===
+Motivation
+- KeyUpdate validation covers invalid request values and zero-length parsing path, but session-level regression coverage for non-1-byte body lengths (e.g., length=2) is not explicit.
+
+Scope
+- Add malformed KeyUpdate fixture with body length 2.
+- Add session regression test asserting `InvalidLength` on malformed KeyUpdate length.
+- Extend alert-classification representative test to pin `InvalidLength -> decode_error` behavior.
+- Update HS-003 matrix test coverage wording to include invalid-length branch.
+
+Design
+- Build a dedicated record constructor for KeyUpdate with 2-byte body while preserving otherwise valid framing.
+- Reuse existing `handshake.parseKeyUpdateRequest` error taxonomy; no protocol behavior change.
+
+Risks/Perf Impact
+- Test-only coverage addition; no runtime impact.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Remove KeyUpdate malformed-length fixture and related tests.
+
+Commit Plan
+- `MINOR: tls13: add keyupdate length boundary regression test`
+===
+timestamp: 2026-02-15T12:29:00+09:00
+description: Add KeyUpdate invalid-length regression coverage and alert mapping assertion
+type: code change
+===
+Decisions + Rationale
+- Added explicit session-level regression coverage for malformed KeyUpdate payload length (`len=2`) to close boundary visibility in HS-003 tests.
+- No protocol logic changes required: existing parser already returns `InvalidLength`; tests now pin behavior and alert intent mapping.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - Added fixture: `keyUpdateRecordWithBodyLenTwo`.
+  - Added tests:
+    - `invalid keyupdate body length is rejected as invalid length`
+    - `invalid keyupdate body length maps to decode_error alert intent`
+  - Extended representative alert classification test with `InvalidLength -> decode_error` assertion.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-HS-003` wording/coverage to include invalid-length branch.
+
+Risks/Perf Notes
+- Test/doc-only hardening; no runtime hot-path impact.
+===
+timestamp: 2026-02-15T12:30:00+09:00
+description: Verify KeyUpdate length-boundary regression additions
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 123/123 tests passed.
+- `zig build test`: passed.
