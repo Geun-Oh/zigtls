@@ -2425,3 +2425,71 @@ Observed Results
 - Summary self-test passed.
 - Runner shell syntax check passed.
 - Full test target passed.
+===
+timestamp: 2026-02-15T04:20:00+09:00
+description: Plan OCSP producedAt freshness/ordering validation hardening
+type: plan
+===
+Motivation
+- `_task.md` revocation/freshness requirements call for robust OCSP freshness handling.
+- Current OCSP checks validate `thisUpdate/nextUpdate` but do not validate `producedAt` sanity.
+
+Scope
+- Add `produced_at` validation rules:
+  - reject responses produced too far in the future.
+  - reject responses whose produced_at predates this_update beyond clock skew.
+- Add explicit error codes and unit tests.
+
+Design
+- Reuse existing `max_clock_skew_sec` tolerance.
+- Preserve soft-fail semantics when policy allows soft-fail.
+
+Risks/Perf Impact
+- Negligible integer comparison overhead.
+- Potentially stricter rejection for malformed/future-dated stapled responses.
+
+Test Plan (commands)
+- `zig test src/tls13/ocsp.zig`
+- `zig test src/tls13/certificate_validation.zig`
+- `zig build test`
+
+Rollback
+- Revert produced_at-specific checks while keeping baseline thisUpdate/nextUpdate validation.
+
+Commit Plan
+- `MINOR: tls13: harden ocsp producedAt freshness checks`
+===
+timestamp: 2026-02-15T04:23:00+09:00
+description: Harden OCSP stapled response validation with producedAt checks
+type: code change
+===
+Decisions + Rationale
+- Added producedAt sanity checks to stapled OCSP validation:
+  - reject future-dated produced_at beyond skew window
+  - reject produced_at that predates this_update beyond skew window
+- Preserved policy semantics: soft-fail mode converts these failures to soft-fail.
+
+Files/Functions Touched
+- `src/tls13/ocsp.zig`
+  - `CheckError`: added `FutureProducedAt`, `ProducedBeforeThisUpdate`
+  - `checkStapled`: added produced_at freshness/ordering checks
+  - Added unit tests for hard-fail and soft-fail behavior.
+
+Risks/Perf Notes
+- Added integer timestamp comparisons only.
+- Tightens acceptance for malformed/future-dated OCSP staples.
+===
+timestamp: 2026-02-15T04:24:00+09:00
+description: Validate OCSP producedAt hardening changes
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/ocsp.zig`
+- `zig test src/tls13/ocsp.zig`
+- `zig test src/tls13/certificate_validation.zig`
+- `zig build test`
+
+Observed Results
+- `ocsp.zig`: 5/5 tests passed.
+- `certificate_validation.zig`: 20/20 tests passed.
+- Full test target passed.

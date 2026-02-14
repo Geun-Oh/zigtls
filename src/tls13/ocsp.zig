@@ -24,6 +24,8 @@ pub const CheckError = error{
     MissingResponse,
     Revoked,
     UnknownStatus,
+    FutureProducedAt,
+    ProducedBeforeThisUpdate,
     FutureThisUpdate,
     InvalidTimeWindow,
     StaleResponse,
@@ -42,6 +44,16 @@ pub fn checkStapled(response: ?ResponseView, now_sec: i64, allow_soft_fail: bool
             if (allow_soft_fail) return .soft_fail;
             return error.UnknownStatus;
         },
+    }
+
+    if (resp.produced_at > now_sec + max_clock_skew_sec) {
+        if (allow_soft_fail) return .soft_fail;
+        return error.FutureProducedAt;
+    }
+
+    if (resp.produced_at + max_clock_skew_sec < resp.this_update) {
+        if (allow_soft_fail) return .soft_fail;
+        return error.ProducedBeforeThisUpdate;
     }
 
     if (resp.this_update > now_sec + max_clock_skew_sec) {
@@ -93,4 +105,40 @@ test "missing response soft-fails only when allowed" {
     const soft = try checkStapled(null, now, true);
     try std.testing.expectEqual(ValidationResult.soft_fail, soft);
     try std.testing.expectError(error.MissingResponse, checkStapled(null, now, false));
+}
+
+test "future produced_at is rejected unless soft-fail policy allows" {
+    const now: i64 = 1_700_000_000;
+    try std.testing.expectError(error.FutureProducedAt, checkStapled(.{
+        .status = .good,
+        .produced_at = now + max_clock_skew_sec + 1,
+        .this_update = now,
+        .next_update = now + 3600,
+    }, now, false));
+
+    const soft = try checkStapled(.{
+        .status = .good,
+        .produced_at = now + max_clock_skew_sec + 1,
+        .this_update = now,
+        .next_update = now + 3600,
+    }, now, true);
+    try std.testing.expectEqual(ValidationResult.soft_fail, soft);
+}
+
+test "produced_at before this_update is rejected unless soft-fail policy allows" {
+    const now: i64 = 1_700_000_000;
+    try std.testing.expectError(error.ProducedBeforeThisUpdate, checkStapled(.{
+        .status = .good,
+        .produced_at = now - 1000,
+        .this_update = now - 100,
+        .next_update = now + 3600,
+    }, now, false));
+
+    const soft = try checkStapled(.{
+        .status = .good,
+        .produced_at = now - 1000,
+        .this_update = now - 100,
+        .next_update = now + 3600,
+    }, now, true);
+    try std.testing.expectEqual(ValidationResult.soft_fail, soft);
 }
