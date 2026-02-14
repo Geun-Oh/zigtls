@@ -2886,3 +2886,67 @@ Commands Executed
 Observed Results
 - `session.zig`: 71/71 tests passed including invalid finished body case.
 - Full test target passed.
+===
+timestamp: 2026-02-15T05:50:00+09:00
+description: Plan PSK binder count parity validation (identities vs binders)
+type: plan
+===
+Motivation
+- PSK binder handling currently validates vector structure but does not enforce identity/binder count parity.
+- `_task.md` requires stronger PSK binder verification behavior for resumption safety.
+
+Scope
+- Extend PSK parser to count identities and binders and reject mismatch.
+- Add explicit engine error for binder-count mismatch.
+- Add targeted negative test fixture.
+
+Design
+- Keep validation in server-side ClientHello extension checks.
+- Preserve existing missing-modes and malformed-vector checks.
+
+Risks/Perf Impact
+- O(n) counter increments during PSK extension parse only.
+- Tightens malformed PSK offer rejection behavior.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Remove count-parity check if interoperability vectors reveal ambiguous producer behavior.
+
+Commit Plan
+- `MINOR: tls13: enforce psk identity-binder count parity`
+===
+timestamp: 2026-02-15T05:54:00+09:00
+description: Enforce PSK identity-binder count parity in ClientHello pre_shared_key validation
+type: code change
+===
+Decisions + Rationale
+- Extended PSK parser to count identities and binders and reject count mismatches.
+- Added explicit `PskBinderCountMismatch` error for diagnosable policy failure.
+- Preserved existing checks for missing `psk_key_exchange_modes` and malformed binder vectors.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - `EngineError`: added `PskBinderCountMismatch`
+  - `validatePskOfferExtensions`: now enforces count parity
+  - `parsePskBinderVector`: returns identity/binder counts
+  - Added mismatch fixture/test case.
+
+Risks/Perf Notes
+- Additional counter bookkeeping only during PSK extension parse path.
+- Tightens malformed PSK offer rejection behavior.
+===
+timestamp: 2026-02-15T05:55:00+09:00
+description: Validate PSK identity-binder parity enforcement changes
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 72/72 tests passed including PSK count-mismatch negative case.
+- Full test target passed.

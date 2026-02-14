@@ -85,6 +85,7 @@ pub const EngineError = error{
     MissingRequiredServerHelloExtension,
     MissingPskKeyExchangeModes,
     InvalidPskBinder,
+    PskBinderCountMismatch,
     DowngradeDetected,
     UnsupportedSignatureAlgorithm,
 } || record.ParseError || handshake.ParseError || handshake.KeyUpdateError || state.TransitionError || alerts.DecodeError;
@@ -430,7 +431,8 @@ test "clear early data ticket zeroes and clears pointer" {
 fn validatePskOfferExtensions(extensions: []const messages.Extension) EngineError!void {
     const psk = findExtensionData(extensions, ext_pre_shared_key) orelse return;
     if (!hasExtension(extensions, ext_psk_key_exchange_modes)) return error.MissingPskKeyExchangeModes;
-    _ = parsePskBinderVector(psk) catch return error.InvalidPskBinder;
+    const counts = parsePskBinderVector(psk) catch return error.InvalidPskBinder;
+    if (counts.identity_count != counts.binder_count) return error.PskBinderCountMismatch;
 }
 
 fn findExtensionData(extensions: []const messages.Extension, extension_type: u16) ?[]const u8 {
@@ -440,7 +442,12 @@ fn findExtensionData(extensions: []const messages.Extension, extension_type: u16
     return null;
 }
 
-fn parsePskBinderVector(bytes: []const u8) !usize {
+const PskCounts = struct {
+    identity_count: usize,
+    binder_count: usize,
+};
+
+fn parsePskBinderVector(bytes: []const u8) !PskCounts {
     // pre_shared_key (CH): identities<7..2^16-1> + binders<33..2^16-1>
     var i: usize = 0;
     if (bytes.len < 2 + 2) return error.Truncated;
@@ -450,6 +457,7 @@ fn parsePskBinderVector(bytes: []const u8) !usize {
     if (identities_len == 0) return error.InvalidLength;
     if (i + identities_len + 2 > bytes.len) return error.Truncated;
     const identities_end = i + identities_len;
+    var identity_count: usize = 0;
     while (i < identities_end) {
         if (i + 2 > identities_end) return error.Truncated;
         const id_len = readU16(bytes[i .. i + 2]);
@@ -457,6 +465,7 @@ fn parsePskBinderVector(bytes: []const u8) !usize {
         if (id_len == 0) return error.InvalidLength;
         if (i + id_len + 4 > identities_end) return error.Truncated;
         i += id_len + 4; // identity + obfuscated_ticket_age
+        identity_count += 1;
     }
     if (i != identities_end) return error.Truncated;
 
@@ -475,8 +484,11 @@ fn parsePskBinderVector(bytes: []const u8) !usize {
         i += binder_len;
         binder_count += 1;
     }
-    if (binder_count == 0 or i != binders_end) return error.InvalidLength;
-    return binder_count;
+    if (identity_count == 0 or binder_count == 0 or i != binders_end) return error.InvalidLength;
+    return .{
+        .identity_count = identity_count,
+        .binder_count = binder_count,
+    };
 }
 
 fn readU16(bytes: []const u8) usize {
@@ -688,6 +700,47 @@ fn clientHelloRecordWithMalformedPskBinder() [115]u8 {
     frame[112] = 0x00;
     frame[113] = 0x00;
     frame[114] = 0x00;
+    return frame;
+}
+
+fn clientHelloRecordWithPskBinderCountMismatch() [126]u8 {
+    var frame: [126]u8 = undefined;
+    const base = clientHelloRecord();
+    @memcpy(frame[0..base.len], base[0..]);
+    std.mem.writeInt(u16, frame[3..5], 121, .big);
+    const hs_len = handshake.writeU24(117);
+    @memcpy(frame[6..9], &hs_len);
+    frame[50] = 0x00;
+    frame[51] = 0x4a; // exts: 49 + psk_modes(6) + psk(19)
+    // psk_key_exchange_modes extension
+    frame[101] = 0x00;
+    frame[102] = 0x2d;
+    frame[103] = 0x00;
+    frame[104] = 0x02;
+    frame[105] = 0x01;
+    frame[106] = 0x01;
+    // pre_shared_key extension:
+    // identities_len=7, one identity(len=1,data=0xaa,age=0)
+    // binders_len=4, two binders of len=1 each -> count mismatch (1 identity, 2 binders)
+    frame[107] = 0x00;
+    frame[108] = 0x29;
+    frame[109] = 0x00;
+    frame[110] = 0x0f;
+    frame[111] = 0x00;
+    frame[112] = 0x07;
+    frame[113] = 0x00;
+    frame[114] = 0x01;
+    frame[115] = 0xaa;
+    frame[116] = 0x00;
+    frame[117] = 0x00;
+    frame[118] = 0x00;
+    frame[119] = 0x00;
+    frame[120] = 0x00;
+    frame[121] = 0x04;
+    frame[122] = 0x01;
+    frame[123] = 0x01;
+    frame[124] = 0x01;
+    frame[125] = 0x02;
     return frame;
 }
 
@@ -1095,6 +1148,17 @@ test "server rejects malformed psk binder vector" {
 
     const rec = clientHelloRecordWithMalformedPskBinder();
     try std.testing.expectError(error.InvalidPskBinder, engine.ingestRecord(&rec));
+}
+
+test "server rejects psk identity and binder count mismatch" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const rec = clientHelloRecordWithPskBinderCountMismatch();
+    try std.testing.expectError(error.PskBinderCountMismatch, engine.ingestRecord(&rec));
 }
 
 test "valid client hello body is accepted for server role" {
