@@ -6,6 +6,7 @@ pub const TrustStoreError = error{
 
 pub const LoadStrategy = struct {
     prefer_system: bool = true,
+    fail_on_system_error: bool = false,
     fallback_pem_file_absolute: ?[]const u8 = null,
     fallback_pem_dir_absolute: ?[]const u8 = null,
 };
@@ -19,6 +20,7 @@ pub const LoadResult = enum {
 
 pub const TrustStore = struct {
     bundle: std.crypto.Certificate.Bundle = .{},
+    const SystemLoaderFn = *const fn (self: *TrustStore, allocator: std.mem.Allocator) anyerror!void;
 
     pub fn initEmpty() TrustStore {
         return .{};
@@ -51,8 +53,19 @@ pub const TrustStore = struct {
     }
 
     pub fn loadWithStrategy(self: *TrustStore, allocator: std.mem.Allocator, strategy: LoadStrategy) !LoadResult {
+        return self.loadWithStrategyInternal(allocator, strategy, defaultSystemLoader);
+    }
+
+    fn loadWithStrategyInternal(
+        self: *TrustStore,
+        allocator: std.mem.Allocator,
+        strategy: LoadStrategy,
+        system_loader: SystemLoaderFn,
+    ) !LoadResult {
         if (strategy.prefer_system) {
-            self.rescanSystem(allocator) catch {};
+            system_loader(self, allocator) catch |err| {
+                if (strategy.fail_on_system_error) return err;
+            };
             if (self.count() > 0) return .system;
         }
 
@@ -67,6 +80,10 @@ pub const TrustStore = struct {
         }
 
         return .none;
+    }
+
+    fn defaultSystemLoader(self: *TrustStore, allocator: std.mem.Allocator) !void {
+        try self.rescanSystem(allocator);
     }
 };
 
@@ -116,4 +133,37 @@ test "pem dir loader rejects relative path" {
     defer store.deinit(std.testing.allocator);
 
     try std.testing.expectError(error.PathNotAbsolute, store.loadPemDirAbsolute(std.testing.allocator, "relative/certs"));
+}
+
+test "strategy can propagate strict system load errors" {
+    var store = TrustStore.initEmpty();
+    defer store.deinit(std.testing.allocator);
+
+    const Hooks = struct {
+        fn failSystemLoad(_: *TrustStore, _: std.mem.Allocator) !void {
+            return error.AccessDenied;
+        }
+    };
+
+    try std.testing.expectError(error.AccessDenied, store.loadWithStrategyInternal(std.testing.allocator, .{
+        .prefer_system = true,
+        .fail_on_system_error = true,
+    }, Hooks.failSystemLoad));
+}
+
+test "strategy can ignore system load errors and continue fallback path" {
+    var store = TrustStore.initEmpty();
+    defer store.deinit(std.testing.allocator);
+
+    const Hooks = struct {
+        fn failSystemLoad(_: *TrustStore, _: std.mem.Allocator) !void {
+            return error.AccessDenied;
+        }
+    };
+
+    const result = try store.loadWithStrategyInternal(std.testing.allocator, .{
+        .prefer_system = true,
+        .fail_on_system_error = false,
+    }, Hooks.failSystemLoad);
+    try std.testing.expectEqual(LoadResult.none, result);
 }
