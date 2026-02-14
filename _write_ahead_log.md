@@ -5708,3 +5708,78 @@ Observed Results
 
 Notes
 - Regression confirms malformed SNI payload with empty host length is rejected as `InvalidServerNameExtension`.
+===
+timestamp: 2026-02-15T10:52:00+09:00
+description: Plan strict ClientHello ALPN extension payload validation in hello checks
+type: plan
+===
+Motivation
+- Hello validation currently enforces ALPN extension presence only.
+- Malformed or empty ALPN payloads can bypass policy checks when extension is syntactically present.
+
+Scope
+- Add ClientHello ALPN payload structure validation and non-empty protocol entry requirement.
+- Add explicit error classification and regression tests.
+- Update RFC matrix HS-001B wording/coverage.
+
+Design
+- Add `InvalidAlpnExtension` to `EngineError`.
+- In `requireClientHelloExtensions`, parse ALPN extension data and enforce:
+  - protocol_name_list length consistency
+  - at least one protocol name present
+  - each protocol name length > 0
+  - exact payload alignment
+- Map new error to fatal `illegal_parameter` alert class.
+
+Risks/Perf Impact
+- Small bounded parsing in ClientHello validation path; negligible overhead.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Remove ALPN parser, error classification, and regression tests.
+
+Commit Plan
+- `MINOR: tls13: validate client hello alpn extension payload`
+===
+timestamp: 2026-02-15T10:56:00+09:00
+description: Add strict ClientHello ALPN payload validation in session hello checks
+type: code change
+===
+Decisions + Rationale
+- Added payload-level ALPN validation to reject malformed-but-present ALPN extension data.
+- Preserved required-extension presence checks and existing hello validation semantics.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - `EngineError`: added `InvalidAlpnExtension`.
+  - `requireClientHelloExtensions`: now validates ALPN payload structure.
+  - `classifyErrorAlert`: maps `InvalidAlpnExtension` to `illegal_parameter`.
+  - Added helper `validateClientHelloAlpnExtension`.
+  - Added fixture/test:
+    - `clientHelloRecordWithInvalidAlpnPayload`
+    - `server rejects client hello with invalid alpn payload`
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-HS-001B` wording/coverage to include invalid-ALPN branch.
+
+Risks/Perf Notes
+- Small bounded parsing in ClientHello validation path; negligible overhead.
+- Intentionally rejects malformed ALPN payloads that previously could pass presence-only checks.
+===
+timestamp: 2026-02-15T10:57:00+09:00
+description: Validate ClientHello ALPN payload hardening with session and full test suites
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 112/112 tests passed.
+- `zig build test`: passed.
+
+Notes
+- Regression confirms malformed ALPN payload with zero-length protocol id is rejected as `InvalidAlpnExtension`.
