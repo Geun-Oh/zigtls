@@ -3149,3 +3149,71 @@ Commands Executed
 Observed Results
 - `session.zig`: 76/76 tests passed including new memory ceiling limit tests.
 - Full test target passed.
+===
+timestamp: 2026-02-15T06:50:00+09:00
+description: Plan OCSP fail/soft-fail default policy documentation and default-behavior test coverage
+ type: plan
+===
+Correction
+- This entry intentionally supersedes malformed metadata formatting in the same append block.
+===
+timestamp: 2026-02-15T06:50:30+09:00
+description: Supersede malformed metadata line for OCSP policy documentation plan
+type: plan
+===
+Correction
+- Previous entry at 2026-02-15T06:50:00+09:00 used malformed metadata key formatting (` type:`).
+- This entry supersedes that malformed header for WAL compliance.
+
+Motivation
+- `_task.md` requires configurable revocation fail/soft-fail policy with documented default.
+- Current code has policy flags but no dedicated policy doc + default-behavior regression test at peer-validator entrypoint.
+
+Scope
+- Add doc describing OCSP policy defaults and override behavior.
+- Add test proving default policy hard-fails missing stapled OCSP in `validateServerPeer`.
+
+Design
+- Keep default `allow_soft_fail_ocsp=false` unchanged.
+- Add explicit test exercising peer validator with default policy and null stapled response.
+
+Risks/Perf Impact
+- Docs/test-only changes.
+
+Test Plan (commands)
+- `zig test src/tls13/certificate_validation.zig`
+- `zig build test`
+
+Rollback
+- Remove policy doc/test if policy contract changes.
+
+Commit Plan
+- `MINOR: docs: document ocsp default fail policy`
+===
+timestamp: 2026-02-15T06:53:00+09:00
+description: Document OCSP default hard-fail policy and add peer-validator default behavior regression test
+type: docs
+===
+Decisions + Rationale
+- Added dedicated OCSP policy doc clarifying default hard-fail stance and soft-fail override behavior.
+- Added regression test at `validateServerPeer` entrypoint to ensure default policy hard-fails missing stapled OCSP.
+
+Files/Functions Touched
+- `docs/ocsp-policy.md` (new)
+- `src/tls13/certificate_validation.zig`
+  - Added `integrated peer validator default policy hard-fails missing ocsp` test.
+
+Risks/Perf Notes
+- Docs/test-only change.
+===
+timestamp: 2026-02-15T06:54:00+09:00
+description: Validate OCSP default policy docs/test updates
+type: test
+===
+Commands Executed
+- `zig test src/tls13/certificate_validation.zig`
+- `zig build test`
+
+Observed Results
+- `certificate_validation.zig`: 21/21 tests passed.
+- Full test target passed.

@@ -428,3 +428,27 @@ test "integrated peer validator propagates hostname failure" {
         .policy = .{ .allow_soft_fail_ocsp = true },
     }));
 }
+
+test "integrated peer validator default policy hard-fails missing ocsp" {
+    const now: i64 = 1_700_000_000;
+    const chain = [_]CertificateView{
+        .{
+            .dns_name = "example.com",
+            .is_ca = false,
+            .key_usage = .{ .digital_signature = true },
+            .ext_key_usages = &.{.server_auth},
+        },
+        .{
+            .dns_name = "Root",
+            .is_ca = true,
+            .key_usage = .{ .key_cert_sign = true },
+        },
+    };
+
+    try std.testing.expectError(error.MissingResponse, validateServerPeer(.{
+        .expected_server_name = "example.com",
+        .chain = &chain,
+        .stapled_ocsp = null,
+        .now_sec = now,
+    }));
+}
