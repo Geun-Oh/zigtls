@@ -26,6 +26,7 @@ pub const Config = struct {
 pub const EarlyDataConfig = struct {
     enabled: bool = false,
     replay_filter: ?*early_data.ReplayFilter = null,
+    max_ticket_age_sec: u64 = 600,
 };
 
 pub const Metrics = struct {
@@ -72,6 +73,7 @@ pub const EngineError = error{
     UnsupportedRecordType,
     EarlyDataRejected,
     MissingReplayFilter,
+    EarlyDataTicketExpired,
     TruncationDetected,
     InvalidHelloMessage,
     InvalidCertificateMessage,
@@ -124,6 +126,7 @@ pub const Engine = struct {
     transcript: Transcript,
     latest_secret: ?TrafficSecret = null,
     early_data_idempotent: bool = false,
+    early_data_within_window: bool = true,
     early_data_ticket: ?[]u8 = null,
     saw_close_notify: bool = false,
     metrics: Metrics = .{},
@@ -149,6 +152,20 @@ pub const Engine = struct {
         self.early_data_ticket = try self.allocator.alloc(u8, ticket.len);
         @memcpy(self.early_data_ticket.?, ticket);
         self.early_data_idempotent = idempotent;
+        self.early_data_within_window = true;
+    }
+
+    pub fn beginEarlyDataWithTimes(
+        self: *Engine,
+        ticket: []const u8,
+        idempotent: bool,
+        issued_at_sec: i64,
+        now_sec: i64,
+    ) !void {
+        if (issued_at_sec > now_sec) return error.EarlyDataTicketExpired;
+        const age = @as(u64, @intCast(now_sec - issued_at_sec));
+        if (age > self.config.early_data.max_ticket_age_sec) return error.EarlyDataTicketExpired;
+        try self.beginEarlyData(ticket, idempotent);
     }
 
     pub fn onTransportEof(self: *Engine) EngineError!void {
@@ -217,6 +234,7 @@ pub const Engine = struct {
                 if (self.machine.state != .connected) {
                     if (!self.config.early_data.enabled) return error.EarlyDataRejected;
                     if (!self.early_data_idempotent) return error.EarlyDataRejected;
+                    if (!self.early_data_within_window) return error.EarlyDataTicketExpired;
                     const replay_filter = self.config.early_data.replay_filter orelse return error.MissingReplayFilter;
                     const ticket = self.early_data_ticket orelse return error.EarlyDataRejected;
                     if (replay_filter.seenOrInsert(ticket)) return error.EarlyDataRejected;
@@ -846,6 +864,44 @@ test "early data requires idempotent mark and anti-replay" {
 
     // Same replay token is rejected on subsequent early-data records.
     try std.testing.expectError(error.EarlyDataRejected, engine.ingestRecord(&rec));
+}
+
+test "early data ticket freshness window rejects stale ticket" {
+    var replay = try early_data.ReplayFilter.init(std.testing.allocator, 4096);
+    defer replay.deinit();
+
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+        .early_data = .{
+            .enabled = true,
+            .replay_filter = &replay,
+            .max_ticket_age_sec = 60,
+        },
+    });
+    defer engine.deinit();
+
+    try std.testing.expectError(error.EarlyDataTicketExpired, engine.beginEarlyDataWithTimes("ticket-2", true, 1_700_000_000, 1_700_000_061));
+}
+
+test "early data ticket freshness window accepts boundary age" {
+    var replay = try early_data.ReplayFilter.init(std.testing.allocator, 4096);
+    defer replay.deinit();
+
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+        .early_data = .{
+            .enabled = true,
+            .replay_filter = &replay,
+            .max_ticket_age_sec = 60,
+        },
+    });
+    defer engine.deinit();
+
+    try engine.beginEarlyDataWithTimes("ticket-3", true, 1_700_000_000, 1_700_000_060);
+    const rec = appDataRecord("hello");
+    _ = try engine.ingestRecord(&rec);
 }
 
 test "transport eof without close_notify is truncation" {

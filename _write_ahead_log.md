@@ -2224,3 +2224,70 @@ Commands Executed
 Observed Results
 - `keyschedule.zig`: 6/6 tests passed.
 - Full test target passed.
+===
+timestamp: 2026-02-15T03:40:00+09:00
+description: Plan 0-RTT ticket freshness window policy in early-data admission path
+type: plan
+===
+Motivation
+- `_task.md` requires anti-replay controls with ticket/window policy when 0-RTT is enabled.
+- Current implementation enforces idempotency + replay filter but lacks ticket freshness window check.
+
+Scope
+- Add configurable max ticket age for early data acceptance.
+- Add API to begin early-data context with issuance/current time and reject stale tickets.
+- Enforce freshness during application_data early-data admission and add regression tests.
+
+Design
+- Extend `EarlyDataConfig` with `max_ticket_age_sec` default.
+- Keep existing `beginEarlyData` API behavior for compatibility; add `beginEarlyDataWithTimes` for strict mode.
+- Return explicit engine error for stale ticket windows.
+
+Risks/Perf Impact
+- Constant-time integer comparisons only; no measurable performance impact.
+- Existing callers can continue using legacy begin API; stricter call path is opt-in.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Remove strict begin API and freshness checks if integration call sites need staged migration.
+
+Commit Plan
+- `MINOR: tls13: add early-data ticket freshness window policy`
+===
+timestamp: 2026-02-15T03:44:00+09:00
+description: Add early-data ticket freshness window policy and strict begin API
+type: code change
+===
+Decisions + Rationale
+- Extended early-data config with `max_ticket_age_sec` to encode replay-window freshness policy.
+- Added `beginEarlyDataWithTimes(ticket, idempotent, issued_at_sec, now_sec)` for explicit age validation.
+- Added explicit stale-ticket engine error and enforced freshness in early-data admission path.
+- Preserved existing `beginEarlyData` for compatibility while allowing stricter caller-controlled flow.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - `EarlyDataConfig`: added `max_ticket_age_sec`
+  - `EngineError`: added `EarlyDataTicketExpired`
+  - `Engine`: added `beginEarlyDataWithTimes`
+  - Early-data ingest path: freshness check integration
+  - Added freshness boundary and stale-ticket tests.
+
+Risks/Perf Notes
+- Integer-only age checks; negligible overhead.
+- Strict behavior is opt-in via new API to avoid breaking existing callers.
+===
+timestamp: 2026-02-15T03:45:00+09:00
+description: Validate early-data freshness policy changes
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 67/67 tests passed, including stale/boundary ticket-age tests.
+- Full test target passed.
