@@ -5109,3 +5109,67 @@ Observed Results
 
 Notes
 - New boundary tests confirm only exact random-tail downgrade sentinels trigger `DowngradeDetected`.
+===
+timestamp: 2026-02-15T08:35:00+09:00
+description: Plan fix for missing alert classification mapping of InvalidPskBinderLength
+type: plan
+===
+Motivation
+- Session engine can emit `InvalidPskBinderLength` for PSK binder hash-length mismatch.
+- `classifyErrorAlert` currently omits this error from `illegal_parameter` mapping, falling through to `internal_error`.
+
+Scope
+- Add `InvalidPskBinderLength` mapping to fatal `illegal_parameter` alert classification.
+- Add regression test assertion for this mapping.
+- Update RFC matrix alert coverage wording to mention PSK binder-length classification path.
+
+Design
+- Minimal behavior patch in `classifyErrorAlert` switch.
+- Extend existing alert-classification test vector.
+
+Risks/Perf Impact
+- No runtime/perf risk; switch-case classification correction only.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Revert mapping line and test assertion.
+
+Commit Plan
+- `BUG/MINOR: tls13: map InvalidPskBinderLength to illegal_parameter alert`
+===
+timestamp: 2026-02-15T08:38:00+09:00
+description: Fix missing alert classification for InvalidPskBinderLength
+type: code change
+===
+Decisions + Rationale
+- Corrected alert-classification gap where `InvalidPskBinderLength` incorrectly fell through to `internal_error`.
+- Ensures PSK binder-length policy violations consistently map to `illegal_parameter` fatal alerts.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - `classifyErrorAlert`: added `error.InvalidPskBinderLength` to `illegal_parameter` set.
+  - Extended classification regression test to assert this mapping.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-ALERT-001` coverage note to include PSK binder-length mapping branch.
+
+Risks/Perf Notes
+- Classification-only correction; no parser/state/runtime hot-path impact.
+===
+timestamp: 2026-02-15T08:39:00+09:00
+description: Validate InvalidPskBinderLength alert mapping fix with session and full test suites
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 103/103 tests passed.
+- `zig build test`: passed.
+
+Notes
+- Classification regression now explicitly covers `InvalidPskBinderLength -> illegal_parameter` mapping.

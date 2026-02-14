@@ -549,6 +549,7 @@ pub fn classifyErrorAlert(err: anyerror) alerts.Alert {
         error.InvalidPskKeyExchangeModes,
         error.MissingPskDheKeyExchangeMode,
         error.InvalidPskBinder,
+        error.InvalidPskBinderLength,
         error.PskBinderCountMismatch,
         error.UnsupportedSignatureAlgorithm,
         error.InvalidRequest,
@@ -2143,6 +2144,10 @@ test "classify error alert maps representative protocol errors" {
     try std.testing.expectEqual(
         alerts.Alert{ .level = .fatal, .description = .illegal_parameter },
         classifyErrorAlert(error.InvalidSupportedVersionExtension),
+    );
+    try std.testing.expectEqual(
+        alerts.Alert{ .level = .fatal, .description = .illegal_parameter },
+        classifyErrorAlert(error.InvalidPskBinderLength),
     );
     try std.testing.expectEqual(
         alerts.Alert{ .level = .fatal, .description = .decode_error },
