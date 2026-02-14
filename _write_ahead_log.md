@@ -4740,3 +4740,80 @@ Observed Results
 
 Notes
 - New regression coverage confirms CA-marked leaf rejection on both server and client chain validation paths.
+===
+timestamp: 2026-02-15T07:15:00+09:00
+description: Plan strict psk_key_exchange_modes extension validation when PSK is offered
+type: plan
+===
+Motivation
+- Current PSK offer validation enforces extension presence but not `psk_key_exchange_modes` payload shape/value constraints.
+- `_task.md` requires strict parser/extension legality handling and robust negative-path behavior.
+
+Scope
+- Validate `psk_key_exchange_modes` vector encoding when `pre_shared_key` is present.
+- Reject malformed length vectors and unknown mode values.
+- Add explicit error classification and regression tests.
+- Update RFC matrix PSK row coverage wording.
+
+Design
+- Add `InvalidPskKeyExchangeModes` to `EngineError`.
+- In `validatePskOfferExtensions`, parse `psk_key_exchange_modes` payload (`len + modes...`) and ensure:
+  - non-empty list
+  - declared length matches payload length
+  - each mode is known (`0` or `1`).
+- Map new error to fatal `illegal_parameter` alert.
+
+Risks/Perf Impact
+- O(n) scan over small extension vector in ClientHello validation path; negligible overhead.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Remove strict modes parser and associated tests.
+
+Commit Plan
+- `MINOR: tls13: validate psk_key_exchange_modes extension payload`
+===
+timestamp: 2026-02-15T07:20:00+09:00
+description: Enforce strict psk_key_exchange_modes payload validation for PSK offers
+type: code change
+===
+Decisions + Rationale
+- PSK offer path previously enforced `psk_key_exchange_modes` extension presence only.
+- Added strict payload validation to reject malformed mode vectors and unknown mode values before binder parsing.
+- Introduced explicit error classification for better alert mapping and regression visibility.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - `EngineError`: added `InvalidPskKeyExchangeModes`.
+  - `classifyErrorAlert`: maps `InvalidPskKeyExchangeModes` to `illegal_parameter`.
+  - `validatePskOfferExtensions`: now parses/validates modes payload.
+  - Added `validatePskKeyExchangeModes` helper.
+  - Added fixtures/tests:
+    - `clientHelloRecordWithInvalidPskModesLength`
+    - `clientHelloRecordWithUnknownPskMode`
+    - `server rejects malformed psk key exchange modes length`
+    - `server rejects unknown psk key exchange mode value`
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-PSK-001` wording and test coverage notes.
+
+Risks/Perf Notes
+- Small linear scan over mode list in ClientHello validation path; negligible runtime overhead.
+===
+timestamp: 2026-02-15T07:21:00+09:00
+description: Validate strict psk_key_exchange_modes checks with session and full test suites
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 97/97 tests passed.
+- `zig build test`: passed.
+
+Notes
+- Added regression coverage confirms malformed length and unknown mode value are rejected with `InvalidPskKeyExchangeModes`.
