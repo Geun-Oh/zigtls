@@ -53,6 +53,7 @@ pub const EngineError = error{
     UnsupportedRecordType,
     EarlyDataRejected,
     MissingReplayFilter,
+    TruncationDetected,
 } || record.ParseError || handshake.ParseError || handshake.KeyUpdateError || state.TransitionError || alerts.DecodeError;
 
 const Transcript = union(enum) {
@@ -87,6 +88,7 @@ pub const Engine = struct {
     latest_secret: ?TrafficSecret = null,
     early_data_idempotent: bool = false,
     early_data_ticket: ?[]u8 = null,
+    saw_close_notify: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, config: Config) Engine {
         if (config.early_data.enabled and config.early_data.replay_filter == null) {
@@ -109,6 +111,11 @@ pub const Engine = struct {
         self.early_data_ticket = try self.allocator.alloc(u8, ticket.len);
         @memcpy(self.early_data_ticket.?, ticket);
         self.early_data_idempotent = idempotent;
+    }
+
+    pub fn onTransportEof(self: *Engine) EngineError!void {
+        if (!self.saw_close_notify) return error.TruncationDetected;
+        self.machine.markClosed();
     }
 
     pub fn ingestRecord(self: *Engine, record_bytes: []const u8) EngineError!IngestResult {
@@ -148,6 +155,7 @@ pub const Engine = struct {
                 const alert = try alerts.Alert.decode(parsed.payload);
                 try result.push(.{ .received_alert = alert });
                 if (alert.description == .close_notify) {
+                    self.saw_close_notify = true;
                     self.machine.markClosed();
                 } else {
                     self.machine.markClosing();
@@ -380,4 +388,27 @@ test "early data requires idempotent mark and anti-replay" {
 
     // Same replay token is rejected on subsequent early-data records.
     try std.testing.expectError(error.EarlyDataRejected, engine.ingestRecord(&rec));
+}
+
+test "transport eof without close_notify is truncation" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    try std.testing.expectError(error.TruncationDetected, engine.onTransportEof());
+}
+
+test "transport eof after close_notify is clean close" {
+    var frame = Engine.buildAlertRecord(.{ .level = .warning, .description = .close_notify });
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    _ = try engine.ingestRecord(&frame);
+    try engine.onTransportEof();
+    try std.testing.expectEqual(state.ConnectionState.closed, engine.machine.state);
 }

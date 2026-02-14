@@ -412,3 +412,66 @@ Observed Results
 - Early-data module tests passed.
 - Session tests passed including 0-RTT default rejection and anti-replay acceptance/replay rejection cases.
 - Full package test build passed.
+===
+timestamp: 2026-02-14T22:41:00+09:00
+description: Add truncation-attack protection via close_notify-aware EOF handling
+type: plan
+===
+Motivation
+- `_task.md` requires hardened close semantics: TCP FIN must not be treated as clean shutdown without authenticated `close_notify`.
+
+Scope
+- Add transport EOF API to session engine.
+- Track receipt of `close_notify` alert.
+- Return explicit truncation error on EOF without prior `close_notify`.
+- Add positive/negative tests for EOF behavior.
+
+Design
+- Keep Sans-I/O boundary: expose EOF as an explicit engine method, not socket operations.
+- Preserve existing alert parsing and state transitions.
+
+Risks/Perf Impact
+- Minimal overhead: one boolean flag + branch in EOF path.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Revert session EOF handling changes if semantics conflict with desired integration model.
+
+Commit Plan
+- `MINOR: tls13: enforce close_notify before clean eof`
+===
+timestamp: 2026-02-14T22:44:00+09:00
+description: Enforce close_notify-aware EOF handling to mitigate truncation attacks
+type: code change
+===
+Decisions + Rationale
+- Added explicit transport EOF handling API (`onTransportEof`) to keep truncation semantics inside Sans-I/O engine boundaries.
+- Introduced `saw_close_notify` tracking and `TruncationDetected` error when EOF arrives before authenticated `close_notify`.
+- Preserved existing alert-driven close transitions and made clean EOF contingent on prior close_notify receipt.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - Added `EngineError.TruncationDetected`.
+  - Added `Engine.onTransportEof`.
+  - Added close_notify tracking in alert ingestion path.
+  - Added truncation positive/negative tests.
+
+Risks/Perf Notes
+- Minimal runtime impact (single boolean tracking and EOF branch).
+
+===
+timestamp: 2026-02-14T22:44:30+09:00
+description: Validate truncation-protection EOF semantics
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- Session tests passed with new truncation and clean-close EOF cases.
+- Full package test build passed.
