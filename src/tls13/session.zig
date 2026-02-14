@@ -217,6 +217,19 @@ pub const Engine = struct {
         return frame;
     }
 
+    pub fn buildKeyUpdateRecord(request: handshake.KeyUpdateRequest) [10]u8 {
+        var frame: [10]u8 = undefined;
+        frame[0] = @intFromEnum(record.ContentType.handshake);
+        frame[1] = 0x03;
+        frame[2] = 0x03;
+        std.mem.writeInt(u16, frame[3..5], 5, .big);
+        frame[5] = @intFromEnum(state.HandshakeType.key_update);
+        const len = handshake.writeU24(1);
+        @memcpy(frame[6..9], &len);
+        frame[9] = @intFromEnum(request);
+        return frame;
+    }
+
     fn deriveApplicationTrafficSecret(self: *Engine) TrafficSecret {
         return switch (self.transcript) {
             .sha256 => |hasher| blk: {
@@ -341,16 +354,7 @@ fn hrrServerHelloRecord() [49]u8 {
 }
 
 fn keyUpdateRecord(request: handshake.KeyUpdateRequest) [10]u8 {
-    var frame: [10]u8 = undefined;
-    frame[0] = @intFromEnum(record.ContentType.handshake);
-    frame[1] = 0x03;
-    frame[2] = 0x03;
-    std.mem.writeInt(u16, frame[3..5], 5, .big);
-    frame[5] = @intFromEnum(state.HandshakeType.key_update);
-    const len = handshake.writeU24(1);
-    @memcpy(frame[6..9], &len);
-    frame[9] = @intFromEnum(request);
-    return frame;
+    return Engine.buildKeyUpdateRecord(request);
 }
 
 fn appDataRecord(comptime data: []const u8) [5 + data.len]u8 {
@@ -565,4 +569,15 @@ test "metrics counts truncation events" {
     try std.testing.expectError(error.TruncationDetected, engine.onTransportEof());
     const m = engine.snapshotMetrics();
     try std.testing.expectEqual(@as(u64, 1), m.truncation_events);
+}
+
+test "build keyupdate record is parseable" {
+    const frame = Engine.buildKeyUpdateRecord(.update_requested);
+    const parsed = try record.parseRecord(&frame);
+    try std.testing.expectEqual(record.ContentType.handshake, parsed.header.content_type);
+
+    const hs = try handshake.parseOne(parsed.payload);
+    try std.testing.expectEqual(state.HandshakeType.key_update, hs.header.handshake_type);
+    const req = try handshake.parseKeyUpdateRequest(hs.body);
+    try std.testing.expectEqual(handshake.KeyUpdateRequest.update_requested, req);
 }
