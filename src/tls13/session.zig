@@ -1,5 +1,6 @@
 const std = @import("std");
 const alerts = @import("alerts.zig");
+const early_data = @import("early_data.zig");
 const handshake = @import("handshake.zig");
 const keyschedule = @import("keyschedule.zig");
 const record = @import("record.zig");
@@ -8,6 +9,12 @@ const state = @import("state.zig");
 pub const Config = struct {
     role: state.Role,
     suite: keyschedule.CipherSuite,
+    early_data: EarlyDataConfig = .{},
+};
+
+pub const EarlyDataConfig = struct {
+    enabled: bool = false,
+    replay_filter: ?*early_data.ReplayFilter = null,
 };
 
 pub const Action = union(enum) {
@@ -44,6 +51,8 @@ pub const IngestResult = struct {
 pub const EngineError = error{
     TooManyActions,
     UnsupportedRecordType,
+    EarlyDataRejected,
+    MissingReplayFilter,
 } || record.ParseError || handshake.ParseError || handshake.KeyUpdateError || state.TransitionError || alerts.DecodeError;
 
 const Transcript = union(enum) {
@@ -76,8 +85,13 @@ pub const Engine = struct {
     machine: state.Machine,
     transcript: Transcript,
     latest_secret: ?TrafficSecret = null,
+    early_data_idempotent: bool = false,
+    early_data_ticket: ?[]u8 = null,
 
     pub fn init(allocator: std.mem.Allocator, config: Config) Engine {
+        if (config.early_data.enabled and config.early_data.replay_filter == null) {
+            @panic("0-RTT enabled but replay filter is not configured");
+        }
         return .{
             .allocator = allocator,
             .config = config,
@@ -86,9 +100,18 @@ pub const Engine = struct {
         };
     }
 
-    pub fn ingestRecord(self: *Engine, record_bytes: []const u8) EngineError!IngestResult {
-        _ = self.allocator;
+    pub fn deinit(self: *Engine) void {
+        self.clearEarlyDataTicket();
+    }
 
+    pub fn beginEarlyData(self: *Engine, ticket: []const u8, idempotent: bool) !void {
+        self.clearEarlyDataTicket();
+        self.early_data_ticket = try self.allocator.alloc(u8, ticket.len);
+        @memcpy(self.early_data_ticket.?, ticket);
+        self.early_data_idempotent = idempotent;
+    }
+
+    pub fn ingestRecord(self: *Engine, record_bytes: []const u8) EngineError!IngestResult {
         const parsed = try record.parseRecord(record_bytes);
         var result = IngestResult.init(5 + parsed.payload.len);
 
@@ -132,6 +155,13 @@ pub const Engine = struct {
                 try result.push(.{ .state_changed = self.machine.state });
             },
             .application_data => {
+                if (self.machine.state != .connected) {
+                    if (!self.config.early_data.enabled) return error.EarlyDataRejected;
+                    if (!self.early_data_idempotent) return error.EarlyDataRejected;
+                    const replay_filter = self.config.early_data.replay_filter orelse return error.MissingReplayFilter;
+                    const ticket = self.early_data_ticket orelse return error.EarlyDataRejected;
+                    if (replay_filter.seenOrInsert(ticket)) return error.EarlyDataRejected;
+                }
                 try result.push(.{ .application_data = parsed.payload });
             },
             else => return error.UnsupportedRecordType,
@@ -172,6 +202,13 @@ pub const Engine = struct {
                 break :blk .{ .sha384 = keyschedule.deriveLabel(.tls_aes_256_gcm_sha384, secret, "c ap traffic", &digest, 48) };
             },
         };
+    }
+
+    fn clearEarlyDataTicket(self: *Engine) void {
+        if (self.early_data_ticket) |ticket| {
+            self.allocator.free(ticket);
+            self.early_data_ticket = null;
+        }
     }
 };
 
@@ -217,11 +254,22 @@ fn keyUpdateRecord(request: handshake.KeyUpdateRequest) [10]u8 {
     return frame;
 }
 
+fn appDataRecord(comptime data: []const u8) [5 + data.len]u8 {
+    var frame: [5 + data.len]u8 = undefined;
+    frame[0] = @intFromEnum(record.ContentType.application_data);
+    frame[1] = 0x03;
+    frame[2] = 0x03;
+    std.mem.writeInt(u16, frame[3..5], data.len, .big);
+    @memcpy(frame[5..], data);
+    return frame;
+}
+
 test "client side handshake flow reaches connected" {
     var engine = Engine.init(std.testing.allocator, .{
         .role = .client,
         .suite = .tls_aes_128_gcm_sha256,
     });
+    defer engine.deinit();
 
     _ = try engine.ingestRecord(&handshakeRecord(.server_hello));
     _ = try engine.ingestRecord(&handshakeRecord(.encrypted_extensions));
@@ -236,6 +284,7 @@ test "unexpected handshake fails with illegal transition" {
         .role = .client,
         .suite = .tls_aes_128_gcm_sha256,
     });
+    defer engine.deinit();
 
     try std.testing.expectError(error.IllegalTransition, engine.ingestRecord(&handshakeRecord(.finished)));
 }
@@ -247,6 +296,7 @@ test "close_notify transitions to closed" {
         .role = .client,
         .suite = .tls_chacha20_poly1305_sha256,
     });
+    defer engine.deinit();
 
     _ = try engine.ingestRecord(&frame);
     try std.testing.expectEqual(state.ConnectionState.closed, engine.machine.state);
@@ -260,6 +310,7 @@ test "client accepts hrr then server hello" {
         .role = .client,
         .suite = .tls_aes_128_gcm_sha256,
     });
+    defer engine.deinit();
 
     const res_hrr = try engine.ingestRecord(&hrr);
     try std.testing.expectEqual(state.ConnectionState.wait_server_hello, engine.machine.state);
@@ -278,6 +329,7 @@ test "keyupdate request is surfaced in action" {
         .role = .client,
         .suite = .tls_aes_128_gcm_sha256,
     });
+    defer engine.deinit();
     _ = try engine.ingestRecord(&handshakeRecord(.server_hello));
     _ = try engine.ingestRecord(&handshakeRecord(.encrypted_extensions));
     _ = try engine.ingestRecord(&handshakeRecord(.finished));
@@ -295,4 +347,37 @@ test "keyupdate request is surfaced in action" {
         .send_key_update => |req| try std.testing.expectEqual(handshake.KeyUpdateRequest.update_not_requested, req),
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "early data is rejected by default" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const rec = appDataRecord("hello");
+    try std.testing.expectError(error.EarlyDataRejected, engine.ingestRecord(&rec));
+}
+
+test "early data requires idempotent mark and anti-replay" {
+    var replay = try early_data.ReplayFilter.init(std.testing.allocator, 4096);
+    defer replay.deinit();
+
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+        .early_data = .{ .enabled = true, .replay_filter = &replay },
+    });
+    defer engine.deinit();
+
+    const rec = appDataRecord("hello");
+
+    try std.testing.expectError(error.EarlyDataRejected, engine.ingestRecord(&rec));
+
+    try engine.beginEarlyData("ticket-1", true);
+    _ = try engine.ingestRecord(&rec);
+
+    // Same replay token is rejected on subsequent early-data records.
+    try std.testing.expectError(error.EarlyDataRejected, engine.ingestRecord(&rec));
 }

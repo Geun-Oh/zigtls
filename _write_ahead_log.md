@@ -338,3 +338,77 @@ Observed Results
 - All state/handshake/session tests passed.
 - Session suite now includes HRR round handling and KeyUpdate request/response-action checks.
 - Full package test build passed.
+===
+timestamp: 2026-02-14T22:31:00+09:00
+description: Implement early-data gating and anti-replay baseline (0-RTT policy)
+type: plan
+===
+Motivation
+- `_task.md` requires 0-RTT disabled by default, anti-replay protection when enabled, and an API for idempotency gating.
+
+Scope
+- Add `early_data` module with replay filter implementation.
+- Extend session config/init to enforce anti-replay requirement when 0-RTT is enabled.
+- Add explicit API to mark early data as idempotent and attach replay token.
+- Enforce rejection of pre-handshake application_data unless policy checks pass.
+
+Design
+- Use std-only implementation with Bloom-like replay filter (deterministic hash probes).
+- Keep transport-agnostic behavior via Sans-I/O action/error model.
+- Preserve strict fail-closed default behavior.
+
+Risks/Perf Impact
+- Replay filter is probabilistic (false positives possible) by design.
+- Memory footprint depends on configured bitset size; defaults will be conservative.
+
+Test Plan (commands)
+- `zig test src/tls13/early_data.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Revert early-data related module and session changes if policy semantics are rejected.
+- Record superseding entries append-only in WAL.
+
+Commit Plan
+- `MEDIUM: tls13: enforce 0-rtt gating with anti-replay baseline`
+===
+timestamp: 2026-02-14T22:36:00+09:00
+description: Add 0-RTT gating policy with replay filter baseline in session engine
+type: code change
+===
+Decisions + Rationale
+- Added new `early_data` module implementing a std-only replay filter with multiple hash probes to support anti-replay checks.
+- Extended session config with explicit early-data policy: disabled by default, and replay filter required when enabled.
+- Added `beginEarlyData(ticket, idempotent)` API to force application-level idempotency declaration before early data acceptance.
+- Enforced fail-closed handling for pre-handshake application_data: reject when policy checks fail, reject replayed tokens, accept only when enabled + idempotent + non-replayed token.
+
+Files/Functions Touched
+- `src/tls13/early_data.zig` (new)
+  - `ReplayFilter.init/deinit/seenOrInsert`.
+- `src/tls13/session.zig`
+  - `Config.early_data`, `EarlyDataConfig`, `Engine.beginEarlyData`, early-data checks in `ingestRecord`.
+  - Added `Engine.deinit` ticket cleanup.
+  - Added tests for default rejection and anti-replay/idempotency gating.
+- `src/tls13.zig`
+  - Exported `early_data` module.
+
+Risks/Perf Notes
+- Replay filter is probabilistic (false positives possible), which can reject valid early data but does not weaken security.
+- Memory usage scales with configured replay filter bitset size.
+
+===
+timestamp: 2026-02-14T22:37:00+09:00
+description: Validate early-data anti-replay implementation with module and integration tests
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/early_data.zig src/tls13/session.zig src/tls13.zig`
+- `zig test src/tls13/early_data.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- Early-data module tests passed.
+- Session tests passed including 0-RTT default rejection and anti-replay acceptance/replay rejection cases.
+- Full package test build passed.
