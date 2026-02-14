@@ -93,6 +93,8 @@ pub const EngineError = error{
     MissingRequiredServerHelloExtension,
     MissingRequiredHrrExtension,
     ConfiguredCipherSuiteMismatch,
+    InvalidSupportedVersionExtension,
+    InvalidCompressionMethod,
     MissingPskKeyExchangeModes,
     InvalidPskBinder,
     PskBinderCountMismatch,
@@ -358,6 +360,7 @@ pub const Engine = struct {
                     return error.DowngradeDetected;
                 }
                 if (self.config.role == .client) {
+                    if (sh.compression_method != 0x00) return error.InvalidCompressionMethod;
                     if (sh.cipher_suite != configuredCipherSuiteCodepoint(self.config.suite)) {
                         return error.ConfiguredCipherSuiteMismatch;
                     }
@@ -375,7 +378,7 @@ pub const Engine = struct {
                     if (!containsCipherSuite(ch.cipher_suites, configuredCipherSuiteCodepoint(self.config.suite))) {
                         return error.ConfiguredCipherSuiteMismatch;
                     }
-                    try self.requireClientHelloExtensions(ch.extensions);
+                    try self.requireClientHelloExtensions(ch.compression_methods, ch.extensions);
                 }
             },
             .certificate => {
@@ -413,25 +416,29 @@ pub const Engine = struct {
         return false;
     }
 
-    fn requireClientHelloExtensions(self: Engine, extensions: []const messages.Extension) EngineError!void {
+    fn requireClientHelloExtensions(self: Engine, compression_methods: []const u8, extensions: []const messages.Extension) EngineError!void {
         _ = self;
-        if (!hasExtension(extensions, ext_supported_versions)) return error.MissingRequiredClientHelloExtension;
+        const supported_versions = findExtensionData(extensions, ext_supported_versions) orelse return error.MissingRequiredClientHelloExtension;
+        if (!clientHelloSupportedVersionsContainTls13(supported_versions)) return error.InvalidSupportedVersionExtension;
         if (!hasExtension(extensions, ext_server_name)) return error.MissingRequiredClientHelloExtension;
         if (!hasExtension(extensions, ext_supported_groups)) return error.MissingRequiredClientHelloExtension;
         if (!hasExtension(extensions, ext_key_share)) return error.MissingRequiredClientHelloExtension;
         if (!hasExtension(extensions, ext_alpn)) return error.MissingRequiredClientHelloExtension;
+        if (!containsNullCompressionMethod(compression_methods)) return error.InvalidCompressionMethod;
         try validatePskOfferExtensions(extensions);
     }
 
     fn requireServerHelloExtensions(self: Engine, extensions: []const messages.Extension) EngineError!void {
         _ = self;
-        if (!hasExtension(extensions, ext_supported_versions)) return error.MissingRequiredServerHelloExtension;
+        const supported_versions = findExtensionData(extensions, ext_supported_versions) orelse return error.MissingRequiredServerHelloExtension;
+        if (!serverHelloSupportedVersionIsTls13(supported_versions)) return error.InvalidSupportedVersionExtension;
         if (!hasExtension(extensions, ext_key_share)) return error.MissingRequiredServerHelloExtension;
     }
 
     fn requireHrrExtensions(self: Engine, extensions: []const messages.Extension) EngineError!void {
         _ = self;
-        if (!hasExtension(extensions, ext_supported_versions)) return error.MissingRequiredHrrExtension;
+        const supported_versions = findExtensionData(extensions, ext_supported_versions) orelse return error.MissingRequiredHrrExtension;
+        if (!serverHelloSupportedVersionIsTls13(supported_versions)) return error.InvalidSupportedVersionExtension;
         if (!hasExtension(extensions, ext_key_share)) return error.MissingRequiredHrrExtension;
     }
 };
@@ -459,6 +466,31 @@ fn configuredCipherSuiteCodepoint(suite: keyschedule.CipherSuite) u16 {
 fn containsCipherSuite(cipher_suites: []const u16, wanted: u16) bool {
     for (cipher_suites) |suite| {
         if (suite == wanted) return true;
+    }
+    return false;
+}
+
+fn containsNullCompressionMethod(compression_methods: []const u8) bool {
+    for (compression_methods) |method| {
+        if (method == 0x00) return true;
+    }
+    return false;
+}
+
+fn serverHelloSupportedVersionIsTls13(data: []const u8) bool {
+    return data.len == 2 and data[0] == 0x03 and data[1] == 0x04;
+}
+
+fn clientHelloSupportedVersionsContainTls13(data: []const u8) bool {
+    if (data.len < 3) return false;
+    const list_len = data[0];
+    if (list_len == 0 or list_len % 2 != 0) return false;
+    if (1 + list_len != data.len) return false;
+
+    var i: usize = 1;
+    const end = 1 + list_len;
+    while (i < end) : (i += 2) {
+        if (data[i] == 0x03 and data[i + 1] == 0x04) return true;
     }
     return false;
 }
@@ -767,6 +799,19 @@ fn serverHelloRecordWithoutKeyShare() [63]u8 {
     return frame;
 }
 
+fn serverHelloRecordWithBadSupportedVersion() [63]u8 {
+    var frame = serverHelloRecord();
+    frame[53] = 0x03;
+    frame[54] = 0x03;
+    return frame;
+}
+
+fn serverHelloRecordWithNonZeroCompression() [63]u8 {
+    var frame = serverHelloRecord();
+    frame[46] = 0x01;
+    return frame;
+}
+
 fn serverHelloRecordWithCipherSuite(suite: u16) [63]u8 {
     var frame = serverHelloRecord();
     frame[44] = @intCast((suite >> 8) & 0xff);
@@ -806,6 +851,18 @@ fn clientHelloRecordWithoutAlpn() [101]u8 {
     var frame = clientHelloRecord();
     frame[92] = 0xff;
     frame[93] = 0xfe;
+    return frame;
+}
+
+fn clientHelloRecordWithoutNullCompression() [101]u8 {
+    var frame = clientHelloRecord();
+    frame[49] = 0x01;
+    return frame;
+}
+
+fn clientHelloRecordWithoutTls13SupportedVersion() [101]u8 {
+    var frame = clientHelloRecord();
+    frame[72] = 0x03;
     return frame;
 }
 
@@ -938,6 +995,13 @@ fn hrrServerHelloRecordWithoutKeyShare() [61]u8 {
     var frame = hrrServerHelloRecord();
     frame[55] = 0xff;
     frame[56] = 0xfe;
+    return frame;
+}
+
+fn hrrServerHelloRecordWithBadSupportedVersion() [61]u8 {
+    var frame = hrrServerHelloRecord();
+    frame[53] = 0x03;
+    frame[54] = 0x03;
     return frame;
 }
 
@@ -1143,6 +1207,17 @@ test "client rejects hrr missing required extension" {
     try std.testing.expectError(error.MissingRequiredHrrExtension, engine.ingestRecord(&hrr));
 }
 
+test "client rejects hrr with invalid supported version extension" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const hrr = hrrServerHelloRecordWithBadSupportedVersion();
+    try std.testing.expectError(error.InvalidSupportedVersionExtension, engine.ingestRecord(&hrr));
+}
+
 test "keyupdate request is surfaced in action" {
     var engine = Engine.init(std.testing.allocator, .{
         .role = .client,
@@ -1341,6 +1416,17 @@ test "client rejects server hello without required extension" {
     try std.testing.expectError(error.MissingRequiredServerHelloExtension, engine.ingestRecord(&rec));
 }
 
+test "client rejects server hello with invalid supported version extension" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const rec = serverHelloRecordWithBadSupportedVersion();
+    try std.testing.expectError(error.InvalidSupportedVersionExtension, engine.ingestRecord(&rec));
+}
+
 test "client rejects server hello with configured cipher suite mismatch" {
     var engine = Engine.init(std.testing.allocator, .{
         .role = .client,
@@ -1350,6 +1436,17 @@ test "client rejects server hello with configured cipher suite mismatch" {
 
     const rec = serverHelloRecordWithCipherSuite(0x1301);
     try std.testing.expectError(error.ConfiguredCipherSuiteMismatch, engine.ingestRecord(&rec));
+}
+
+test "client rejects server hello with non-zero compression method" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const rec = serverHelloRecordWithNonZeroCompression();
+    try std.testing.expectError(error.InvalidCompressionMethod, engine.ingestRecord(&rec));
 }
 
 test "client rejects server hello with downgrade marker" {
@@ -1383,6 +1480,28 @@ test "server rejects client hello without required extension" {
 
     const rec = clientHelloRecordWithoutAlpn();
     try std.testing.expectError(error.MissingRequiredClientHelloExtension, engine.ingestRecord(&rec));
+}
+
+test "server rejects client hello without tls13 supported version" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const rec = clientHelloRecordWithoutTls13SupportedVersion();
+    try std.testing.expectError(error.InvalidSupportedVersionExtension, engine.ingestRecord(&rec));
+}
+
+test "server rejects client hello without null compression method" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const rec = clientHelloRecordWithoutNullCompression();
+    try std.testing.expectError(error.InvalidCompressionMethod, engine.ingestRecord(&rec));
 }
 
 test "server rejects psk offer without psk key exchange modes" {
