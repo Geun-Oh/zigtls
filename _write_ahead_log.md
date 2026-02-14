@@ -1819,3 +1819,70 @@ Observed Results
 - Shim parser/routing unit tests passed.
 - Shim build target passed.
 - Full package tests passed.
+===
+timestamp: 2026-02-15T02:24:00+09:00
+description: Add EncryptedExtensions and NewSessionTicket codecs plus session body validation hooks
+type: plan
+===
+Motivation
+- Session validates hello/certificate-path bodies, but EncryptedExtensions and NewSessionTicket bodies are still envelope-only.
+
+Scope
+- Add `EncryptedExtensions.decode` and `NewSessionTicketMsg.decode` in `messages.zig`.
+- Wire session `validateHandshakeBody` checks for `.encrypted_extensions` and `.new_session_ticket`.
+- Add valid/invalid tests at codec and session levels.
+
+Design
+- Reuse existing extension duplication and size-limit policy.
+- Keep parser-independent and transport-agnostic behavior.
+
+Risks/Perf Impact
+- Handshake-path decode overhead only.
+
+Test Plan (commands)
+- `zig test src/tls13/messages.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Revert new body validation if it blocks currently expected handshake vectors; adjust fixtures accordingly.
+
+Commit Plan
+- `MINOR: tls13: validate encryptedextensions and nst message bodies`
+===
+timestamp: 2026-02-15T02:34:00+09:00
+description: Wire EncryptedExtensions/NewSessionTicket body validation into session ingest
+type: code change
+===
+Decisions + Rationale
+- Extended `validateHandshakeBody` to parse `.encrypted_extensions` and `.new_session_ticket` bodies, matching earlier strict-parse policy used for hello/certificate paths.
+- Introduced explicit engine errors for each body class to keep failure surfaces diagnosable (`InvalidEncryptedExtensionsMessage`, `InvalidNewSessionTicketMessage`).
+- Replaced zero-body EncryptedExtensions test fixtures with minimally valid bodies (`extensions_len=0`) to preserve state-transition tests while enforcing body validation.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - `EngineError`
+  - `validateHandshakeBody`
+  - Added fixtures: `encryptedExtensionsRecord`, `newSessionTicketRecord`
+  - Added regression tests for invalid/valid EncryptedExtensions and NewSessionTicket paths.
+- `src/tls13/messages.zig`
+  - Added codecs/tests for `EncryptedExtensions` and `NewSessionTicketMsg` and extension-vector helper reuse.
+
+Risks/Perf Notes
+- Added decode work on handshake ingest path only for two handshake types; expected overhead is small and bounded by existing extension/length guards.
+- Main compatibility risk is rejecting previously accepted envelope-only malformed frames; this is intentional hardening.
+===
+timestamp: 2026-02-15T02:35:00+09:00
+description: Validate message/session body-validation expansion
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/messages.zig src/tls13/session.zig`
+- `zig test src/tls13/messages.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `messages.zig`: 12/12 tests passed.
+- `session.zig`: 58/58 tests passed, including new invalid/valid EE/NST validation tests.
+- Full build test target passed.

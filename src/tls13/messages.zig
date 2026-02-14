@@ -442,6 +442,79 @@ pub const CertificateVerifyMsg = struct {
     }
 };
 
+pub const EncryptedExtensions = struct {
+    extensions: []Extension,
+
+    pub fn deinit(self: *EncryptedExtensions, allocator: std.mem.Allocator) void {
+        for (self.extensions) |*ext| ext.deinit(allocator);
+        allocator.free(self.extensions);
+        self.* = undefined;
+    }
+
+    pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) !EncryptedExtensions {
+        if (bytes.len < 2) return error.Truncated;
+        const ext_len = readU16(bytes[0..2]);
+        if (2 + ext_len != bytes.len) return error.Truncated;
+        return .{
+            .extensions = try decodeExtensionsVector(allocator, bytes[2..], ext_len),
+        };
+    }
+};
+
+pub const NewSessionTicketMsg = struct {
+    ticket_lifetime: u32,
+    ticket_age_add: u32,
+    ticket_nonce: []u8,
+    ticket: []u8,
+    extensions: []Extension,
+
+    pub fn deinit(self: *NewSessionTicketMsg, allocator: std.mem.Allocator) void {
+        allocator.free(self.ticket_nonce);
+        allocator.free(self.ticket);
+        for (self.extensions) |*ext| ext.deinit(allocator);
+        allocator.free(self.extensions);
+        self.* = undefined;
+    }
+
+    pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) !NewSessionTicketMsg {
+        var i: usize = 0;
+        if (bytes.len < 4 + 4 + 1 + 2 + 2) return error.Truncated;
+
+        const lifetime = readU32(bytes[i .. i + 4]);
+        i += 4;
+        const age_add = readU32(bytes[i .. i + 4]);
+        i += 4;
+
+        const nonce_len = bytes[i];
+        i += 1;
+        if (i + nonce_len > bytes.len) return error.Truncated;
+        const nonce = try allocator.dupe(u8, bytes[i .. i + nonce_len]);
+        errdefer allocator.free(nonce);
+        i += nonce_len;
+
+        if (i + 2 > bytes.len) return error.Truncated;
+        const ticket_len = readU16(bytes[i .. i + 2]);
+        i += 2;
+        if (i + ticket_len > bytes.len) return error.Truncated;
+        const ticket = try allocator.dupe(u8, bytes[i .. i + ticket_len]);
+        errdefer allocator.free(ticket);
+        i += ticket_len;
+
+        if (i + 2 > bytes.len) return error.Truncated;
+        const ext_len = readU16(bytes[i .. i + 2]);
+        i += 2;
+        if (i + ext_len != bytes.len) return error.Truncated;
+
+        return .{
+            .ticket_lifetime = lifetime,
+            .ticket_age_add = age_add,
+            .ticket_nonce = nonce,
+            .ticket = ticket,
+            .extensions = try decodeExtensionsVector(allocator, bytes[i..], ext_len),
+        };
+    }
+};
+
 test "clienthello encode/decode roundtrip" {
     const allocator = std.testing.allocator;
 
@@ -597,8 +670,58 @@ test "certificate rejects oversized entry length" {
     try std.testing.expectError(error.CertificateEntryTooLarge, CertificateMsg.decode(allocator, &bytes));
 }
 
+test "encrypted extensions decode baseline" {
+    const allocator = std.testing.allocator;
+    const bytes = [_]u8{
+        0x00, 0x06, // ext vec len
+        0x00, 0x10, // ext type
+        0x00, 0x02, // ext len
+        0x01, 0x02,
+    };
+    var msg = try EncryptedExtensions.decode(allocator, &bytes);
+    defer msg.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), msg.extensions.len);
+}
+
+test "new session ticket decode baseline" {
+    const allocator = std.testing.allocator;
+    const bytes = [_]u8{
+        0x00, 0x00, 0x0e, 0x10, // lifetime
+        0x11, 0x22, 0x33, 0x44, // age add
+        0x01, // nonce len
+        0xaa, // nonce
+        0x00, 0x02, // ticket len
+        0xbe, 0xef, // ticket
+        0x00, 0x00, // extension len
+    };
+    var msg = try NewSessionTicketMsg.decode(allocator, &bytes);
+    defer msg.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0x00000e10), msg.ticket_lifetime);
+    try std.testing.expectEqual(@as(usize, 2), msg.ticket.len);
+}
+
+test "encrypted extensions rejects duplicate extension" {
+    const allocator = std.testing.allocator;
+    const bytes = [_]u8{
+        0x00, 0x0a,
+        0x00, 0x10,
+        0x00, 0x01,
+        0x01, 0x00,
+        0x10, 0x00,
+        0x01, 0x02,
+    };
+    try std.testing.expectError(error.DuplicateExtension, EncryptedExtensions.decode(allocator, &bytes));
+}
+
 fn readU16(bytes: []const u8) u16 {
     return (@as(u16, bytes[0]) << 8) | @as(u16, bytes[1]);
+}
+
+fn readU32(bytes: []const u8) u32 {
+    return (@as(u32, bytes[0]) << 24) |
+        (@as(u32, bytes[1]) << 16) |
+        (@as(u32, bytes[2]) << 8) |
+        @as(u32, bytes[3]);
 }
 
 fn writeU16(bytes: []u8, value: u16) void {
@@ -615,4 +738,34 @@ fn containsExtensionType(exts: []const Extension, extension_type: u16) bool {
         if (ext.extension_type == extension_type) return true;
     }
     return false;
+}
+
+fn decodeExtensionsVector(allocator: std.mem.Allocator, bytes: []const u8, ext_len: usize) ![]Extension {
+    if (ext_len > bytes.len) return error.Truncated;
+    var i: usize = 0;
+    var ext_list: std.ArrayList(Extension) = .empty;
+    errdefer {
+        for (ext_list.items) |*ext| ext.deinit(allocator);
+        ext_list.deinit(allocator);
+    }
+
+    while (i < ext_len) {
+        if (i + 4 > ext_len) return error.Truncated;
+        const ext_type = readU16(bytes[i .. i + 2]);
+        i += 2;
+        const one_ext_len = readU16(bytes[i .. i + 2]);
+        i += 2;
+        if (i + one_ext_len > ext_len) return error.Truncated;
+        if (ext_list.items.len >= max_extensions_per_message) return error.TooManyExtensions;
+        if (containsExtensionType(ext_list.items, ext_type)) return error.DuplicateExtension;
+
+        try ext_list.append(allocator, .{
+            .extension_type = ext_type,
+            .data = try allocator.dupe(u8, bytes[i .. i + one_ext_len]),
+        });
+        i += one_ext_len;
+    }
+
+    if (i != ext_len) return error.Truncated;
+    return try ext_list.toOwnedSlice(allocator);
 }

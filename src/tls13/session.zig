@@ -76,6 +76,8 @@ pub const EngineError = error{
     InvalidHelloMessage,
     InvalidCertificateMessage,
     InvalidCertificateVerifyMessage,
+    InvalidEncryptedExtensionsMessage,
+    InvalidNewSessionTicketMessage,
     UnsupportedSignatureAlgorithm,
 } || record.ParseError || handshake.ParseError || handshake.KeyUpdateError || state.TransitionError || alerts.DecodeError;
 
@@ -290,6 +292,14 @@ pub const Engine = struct {
                     return error.UnsupportedSignatureAlgorithm;
                 }
             },
+            .encrypted_extensions => {
+                var ee = messages.EncryptedExtensions.decode(self.allocator, body) catch return error.InvalidEncryptedExtensionsMessage;
+                defer ee.deinit(self.allocator);
+            },
+            .new_session_ticket => {
+                var nst = messages.NewSessionTicketMsg.decode(self.allocator, body) catch return error.InvalidNewSessionTicketMessage;
+                defer nst.deinit(self.allocator);
+            },
             else => {},
         }
     }
@@ -388,6 +398,50 @@ fn keyUpdateRecord(request: handshake.KeyUpdateRequest) [10]u8 {
     return Engine.buildKeyUpdateRecord(request);
 }
 
+fn encryptedExtensionsRecord() [11]u8 {
+    // EncryptedExtensions body: extensions_len(2)=0
+    var frame: [11]u8 = undefined;
+    frame[0] = @intFromEnum(record.ContentType.handshake);
+    frame[1] = 0x03;
+    frame[2] = 0x03;
+    std.mem.writeInt(u16, frame[3..5], 6, .big);
+    frame[5] = @intFromEnum(state.HandshakeType.encrypted_extensions);
+    const hs_len = handshake.writeU24(2);
+    @memcpy(frame[6..9], &hs_len);
+    frame[9] = 0x00;
+    frame[10] = 0x00;
+    return frame;
+}
+
+fn newSessionTicketRecord() [25]u8 {
+    // lifetime(4), age_add(4), nonce_len(1)=1, nonce(1), ticket_len(2)=2, ticket(2), ext_len(2)=0
+    var frame: [25]u8 = undefined;
+    frame[0] = @intFromEnum(record.ContentType.handshake);
+    frame[1] = 0x03;
+    frame[2] = 0x03;
+    std.mem.writeInt(u16, frame[3..5], 20, .big);
+    frame[5] = @intFromEnum(state.HandshakeType.new_session_ticket);
+    const hs_len = handshake.writeU24(16);
+    @memcpy(frame[6..9], &hs_len);
+    frame[9] = 0x00;
+    frame[10] = 0x00;
+    frame[11] = 0x0e;
+    frame[12] = 0x10;
+    frame[13] = 0x11;
+    frame[14] = 0x22;
+    frame[15] = 0x33;
+    frame[16] = 0x44;
+    frame[17] = 0x01;
+    frame[18] = 0xaa;
+    frame[19] = 0x00;
+    frame[20] = 0x02;
+    frame[21] = 0xbe;
+    frame[22] = 0xef;
+    frame[23] = 0x00;
+    frame[24] = 0x00;
+    return frame;
+}
+
 fn appDataRecord(comptime data: []const u8) [5 + data.len]u8 {
     var frame: [5 + data.len]u8 = undefined;
     frame[0] = @intFromEnum(record.ContentType.application_data);
@@ -454,7 +508,7 @@ test "client side handshake flow reaches connected" {
     defer engine.deinit();
 
     _ = try engine.ingestRecord(&serverHelloRecord());
-    _ = try engine.ingestRecord(&handshakeRecord(.encrypted_extensions));
+    _ = try engine.ingestRecord(&encryptedExtensionsRecord());
     _ = try engine.ingestRecord(&handshakeRecord(.finished));
 
     try std.testing.expectEqual(state.ConnectionState.connected, engine.machine.state);
@@ -513,7 +567,7 @@ test "keyupdate request is surfaced in action" {
     });
     defer engine.deinit();
     _ = try engine.ingestRecord(&serverHelloRecord());
-    _ = try engine.ingestRecord(&handshakeRecord(.encrypted_extensions));
+    _ = try engine.ingestRecord(&encryptedExtensionsRecord());
     _ = try engine.ingestRecord(&handshakeRecord(.finished));
 
     const ku = keyUpdateRecord(.update_requested);
@@ -626,7 +680,7 @@ test "metrics counters reflect handshake and alert activity" {
     defer engine.deinit();
 
     _ = try engine.ingestRecord(&serverHelloRecord());
-    _ = try engine.ingestRecord(&handshakeRecord(.encrypted_extensions));
+    _ = try engine.ingestRecord(&encryptedExtensionsRecord());
     _ = try engine.ingestRecord(&handshakeRecord(.finished));
     _ = try engine.ingestRecord(&keyUpdateRecord(.update_not_requested));
     _ = try engine.ingestRecord(&Engine.buildAlertRecord(.{ .level = .warning, .description = .close_notify }));
@@ -669,7 +723,7 @@ test "invalid certificate body is rejected" {
     defer engine.deinit();
 
     _ = try engine.ingestRecord(&serverHelloRecord());
-    _ = try engine.ingestRecord(&handshakeRecord(.encrypted_extensions));
+    _ = try engine.ingestRecord(&encryptedExtensionsRecord());
     try std.testing.expectError(error.InvalidCertificateMessage, engine.ingestRecord(&handshakeRecord(.certificate)));
 }
 
@@ -681,7 +735,7 @@ test "certificate path valid bodies progress state" {
     defer engine.deinit();
 
     _ = try engine.ingestRecord(&serverHelloRecord());
-    _ = try engine.ingestRecord(&handshakeRecord(.encrypted_extensions));
+    _ = try engine.ingestRecord(&encryptedExtensionsRecord());
     _ = try engine.ingestRecord(&certificateRecord());
     _ = try engine.ingestRecord(&certificateVerifyRecord());
     _ = try engine.ingestRecord(&handshakeRecord(.finished));
@@ -696,7 +750,7 @@ test "invalid certificate_verify body is rejected" {
     defer engine.deinit();
 
     _ = try engine.ingestRecord(&serverHelloRecord());
-    _ = try engine.ingestRecord(&handshakeRecord(.encrypted_extensions));
+    _ = try engine.ingestRecord(&encryptedExtensionsRecord());
     _ = try engine.ingestRecord(&certificateRecord());
     try std.testing.expectError(error.InvalidCertificateVerifyMessage, engine.ingestRecord(&handshakeRecord(.certificate_verify)));
 }
@@ -709,7 +763,7 @@ test "unsupported certificate_verify algorithm is rejected" {
     defer engine.deinit();
 
     _ = try engine.ingestRecord(&serverHelloRecord());
-    _ = try engine.ingestRecord(&handshakeRecord(.encrypted_extensions));
+    _ = try engine.ingestRecord(&encryptedExtensionsRecord());
     _ = try engine.ingestRecord(&certificateRecord());
     try std.testing.expectError(error.UnsupportedSignatureAlgorithm, engine.ingestRecord(&certificateVerifyRecordWithAlgorithm(0xeeee)));
 }
@@ -749,4 +803,42 @@ test "server role invalid certificate_verify body is rejected" {
     _ = try engine.ingestRecord(&clientHelloRecord());
     _ = try engine.ingestRecord(&certificateRecord());
     try std.testing.expectError(error.InvalidCertificateVerifyMessage, engine.ingestRecord(&handshakeRecord(.certificate_verify)));
+}
+
+test "invalid encrypted_extensions body is rejected" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    _ = try engine.ingestRecord(&serverHelloRecord());
+    try std.testing.expectError(error.InvalidEncryptedExtensionsMessage, engine.ingestRecord(&handshakeRecord(.encrypted_extensions)));
+}
+
+test "new_session_ticket body is validated in connected state" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    _ = try engine.ingestRecord(&serverHelloRecord());
+    _ = try engine.ingestRecord(&encryptedExtensionsRecord());
+    _ = try engine.ingestRecord(&handshakeRecord(.finished));
+    _ = try engine.ingestRecord(&newSessionTicketRecord());
+    try std.testing.expectEqual(state.ConnectionState.connected, engine.machine.state);
+}
+
+test "invalid new_session_ticket body is rejected" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    _ = try engine.ingestRecord(&serverHelloRecord());
+    _ = try engine.ingestRecord(&encryptedExtensionsRecord());
+    _ = try engine.ingestRecord(&handshakeRecord(.finished));
+    try std.testing.expectError(error.InvalidNewSessionTicketMessage, engine.ingestRecord(&handshakeRecord(.new_session_ticket)));
 }
