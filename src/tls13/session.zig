@@ -788,6 +788,20 @@ fn serverHelloRecordWithDowngradeMarker() [63]u8 {
     return frame;
 }
 
+fn serverHelloRecordWithLegacyDowngradeMarker() [63]u8 {
+    var frame = serverHelloRecord();
+    // ServerHello.random tail sentinel "DOWNGRD\x00"
+    frame[35] = 0x44;
+    frame[36] = 0x4f;
+    frame[37] = 0x57;
+    frame[38] = 0x4e;
+    frame[39] = 0x47;
+    frame[40] = 0x52;
+    frame[41] = 0x44;
+    frame[42] = 0x00;
+    return frame;
+}
+
 fn clientHelloRecordWithoutAlpn() [101]u8 {
     var frame = clientHelloRecord();
     frame[92] = 0xff;
@@ -1346,6 +1360,17 @@ test "client rejects server hello with downgrade marker" {
     defer engine.deinit();
 
     const rec = serverHelloRecordWithDowngradeMarker();
+    try std.testing.expectError(error.DowngradeDetected, engine.ingestRecord(&rec));
+}
+
+test "client rejects server hello with legacy downgrade marker" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const rec = serverHelloRecordWithLegacyDowngradeMarker();
     try std.testing.expectError(error.DowngradeDetected, engine.ingestRecord(&rec));
 }
 
