@@ -22,8 +22,17 @@ jobs:
       - name: Shell Script Lint
         run: bash -n scripts/interop/*.sh
 
+      - name: Fuzz Replay Script Lint
+        run: bash -n scripts/fuzz/replay_corpus.sh
+
       - name: Python Syntax Check
         run: python3 -m py_compile scripts/interop/bogo_summary.py
 
       - name: BoGo Summary Self Test
         run: python3 scripts/interop/bogo_summary.py --self-test
+
+      - name: Fuzz Replay Self Test
+        run: bash scripts/fuzz/replay_corpus.sh --self-test
+
+      - name: Regression Corpus Replay
+        run: bash scripts/fuzz/replay_corpus.sh --skip-baseline
