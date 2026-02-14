@@ -245,7 +245,7 @@ pub const Engine = struct {
                     if (prev_state != .connected and self.machine.state == .connected) {
                         self.metrics.connected_transitions += 1;
                         self.latest_secret = self.deriveApplicationTrafficSecret();
-                        self.emitDebugKeyLog("CLIENT_TRAFFIC_SECRET_0");
+                        self.emitDebugKeyLog(self.keylogInitialLabel());
                     }
                     cursor = frame.rest;
                 }
@@ -378,7 +378,21 @@ pub const Engine = struct {
                 .sha384 => |secret| .{ .sha384 = keyschedule.deriveLabel(.tls_aes_256_gcm_sha384, secret, "traffic upd", "", 48) },
             },
         };
-        self.emitDebugKeyLog("CLIENT_TRAFFIC_SECRET_N");
+        self.emitDebugKeyLog(self.keylogNextLabel());
+    }
+
+    fn keylogInitialLabel(self: Engine) []const u8 {
+        return switch (self.config.role) {
+            .client => "CLIENT_TRAFFIC_SECRET_0",
+            .server => "SERVER_TRAFFIC_SECRET_0",
+        };
+    }
+
+    fn keylogNextLabel(self: Engine) []const u8 {
+        return switch (self.config.role) {
+            .client => "CLIENT_TRAFFIC_SECRET_N",
+            .server => "SERVER_TRAFFIC_SECRET_N",
+        };
     }
 
     fn emitDebugKeyLog(self: *Engine, label: []const u8) void {
@@ -702,6 +716,40 @@ test "debug keylog callback is suppressed when disabled" {
     _ = try engine.ingestRecord(&encryptedExtensionsRecord());
     _ = try engine.ingestRecord(&finishedRecord());
     try std.testing.expect(!tracker.called);
+}
+
+test "debug keylog callback uses server label in server role" {
+    const Tracker = struct {
+        called: bool = false,
+        label_ok: bool = false,
+    };
+    const Hooks = struct {
+        fn onKeyLog(label: []const u8, _: []const u8, userdata: usize) void {
+            const tracker: *Tracker = @as(*Tracker, @ptrFromInt(userdata));
+            tracker.called = true;
+            tracker.label_ok = std.mem.eql(u8, label, "SERVER_TRAFFIC_SECRET_0");
+        }
+    };
+
+    var tracker = Tracker{};
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+        .enable_debug_keylog = true,
+        .keylog_callback = Hooks.onKeyLog,
+        .keylog_userdata = @intFromPtr(&tracker),
+    });
+    defer engine.deinit();
+
+    _ = try engine.ingestRecord(&clientHelloRecord());
+    _ = try engine.ingestRecord(&finishedRecord());
+
+    if (builtin.mode == .Debug) {
+        try std.testing.expect(tracker.called);
+        try std.testing.expect(tracker.label_ok);
+    } else {
+        try std.testing.expect(!tracker.called);
+    }
 }
 
 fn validatePskOfferExtensions(extensions: []const messages.Extension, suite: keyschedule.CipherSuite) EngineError!void {
