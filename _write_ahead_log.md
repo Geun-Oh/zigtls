@@ -2821,3 +2821,68 @@ Observed Results
 - Preflight script syntax check passed.
 - Dry-run printed full command sequence and completed.
 - Full test target passed.
+===
+timestamp: 2026-02-15T05:35:00+09:00
+description: Plan Finished verify_data length validation in session handshake body checks
+type: plan
+===
+Motivation
+- `_task.md` requires key schedule correctness and Finished verify_data verification coverage.
+- Current session FSM accepts Finished transitions without body shape validation.
+
+Scope
+- Add session-side Finished body length validation keyed by suite hash length.
+- Introduce explicit error class for invalid Finished messages.
+- Update session test fixtures to use non-empty Finished payloads.
+
+Design
+- In `validateHandshakeBody`, for `.finished`, require `body.len == keyschedule.digestLen(config.suite)`.
+- Add helper fixture builder for Finished records (sha256-length for existing suite usage in tests).
+- Keep cryptographic MAC verification out-of-scope for this commit; this is structural hardening.
+
+Risks/Perf Impact
+- Single length comparison on Finished messages; negligible overhead.
+- Existing zero-length Finished test fixtures must be updated.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Revert Finished length check if transitional tests require envelope-only acceptance.
+
+Commit Plan
+- `MINOR: tls13: validate finished message body length`
+===
+timestamp: 2026-02-15T05:40:00+09:00
+description: Validate Finished handshake body length by suite digest size in session ingest
+type: code change
+===
+Decisions + Rationale
+- Added `.finished` body validation requiring verify_data length to match suite digest length.
+- Introduced explicit `InvalidFinishedMessage` error for malformed Finished payloads.
+- Updated test fixtures to send minimally valid Finished bodies instead of zero-length envelopes.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - `EngineError`: added `InvalidFinishedMessage`
+  - `validateHandshakeBody`: added `.finished` length check
+  - Added `finishedRecord` test fixture helper
+  - Added invalid-finished negative test.
+
+Risks/Perf Notes
+- Constant-time length check only; negligible overhead.
+- Tightens malformed Finished rejection behavior.
+===
+timestamp: 2026-02-15T05:41:00+09:00
+description: Validate Finished message length hardening changes
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 71/71 tests passed including invalid finished body case.
+- Full test target passed.
