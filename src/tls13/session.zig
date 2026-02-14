@@ -7,10 +7,20 @@ const messages = @import("messages.zig");
 const record = @import("record.zig");
 const state = @import("state.zig");
 
+pub const default_signature_algorithms = [_]u16{
+    0x0403, // ecdsa_secp256r1_sha256
+    0x0503, // ecdsa_secp384r1_sha384
+    0x0804, // rsa_pss_rsae_sha256
+    0x0805, // rsa_pss_rsae_sha384
+    0x0806, // rsa_pss_rsae_sha512
+    0x0807, // ed25519
+};
+
 pub const Config = struct {
     role: state.Role,
     suite: keyschedule.CipherSuite,
     early_data: EarlyDataConfig = .{},
+    allowed_signature_algorithms: []const u16 = &default_signature_algorithms,
 };
 
 pub const EarlyDataConfig = struct {
@@ -66,6 +76,7 @@ pub const EngineError = error{
     InvalidHelloMessage,
     InvalidCertificateMessage,
     InvalidCertificateVerifyMessage,
+    UnsupportedSignatureAlgorithm,
 } || record.ParseError || handshake.ParseError || handshake.KeyUpdateError || state.TransitionError || alerts.DecodeError;
 
 const Transcript = union(enum) {
@@ -275,9 +286,19 @@ pub const Engine = struct {
             .certificate_verify => {
                 var cert_verify = messages.CertificateVerifyMsg.decode(self.allocator, body) catch return error.InvalidCertificateVerifyMessage;
                 defer cert_verify.deinit(self.allocator);
+                if (!self.isAllowedSignatureAlgorithm(cert_verify.algorithm)) {
+                    return error.UnsupportedSignatureAlgorithm;
+                }
             },
             else => {},
         }
+    }
+
+    fn isAllowedSignatureAlgorithm(self: Engine, algorithm: u16) bool {
+        for (self.config.allowed_signature_algorithms) |allowed| {
+            if (allowed == algorithm) return true;
+        }
+        return false;
     }
 };
 
@@ -415,6 +436,13 @@ fn certificateVerifyRecord() [14]u8 {
     frame[11] = 0x00;
     frame[12] = 0x01;
     frame[13] = 0x5a;
+    return frame;
+}
+
+fn certificateVerifyRecordWithAlgorithm(algorithm: u16) [14]u8 {
+    var frame = certificateVerifyRecord();
+    frame[9] = @intCast((algorithm >> 8) & 0xff);
+    frame[10] = @intCast(algorithm & 0xff);
     return frame;
 }
 
@@ -671,6 +699,19 @@ test "invalid certificate_verify body is rejected" {
     _ = try engine.ingestRecord(&handshakeRecord(.encrypted_extensions));
     _ = try engine.ingestRecord(&certificateRecord());
     try std.testing.expectError(error.InvalidCertificateVerifyMessage, engine.ingestRecord(&handshakeRecord(.certificate_verify)));
+}
+
+test "unsupported certificate_verify algorithm is rejected" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    _ = try engine.ingestRecord(&serverHelloRecord());
+    _ = try engine.ingestRecord(&handshakeRecord(.encrypted_extensions));
+    _ = try engine.ingestRecord(&certificateRecord());
+    try std.testing.expectError(error.UnsupportedSignatureAlgorithm, engine.ingestRecord(&certificateVerifyRecordWithAlgorithm(0xeeee)));
 }
 
 test "server role certificate path valid bodies progress state" {

@@ -1491,3 +1491,102 @@ Observed Results
 - Wrapper shell syntax check passed.
 - Summary script self-test passed.
 - Full package tests passed.
+===
+timestamp: 2026-02-15T01:38:00+09:00
+description: Enforce CertificateVerify signature algorithm allowlist in session validation
+-type: plan
+===
+Correction
+- This entry supersedes malformed metadata key usage and provides the valid plan metadata.
+
+Motivation
+- CertificateVerify structural decode exists, but algorithm policy gate is not enforced at session ingest.
+
+Scope
+- Add configurable signature algorithm allowlist to session config.
+- Reject CertificateVerify bodies that use algorithms outside allowlist.
+- Add tests for allowlisted and non-allowlisted algorithms.
+
+Design
+- Provide secure default allowlist for common TLS1.3 signature schemes.
+- Keep check local to `validateHandshakeBody` after decode.
+
+Risks/Perf Impact
+- Negligible overhead (small linear scan over allowlist).
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Revert allowlist checks if policy needs to be delegated externally.
+
+Commit Plan
+- `MINOR: tls13: enforce certverify algorithm allowlist`
+===
+timestamp: 2026-02-15T01:38:30+09:00
+description: Supersede prior malformed plan metadata for certverify allowlist work
+type: plan
+===
+Correction
+- Previous entry at 2026-02-15T01:38:00+09:00 had malformed metadata key (`-type`).
+- This entry supersedes that malformed header for WAL compliance.
+
+Motivation
+- CertificateVerify structural decode exists, but algorithm policy gate is not enforced at session ingest.
+
+Scope
+- Add configurable signature algorithm allowlist to session config.
+- Reject CertificateVerify bodies that use algorithms outside allowlist.
+- Add tests for allowlisted and non-allowlisted algorithms.
+
+Design
+- Provide secure default allowlist for common TLS1.3 signature schemes.
+- Keep check local to `validateHandshakeBody` after decode.
+
+Risks/Perf Impact
+- Negligible overhead (small linear scan over allowlist).
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Revert allowlist checks if policy needs to be delegated externally.
+
+Commit Plan
+- `MINOR: tls13: enforce certverify algorithm allowlist`
+===
+timestamp: 2026-02-15T01:25:00+09:00
+description: Enforce certificate_verify signature algorithm allowlist during session validation
+type: code change
+===
+Decisions + Rationale
+- Added configurable signature algorithm allowlist to session config with secure defaults for common TLS1.3 algorithms.
+- Integrated allowlist check into certificate_verify body validation path after structural decode.
+- Added unsupported-algorithm rejection test to ensure deterministic fail-closed behavior.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - Added `default_signature_algorithms`.
+  - Added `Config.allowed_signature_algorithms`.
+  - Added `EngineError.UnsupportedSignatureAlgorithm`.
+  - Added allowlist check + helper and test fixture override helper.
+
+Risks/Perf Notes
+- Minimal overhead from small allowlist scan.
+- Final production policy may later move to application-configured policy sets.
+
+===
+timestamp: 2026-02-15T01:25:30+09:00
+description: Validate certificate_verify algorithm allowlist enforcement
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- Session tests passed including unsupported algorithm rejection case.
+- Full package tests passed.
