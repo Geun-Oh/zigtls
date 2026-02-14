@@ -157,6 +157,9 @@ pub const Engine = struct {
     config: Config,
     machine: state.Machine,
     transcript: Transcript,
+    early_secret: ?TrafficSecret = null,
+    handshake_secret: ?TrafficSecret = null,
+    master_secret: ?TrafficSecret = null,
     latest_secret: ?TrafficSecret = null,
     early_data_idempotent: bool = false,
     early_data_within_window: bool = true,
@@ -178,6 +181,7 @@ pub const Engine = struct {
 
     pub fn deinit(self: *Engine) void {
         self.zeroizeLatestSecret();
+        self.zeroizeStagedSecrets();
         self.clearEarlyDataTicket();
     }
 
@@ -236,6 +240,12 @@ pub const Engine = struct {
                     if (event == .hello_retry_request) {
                         try result.push(.{ .hello_retry_request = {} });
                     }
+                    if (self.config.role == .client and
+                        event == .server_hello and
+                        self.machine.state == .wait_encrypted_extensions)
+                    {
+                        self.derivePreApplicationKeyScheduleStages();
+                    }
                     if (frame.header.handshake_type == .key_update) {
                         self.metrics.keyupdate_messages += 1;
                         const req = try handshake.parseKeyUpdateRequest(frame.body);
@@ -249,7 +259,7 @@ pub const Engine = struct {
 
                     if (prev_state != .connected and self.machine.state == .connected) {
                         self.metrics.connected_transitions += 1;
-                        self.latest_secret = self.deriveApplicationTrafficSecret();
+                        self.deriveConnectedKeyScheduleStages();
                         self.emitDebugKeyLog(self.keylogInitialLabel());
                     }
                     cursor = frame.rest;
@@ -329,42 +339,108 @@ pub const Engine = struct {
         return frame;
     }
 
-    fn deriveApplicationTrafficSecret(self: *Engine) TrafficSecret {
+    fn deriveConnectedKeyScheduleStages(self: *Engine) void {
+        switch (self.config.suite) {
+            .tls_aes_128_gcm_sha256 => {
+                const digest = self.transcriptDigestSha256();
+                const zeros = [_]u8{0} ** 32;
+                const early = keyschedule.extract(.tls_aes_128_gcm_sha256, &zeros, &zeros);
+                const derived = keyschedule.deriveSecret(.tls_aes_128_gcm_sha256, early, "derived", &digest);
+                const hs_base = keyschedule.extract(.tls_aes_128_gcm_sha256, &derived, &digest);
+                const hs_traffic = keyschedule.deriveSecret(.tls_aes_128_gcm_sha256, hs_base, "c hs traffic", &digest);
+                const master_derived = keyschedule.deriveSecret(.tls_aes_128_gcm_sha256, hs_base, "derived", &digest);
+                const master = keyschedule.extract(.tls_aes_128_gcm_sha256, &master_derived, &zeros);
+                self.early_secret = .{ .sha256 = early };
+                self.handshake_secret = .{ .sha256 = hs_traffic };
+                self.master_secret = .{ .sha256 = master };
+                self.latest_secret = .{ .sha256 = keyschedule.deriveSecret(.tls_aes_128_gcm_sha256, master, "c ap traffic", &digest) };
+            },
+            .tls_chacha20_poly1305_sha256 => {
+                const digest = self.transcriptDigestSha256();
+                const zeros = [_]u8{0} ** 32;
+                const early = keyschedule.extract(.tls_chacha20_poly1305_sha256, &zeros, &zeros);
+                const derived = keyschedule.deriveSecret(.tls_chacha20_poly1305_sha256, early, "derived", &digest);
+                const hs_base = keyschedule.extract(.tls_chacha20_poly1305_sha256, &derived, &digest);
+                const hs_traffic = keyschedule.deriveSecret(.tls_chacha20_poly1305_sha256, hs_base, "c hs traffic", &digest);
+                const master_derived = keyschedule.deriveSecret(.tls_chacha20_poly1305_sha256, hs_base, "derived", &digest);
+                const master = keyschedule.extract(.tls_chacha20_poly1305_sha256, &master_derived, &zeros);
+                self.early_secret = .{ .sha256 = early };
+                self.handshake_secret = .{ .sha256 = hs_traffic };
+                self.master_secret = .{ .sha256 = master };
+                self.latest_secret = .{ .sha256 = keyschedule.deriveSecret(.tls_chacha20_poly1305_sha256, master, "c ap traffic", &digest) };
+            },
+            .tls_aes_256_gcm_sha384 => {
+                const digest = self.transcriptDigestSha384();
+                const zeros = [_]u8{0} ** 48;
+                const early = keyschedule.extract(.tls_aes_256_gcm_sha384, &zeros, &zeros);
+                const derived = keyschedule.deriveSecret(.tls_aes_256_gcm_sha384, early, "derived", &digest);
+                const hs_base = keyschedule.extract(.tls_aes_256_gcm_sha384, &derived, &digest);
+                const hs_traffic = keyschedule.deriveSecret(.tls_aes_256_gcm_sha384, hs_base, "c hs traffic", &digest);
+                const master_derived = keyschedule.deriveSecret(.tls_aes_256_gcm_sha384, hs_base, "derived", &digest);
+                const master = keyschedule.extract(.tls_aes_256_gcm_sha384, &master_derived, &zeros);
+                self.early_secret = .{ .sha384 = early };
+                self.handshake_secret = .{ .sha384 = hs_traffic };
+                self.master_secret = .{ .sha384 = master };
+                self.latest_secret = .{ .sha384 = keyschedule.deriveSecret(.tls_aes_256_gcm_sha384, master, "c ap traffic", &digest) };
+            },
+        }
+    }
+
+    fn derivePreApplicationKeyScheduleStages(self: *Engine) void {
         return switch (self.config.suite) {
             .tls_aes_128_gcm_sha256 => blk: {
-                const hasher = switch (self.transcript) {
-                    .sha256 => |h| h,
-                    .sha384 => unreachable,
-                };
-                var digest: [32]u8 = undefined;
-                var h = hasher;
-                h.final(&digest);
-                const secret = keyschedule.extract(.tls_aes_128_gcm_sha256, "", &digest);
-                break :blk .{ .sha256 = keyschedule.deriveLabel(.tls_aes_128_gcm_sha256, secret, "c ap traffic", &digest, 32) };
+                const digest = self.transcriptDigestSha256();
+                const zeros = [_]u8{0} ** 32;
+                const early = keyschedule.extract(.tls_aes_128_gcm_sha256, &zeros, &zeros);
+                const derived = keyschedule.deriveSecret(.tls_aes_128_gcm_sha256, early, "derived", &digest);
+                const hs_base = keyschedule.extract(.tls_aes_128_gcm_sha256, &derived, &digest);
+                self.early_secret = .{ .sha256 = early };
+                self.handshake_secret = .{ .sha256 = keyschedule.deriveSecret(.tls_aes_128_gcm_sha256, hs_base, "c hs traffic", &digest) };
+                break :blk;
             },
             .tls_chacha20_poly1305_sha256 => blk: {
-                const hasher = switch (self.transcript) {
-                    .sha256 => |h| h,
-                    .sha384 => unreachable,
-                };
-                var digest: [32]u8 = undefined;
-                var h = hasher;
-                h.final(&digest);
-                const secret = keyschedule.extract(.tls_chacha20_poly1305_sha256, "", &digest);
-                break :blk .{ .sha256 = keyschedule.deriveLabel(.tls_chacha20_poly1305_sha256, secret, "c ap traffic", &digest, 32) };
+                const digest = self.transcriptDigestSha256();
+                const zeros = [_]u8{0} ** 32;
+                const early = keyschedule.extract(.tls_chacha20_poly1305_sha256, &zeros, &zeros);
+                const derived = keyschedule.deriveSecret(.tls_chacha20_poly1305_sha256, early, "derived", &digest);
+                const hs_base = keyschedule.extract(.tls_chacha20_poly1305_sha256, &derived, &digest);
+                self.early_secret = .{ .sha256 = early };
+                self.handshake_secret = .{ .sha256 = keyschedule.deriveSecret(.tls_chacha20_poly1305_sha256, hs_base, "c hs traffic", &digest) };
+                break :blk;
             },
             .tls_aes_256_gcm_sha384 => blk: {
-                const hasher = switch (self.transcript) {
-                    .sha256 => unreachable,
-                    .sha384 => |h| h,
-                };
-                var digest: [48]u8 = undefined;
-                var h = hasher;
-                h.final(&digest);
-                const secret = keyschedule.extract(.tls_aes_256_gcm_sha384, "", &digest);
-                break :blk .{ .sha384 = keyschedule.deriveLabel(.tls_aes_256_gcm_sha384, secret, "c ap traffic", &digest, 48) };
+                const digest = self.transcriptDigestSha384();
+                const zeros = [_]u8{0} ** 48;
+                const early = keyschedule.extract(.tls_aes_256_gcm_sha384, &zeros, &zeros);
+                const derived = keyschedule.deriveSecret(.tls_aes_256_gcm_sha384, early, "derived", &digest);
+                const hs_base = keyschedule.extract(.tls_aes_256_gcm_sha384, &derived, &digest);
+                self.early_secret = .{ .sha384 = early };
+                self.handshake_secret = .{ .sha384 = keyschedule.deriveSecret(.tls_aes_256_gcm_sha384, hs_base, "c hs traffic", &digest) };
+                break :blk;
             },
         };
+    }
+
+    fn transcriptDigestSha256(self: *Engine) [32]u8 {
+        const hasher = switch (self.transcript) {
+            .sha256 => |h| h,
+            .sha384 => unreachable,
+        };
+        var digest: [32]u8 = undefined;
+        var h = hasher;
+        h.final(&digest);
+        return digest;
+    }
+
+    fn transcriptDigestSha384(self: *Engine) [48]u8 {
+        const hasher = switch (self.transcript) {
+            .sha256 => unreachable,
+            .sha384 => |h| h,
+        };
+        var digest: [48]u8 = undefined;
+        var h = hasher;
+        h.final(&digest);
+        return digest;
     }
 
     fn ratchetLatestTrafficSecret(self: *Engine) void {
@@ -426,6 +502,23 @@ pub const Engine = struct {
                 .sha384 => |*s| std.crypto.secureZero(u8, s[0..]),
             }
             self.latest_secret = null;
+        }
+    }
+
+    fn zeroizeStagedSecrets(self: *Engine) void {
+        self.zeroizeSecretSlot(&self.early_secret);
+        self.zeroizeSecretSlot(&self.handshake_secret);
+        self.zeroizeSecretSlot(&self.master_secret);
+    }
+
+    fn zeroizeSecretSlot(self: *Engine, slot: *?TrafficSecret) void {
+        _ = self;
+        if (slot.*) |*secret| {
+            switch (secret.*) {
+                .sha256 => |*s| std.crypto.secureZero(u8, s[0..]),
+                .sha384 => |*s| std.crypto.secureZero(u8, s[0..]),
+            }
+            slot.* = null;
         }
     }
 
@@ -664,6 +757,24 @@ test "zeroize latest secret clears secret bytes and resets option" {
     engine.zeroizeLatestSecret();
 
     try std.testing.expect(engine.latest_secret == null);
+}
+
+test "zeroize staged secrets clears stage slots" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const secret = [_]u8{0xaa} ** 32;
+    engine.early_secret = .{ .sha256 = secret };
+    engine.handshake_secret = .{ .sha256 = secret };
+    engine.master_secret = .{ .sha256 = secret };
+    engine.zeroizeStagedSecrets();
+
+    try std.testing.expect(engine.early_secret == null);
+    try std.testing.expect(engine.handshake_secret == null);
+    try std.testing.expect(engine.master_secret == null);
 }
 
 test "clear early data ticket zeroes and clears pointer" {
@@ -1531,6 +1642,54 @@ test "client side handshake flow reaches connected for aes256 suite" {
     switch (engine.latest_secret orelse return error.TestUnexpectedResult) {
         .sha256 => return error.TestUnexpectedResult,
         .sha384 => {},
+    }
+}
+
+test "key schedule stages are populated across client handshake milestones" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    _ = try engine.ingestRecord(&serverHelloRecord());
+    try std.testing.expect(engine.early_secret != null);
+    try std.testing.expect(engine.handshake_secret != null);
+    try std.testing.expect(engine.master_secret == null);
+    try std.testing.expect(engine.latest_secret == null);
+
+    _ = try engine.ingestRecord(&encryptedExtensionsRecord());
+    _ = try engine.ingestRecord(&finishedRecord());
+    try std.testing.expect(engine.master_secret != null);
+    try std.testing.expect(engine.latest_secret != null);
+}
+
+test "key schedule stages follow suite digest width" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_256_gcm_sha384,
+    });
+    defer engine.deinit();
+
+    _ = try engine.ingestRecord(&serverHelloRecordWithCipherSuite(0x1302));
+    switch (engine.early_secret orelse return error.TestUnexpectedResult) {
+        .sha384 => |secret| try std.testing.expectEqual(@as(usize, 48), secret.len),
+        .sha256 => return error.TestUnexpectedResult,
+    }
+    switch (engine.handshake_secret orelse return error.TestUnexpectedResult) {
+        .sha384 => |secret| try std.testing.expectEqual(@as(usize, 48), secret.len),
+        .sha256 => return error.TestUnexpectedResult,
+    }
+
+    _ = try engine.ingestRecord(&encryptedExtensionsRecord());
+    _ = try engine.ingestRecord(&finishedRecordSha384());
+    switch (engine.master_secret orelse return error.TestUnexpectedResult) {
+        .sha384 => |secret| try std.testing.expectEqual(@as(usize, 48), secret.len),
+        .sha256 => return error.TestUnexpectedResult,
+    }
+    switch (engine.latest_secret orelse return error.TestUnexpectedResult) {
+        .sha384 => |secret| try std.testing.expectEqual(@as(usize, 48), secret.len),
+        .sha256 => return error.TestUnexpectedResult,
     }
 }
 

@@ -5173,3 +5173,91 @@ Observed Results
 
 Notes
 - Classification regression now explicitly covers `InvalidPskBinderLength -> illegal_parameter` mapping.
+===
+timestamp: 2026-02-15T08:50:00+09:00
+description: Plan phased key-schedule wiring (early/handshake/master/application) in session flow
+type: plan
+===
+Motivation
+- `RFC8446-KS-001` remains partial: current session path mostly exposes application traffic secret derivation and key-update ratchet.
+- Need explicit integrated flow wiring for earlier key schedule phases to improve traceability and test coverage.
+
+Scope
+- Add internal key-schedule stage state in session engine for early, handshake-traffic, master, and application-traffic secrets.
+- Wire stage derivation at handshake milestones (ServerHello/HRR progression and Connected transition).
+- Preserve existing external behavior/actions while expanding deterministic internal derivation coverage.
+- Add regression tests for staged population and lifecycle zeroization.
+- Update RFC matrix KS row wording/coverage.
+
+Design
+- Add optional secret slots for stage tracking in `Engine`.
+- Add suite-aware helper that computes transcript digest and derives staged secrets using `keyschedule.extract/deriveSecret` chain.
+- On client handshake progression:
+  - after ServerHello acceptance: populate early + handshake stage material
+  - on connected transition: populate master + application traffic (`latest_secret`)
+- Extend teardown zeroization to all staged secret slots.
+
+Risks/Perf Impact
+- Adds bounded fixed-size HKDF/HMAC work at handshake milestones only.
+- No steady-state record-path hot loop impact expected.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Remove staged secret fields/helpers/tests and restore prior latest-secret-only path.
+
+Commit Plan
+- `MINOR: tls13: wire phased key schedule stages in session`
+===
+timestamp: 2026-02-15T08:58:00+09:00
+description: Wire phased key schedule state across handshake milestones in session engine
+type: code change
+===
+Decisions + Rationale
+- Added explicit stage tracking for early/handshake/master/application secret material to improve integrated key-schedule traceability in session flow.
+- Wired stage derivation at milestone transitions:
+  - after accepted ServerHello on client path (`wait_encrypted_extensions`): early + handshake stage populated
+  - on transition to connected: early + handshake + master + application stages finalized (`latest_secret` holds application traffic secret)
+- Extended secret lifecycle handling to zeroize all stage slots on teardown.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - `Engine`: added `early_secret`, `handshake_secret`, `master_secret` stage slots.
+  - Added milestone hooks in `ingestRecord` for staged derivation.
+  - Added helpers:
+    - `derivePreApplicationKeyScheduleStages`
+    - `deriveConnectedKeyScheduleStages`
+    - `transcriptDigestSha256`
+    - `transcriptDigestSha384`
+    - `zeroizeStagedSecrets`
+    - `zeroizeSecretSlot`
+  - `deinit`: now zeroizes staged secrets in addition to latest/app secret and early-data ticket.
+  - Added tests:
+    - `zeroize staged secrets clears stage slots`
+    - `key schedule stages are populated across client handshake milestones`
+    - `key schedule stages follow suite digest width`
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-KS-001` wording and coverage description for phased stage wiring.
+
+Risks/Perf Notes
+- Additional HKDF/HMAC work happens only at handshake milestone transitions; no steady-state record-path hot-loop impact.
+===
+timestamp: 2026-02-15T08:59:00+09:00
+description: Validate phased key schedule wiring with session and full test suites
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- Initial compile attempt failed due to local variable shadowing module name (`handshake`) in newly added helpers.
+- Renamed local bindings (`hs_base`) and re-ran tests.
+- `session.zig`: 106/106 tests passed.
+- `zig build test`: passed.
+
+Notes
+- Added regression coverage confirms staged secrets are populated at expected milestones and zeroized on teardown.
