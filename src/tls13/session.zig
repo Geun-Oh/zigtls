@@ -92,6 +92,7 @@ pub const EngineError = error{
     MissingRequiredClientHelloExtension,
     MissingRequiredServerHelloExtension,
     MissingRequiredHrrExtension,
+    ConfiguredCipherSuiteMismatch,
     MissingPskKeyExchangeModes,
     InvalidPskBinder,
     PskBinderCountMismatch,
@@ -357,6 +358,9 @@ pub const Engine = struct {
                     return error.DowngradeDetected;
                 }
                 if (self.config.role == .client) {
+                    if (sh.cipher_suite != configuredCipherSuiteCodepoint(self.config.suite)) {
+                        return error.ConfiguredCipherSuiteMismatch;
+                    }
                     if (messages.serverHelloHasHrrRandom(body)) {
                         try self.requireHrrExtensions(sh.extensions);
                     } else {
@@ -368,6 +372,9 @@ pub const Engine = struct {
                 var ch = messages.ClientHello.decode(self.allocator, body) catch return error.InvalidHelloMessage;
                 defer ch.deinit(self.allocator);
                 if (self.config.role == .server) {
+                    if (!containsCipherSuite(ch.cipher_suites, configuredCipherSuiteCodepoint(self.config.suite))) {
+                        return error.ConfiguredCipherSuiteMismatch;
+                    }
                     try self.requireClientHelloExtensions(ch.extensions);
                 }
             },
@@ -437,6 +444,21 @@ pub fn estimatedConnectionMemoryCeiling(config: Config) usize {
 fn hasExtension(extensions: []const messages.Extension, extension_type: u16) bool {
     for (extensions) |ext| {
         if (ext.extension_type == extension_type) return true;
+    }
+    return false;
+}
+
+fn configuredCipherSuiteCodepoint(suite: keyschedule.CipherSuite) u16 {
+    return switch (suite) {
+        .tls_aes_128_gcm_sha256 => 0x1301,
+        .tls_aes_256_gcm_sha384 => 0x1302,
+        .tls_chacha20_poly1305_sha256 => 0x1303,
+    };
+}
+
+fn containsCipherSuite(cipher_suites: []const u16, wanted: u16) bool {
+    for (cipher_suites) |suite| {
+        if (suite == wanted) return true;
     }
     return false;
 }
@@ -742,6 +764,13 @@ fn serverHelloRecordWithoutKeyShare() [63]u8 {
     var frame = serverHelloRecord();
     frame[55] = 0xff;
     frame[56] = 0xfe;
+    return frame;
+}
+
+fn serverHelloRecordWithCipherSuite(suite: u16) [63]u8 {
+    var frame = serverHelloRecord();
+    frame[44] = @intCast((suite >> 8) & 0xff);
+    frame[45] = @intCast(suite & 0xff);
     return frame;
 }
 
@@ -1298,6 +1327,17 @@ test "client rejects server hello without required extension" {
     try std.testing.expectError(error.MissingRequiredServerHelloExtension, engine.ingestRecord(&rec));
 }
 
+test "client rejects server hello with configured cipher suite mismatch" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_chacha20_poly1305_sha256,
+    });
+    defer engine.deinit();
+
+    const rec = serverHelloRecordWithCipherSuite(0x1301);
+    try std.testing.expectError(error.ConfiguredCipherSuiteMismatch, engine.ingestRecord(&rec));
+}
+
 test "client rejects server hello with downgrade marker" {
     var engine = Engine.init(std.testing.allocator, .{
         .role = .client,
@@ -1362,6 +1402,17 @@ test "valid client hello body is accepted for server role" {
 
     _ = try engine.ingestRecord(&clientHelloRecord());
     try std.testing.expectEqual(state.ConnectionState.wait_client_certificate_or_finished, engine.machine.state);
+}
+
+test "server rejects client hello without configured cipher suite offer" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_chacha20_poly1305_sha256,
+    });
+    defer engine.deinit();
+
+    const rec = clientHelloRecord();
+    try std.testing.expectError(error.ConfiguredCipherSuiteMismatch, engine.ingestRecord(&rec));
 }
 
 test "metrics counters reflect handshake and alert activity" {

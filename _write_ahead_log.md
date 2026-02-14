@@ -3347,3 +3347,73 @@ Commands Executed
 Observed Results
 - `session.zig`: 77/77 tests passed with ratchet assertion enabled.
 - Full test target passed.
+===
+timestamp: 2026-02-15T07:32:00+09:00
+description: Plan configured cipher-suite conformance checks in hello message validation
+type: plan
+===
+Motivation
+- `_task.md` mandates support for specific TLS1.3 suites with correct protocol behavior.
+- Current hello validation does not enforce that ServerHello selected suite (client role) and ClientHello offered suites (server role) align with configured engine suite.
+
+Scope
+- Add suite conformance checks:
+  - Client role: ServerHello.cipher_suite must equal configured suite codepoint.
+  - Server role: ClientHello.cipher_suites must include configured suite codepoint.
+- Add explicit error classification and regression tests.
+
+Design
+- Introduce helper mapping `keyschedule.CipherSuite -> u16` TLS codepoint.
+- Integrate checks in existing `validateHandshakeBody` hello branches.
+
+Risks/Perf Impact
+- O(n) scan over ClientHello suites; negligible and handshake-only.
+- Tightens rejection behavior for suite mismatch scenarios.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Revert suite conformance checks if temporary interop vectors require relaxed acceptance.
+
+Commit Plan
+- `MINOR: tls13: enforce configured cipher suite in hello validation`
+===
+timestamp: 2026-02-15T01:59:00+09:00
+description: Enforce configured cipher-suite conformance in ClientHello/ServerHello validation
+type: code change
+===
+Decisions + Rationale
+- Added explicit configured-suite conformance checks in hello validation to align negotiated/offered suites with `Config.suite`.
+- Client role now rejects `ServerHello.cipher_suite` that differs from configured suite.
+- Server role now rejects `ClientHello` that does not offer configured suite.
+- Added `ConfiguredCipherSuiteMismatch` to keep mismatch failures distinguishable from parser/extension failures.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - `EngineError`: added `ConfiguredCipherSuiteMismatch`
+  - `validateHandshakeBody`: added suite conformance checks in `.server_hello` and `.client_hello` branches
+  - Added helpers: `configuredCipherSuiteCodepoint`, `containsCipherSuite`
+  - Added fixtures/tests for client/server mismatch rejection.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-HS-001B` summary and test-coverage text to include suite-conformance checks.
+
+Risks/Perf Notes
+- Server-side offer check is O(n) over ClientHello cipher suite list and runs once per handshake.
+- Validation strictness increases and may reject previously accepted mismatched vectors by design.
+===
+timestamp: 2026-02-15T02:00:00+09:00
+description: Validate configured cipher-suite conformance checks
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 79/79 tests passed, including:
+  - `client rejects server hello with configured cipher suite mismatch`
+  - `server rejects client hello without configured cipher suite offer`
+- Full test target passed.
