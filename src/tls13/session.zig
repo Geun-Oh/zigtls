@@ -32,6 +32,8 @@ pub const Config = struct {
 pub const EarlyDataConfig = struct {
     enabled: bool = false,
     replay_filter: ?*early_data.ReplayFilter = null,
+    replay_node_id: u32 = 0,
+    replay_epoch: u64 = 0,
     max_ticket_age_sec: u64 = 600,
     max_ticket_len: usize = 4096,
 };
@@ -266,7 +268,11 @@ pub const Engine = struct {
                     if (!self.early_data_within_window) return error.EarlyDataTicketExpired;
                     const replay_filter = self.config.early_data.replay_filter orelse return error.MissingReplayFilter;
                     const ticket = self.early_data_ticket orelse return error.EarlyDataRejected;
-                    if (replay_filter.seenOrInsert(ticket)) return error.EarlyDataRejected;
+                    const scope: early_data.ReplayScopeKey = .{
+                        .node_id = self.config.early_data.replay_node_id,
+                        .epoch = self.config.early_data.replay_epoch,
+                    };
+                    if (replay_filter.seenOrInsertScoped(scope, ticket)) return error.EarlyDataRejected;
                 }
                 try result.push(.{ .application_data = parsed.payload });
             },
@@ -1475,6 +1481,43 @@ test "early data requires idempotent mark and anti-replay" {
 
     // Same replay token is rejected on subsequent early-data records.
     try std.testing.expectError(error.EarlyDataRejected, engine.ingestRecord(&rec));
+}
+
+test "early data replay scope isolates duplicate tickets across node and epoch" {
+    var replay = try early_data.ReplayFilter.init(std.testing.allocator, 4096);
+    defer replay.deinit();
+
+    const rec = appDataRecord("hello");
+
+    var node_a = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+        .early_data = .{
+            .enabled = true,
+            .replay_filter = &replay,
+            .replay_node_id = 1,
+            .replay_epoch = 10,
+        },
+    });
+    defer node_a.deinit();
+
+    var node_b = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+        .early_data = .{
+            .enabled = true,
+            .replay_filter = &replay,
+            .replay_node_id = 2,
+            .replay_epoch = 11,
+        },
+    });
+    defer node_b.deinit();
+
+    try node_a.beginEarlyData("ticket-shared", true);
+    _ = try node_a.ingestRecord(&rec);
+
+    try node_b.beginEarlyData("ticket-shared", true);
+    _ = try node_b.ingestRecord(&rec);
 }
 
 test "early data ticket freshness window rejects stale ticket" {
