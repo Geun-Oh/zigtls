@@ -89,6 +89,16 @@ pub fn build(b: *std.Build) void {
     // by passing `--prefix` or `-p`.
     b.installArtifact(exe);
 
+    const bogo_shim = b.addExecutable(.{
+        .name = "bogo-shim",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/bogo_shim.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(bogo_shim);
+
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).
     // This will evaluate the `run` step rather than the default step.
@@ -114,6 +124,9 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| {
         run_cmd.addArgs(args);
     }
+
+    const bogo_step = b.step("bogo-shim", "Build BoGo shim executable");
+    bogo_step.dependOn(&bogo_shim.step);
 
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to

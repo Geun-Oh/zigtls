@@ -764,3 +764,74 @@ Commands Executed
 Observed Results
 - Fuzz-style tests passed (record parser, handshake parser, session ingest).
 - Full package test build passed.
+===
+timestamp: 2026-02-14T23:40:00+09:00
+description: Implement BoGo shim and result summarization pipeline scaffold
+type: plan
+===
+Motivation
+- `_task.md` Phase 5/verification requires BoGo integration and pass/fail tracking.
+
+Scope
+- Add a BoGo shim executable entrypoint in Zig (`tools/bogo_shim.zig`).
+- Add wrapper script to invoke BoGo runner with shim binary.
+- Add result summarizer script to aggregate BoGo JSON output by category and status.
+- Wire shim build target in `build.zig`.
+
+Design
+- Start with deterministic, explicit shim behavior: parse core flags and emit structured capability/unsupported errors.
+- Keep shim transport-agnostic and focused on runner contract first.
+- Summarizer script should work on runner JSON output without external dependencies.
+
+Risks/Perf Impact
+- Initial shim is scaffold and will not pass full suite yet; goal is contract correctness and observability.
+- No hot-path runtime impact on TLS engine.
+
+Test Plan (commands)
+- `zig build bogo-shim`
+- `zig build test`
+- `python3 scripts/interop/bogo_summary.py --self-test`
+
+Rollback
+- Revert bogo shim/scaffolding files if runner contract assumptions are wrong.
+
+Commit Plan
+- `MINOR: test: add bogo shim and result summarization scaffolding`
+===
+timestamp: 2026-02-14T23:46:00+09:00
+description: Add BoGo shim executable, runner wrapper, and JSON result summarizer scaffold
+type: code change
+===
+Decisions + Rationale
+- Added `tools/bogo_shim.zig` scaffold executable that validates runner arguments and reports explicit scaffold/unsupported mode while BoGo contract is being wired.
+- Added build target `zig build bogo-shim` in `build.zig` for reproducible shim builds.
+- Added `scripts/interop/bogo_run.sh` to invoke BoGo runner with shim binary and optional test filter.
+- Added `scripts/interop/bogo_summary.py` to aggregate BoGo JSON results by suite and status.
+
+Files/Functions Touched
+- `tools/bogo_shim.zig` (new)
+- `scripts/interop/bogo_run.sh` (new)
+- `scripts/interop/bogo_summary.py` (new)
+- `build.zig` (new build step and shim executable wiring)
+
+Risks/Perf Notes
+- Shim is currently scaffold-level and exits as unsupported for real handshake execution; full protocol wiring remains pending.
+- No runtime impact on main TLS engine paths.
+
+===
+timestamp: 2026-02-14T23:46:30+09:00
+description: Validate BoGo shim build and summarizer self-test
+type: test
+===
+Commands Executed
+- `zig fmt tools/bogo_shim.zig build.zig`
+- `zig test tools/bogo_shim.zig`
+- `zig build bogo-shim`
+- `zig build test`
+- `python3 scripts/interop/bogo_summary.py --self-test`
+
+Observed Results
+- BoGo shim unit tests passed.
+- `bogo-shim` build target passed.
+- Full package tests passed.
+- Summary script self-test passed.
