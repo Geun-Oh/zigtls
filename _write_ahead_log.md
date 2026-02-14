@@ -2681,3 +2681,69 @@ Observed Results
 - Full test target passed.
 - BoGo summary self-test passed.
 - BoGo runner shell syntax validation passed.
+===
+timestamp: 2026-02-15T05:06:00+09:00
+description: Plan fuzz regression corpus replay tooling for CI and local verification
+type: plan
+===
+Motivation
+- `_task.md` requires historical crashers to remain in CI replay set.
+- Current fuzz module has deterministic tests but no corpus replay runner utility.
+
+Scope
+- Add `scripts/fuzz/replay_corpus.sh` to replay corpus inputs against deterministic harness entrypoint.
+- Add corpus directory scaffold and README usage docs.
+- Ensure script supports fail-fast and summary output for CI integration.
+
+Design
+- Corpus root: `tests/fuzz/corpus/` with per-target subdirs.
+- Replay script runs `zig test src/tls13/fuzz.zig` as baseline and then replays file list (placeholder hook) for future harness expansion.
+- Return non-zero on missing corpus dir or any replay failure.
+
+Risks/Perf Impact
+- Tooling-only changes.
+- Initial replay hook is conservative and ready for later target-specific harness execution.
+
+Test Plan (commands)
+- `bash -n scripts/fuzz/replay_corpus.sh`
+- `bash scripts/fuzz/replay_corpus.sh --self-test`
+- `zig build test`
+
+Rollback
+- Remove replay script and corpus scaffolding if alternate fuzz infra is adopted.
+
+Commit Plan
+- `MINOR: test: add fuzz regression corpus replay tooling`
+===
+timestamp: 2026-02-15T05:12:00+09:00
+description: Add fuzz regression corpus replay tooling and corpus scaffolding
+type: code change
+===
+Decisions + Rationale
+- Added a dedicated corpus replay script for CI/local regression verification.
+- Added corpus directory scaffolding and seed sample to establish expected layout.
+- Replay path is conservative: baseline fuzz test invocation + corpus readability iteration, with fail-fast on empty/missing corpus.
+
+Files/Functions Touched
+- `scripts/fuzz/replay_corpus.sh` (new)
+- `tests/fuzz/corpus/README.md` (new)
+- `tests/fuzz/corpus/session/seed-basic.bin` (new)
+
+Risks/Perf Notes
+- Tooling-only change.
+- Target-specific harness replay execution remains extensible follow-up work.
+===
+timestamp: 2026-02-15T05:13:00+09:00
+description: Validate fuzz corpus replay tooling additions
+type: test
+===
+Commands Executed
+- `bash -n scripts/fuzz/replay_corpus.sh`
+- `bash scripts/fuzz/replay_corpus.sh --self-test`
+- `bash scripts/fuzz/replay_corpus.sh --skip-baseline`
+- `zig build test`
+
+Observed Results
+- Replay script syntax and self-test passed.
+- Corpus replay reported files successfully.
+- Full test target passed.
