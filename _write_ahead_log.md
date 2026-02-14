@@ -6225,3 +6225,75 @@ Commands Executed
 Observed Results
 - `session.zig`: 123/123 tests passed.
 - `zig build test`: passed.
+===
+timestamp: 2026-02-15T12:40:00+09:00
+description: Plan per-connection single replay admission gate for 0-RTT data
+type: plan
+===
+Motivation
+- Current server early-data path applies replay filter on every pre-connected application_data record, causing the second 0-RTT record in the same connection to be rejected.
+- Replay filtering should gate ticket admission once per connection; subsequent early-data records on that admitted connection should remain allowed.
+
+Scope
+- Add connection-local admission latch so replay token check runs once per connection.
+- Preserve cross-connection duplicate rejection in same replay scope.
+- Update existing early-data behavior test and add regression for duplicate ticket across two server sessions in same scope.
+- Update RFC matrix 0RTT-002 coverage wording.
+
+Design
+- Add `early_data_admitted: bool` on engine state.
+- On first pre-connected app-data ingest in server early-data mode: enforce idempotent + replay check and set latch true.
+- On subsequent pre-connected app-data records in same connection: bypass replay insertion and accept.
+- Reset latch on `beginEarlyData`, `clearEarlyDataTicket`, and engine teardown paths.
+
+Risks/Perf Impact
+- Single boolean branch in pre-connected app-data path; negligible overhead.
+- Behavior change allows multi-record early-data on a single admitted connection while preserving inter-session replay rejection.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Remove admission latch and restore per-record replay checks.
+
+Commit Plan
+- `MINOR: tls13: gate early-data replay check once per connection`
+===
+timestamp: 2026-02-15T12:43:00+09:00
+description: Gate 0-RTT replay check once per connection and preserve cross-session replay rejection
+type: code change
+===
+Decisions + Rationale
+- Replaced per-record replay filter checks with per-connection single admission gating for early-data.
+- This aligns acceptance behavior with multi-record 0-RTT payloads on the same admitted connection while preserving anti-replay protection across sessions.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - `Engine`: added `early_data_admitted` latch.
+  - `beginEarlyData`: resets admission latch.
+  - pre-connected `.application_data` ingest path: replay filter insert/check occurs only when admission latch is false, then latch is set true.
+  - `clearEarlyDataTicket`: resets admission latch.
+  - Updated test:
+    - `early data gates replay once then accepts additional records in same connection`
+  - Added test:
+    - `early data replay rejects duplicate ticket across sessions in same scope`
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-0RTT-002` wording and coverage notes for single-admission gating + duplicate-session rejection.
+
+Risks/Perf Notes
+- One extra boolean branch in pre-connected app-data path; negligible overhead.
+- Behavioral change: additional early-data records in the same admitted connection are now accepted instead of replay-rejected.
+===
+timestamp: 2026-02-15T12:44:00+09:00
+description: Verify per-connection early-data replay gating changes
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 124/124 tests passed.
+- `zig build test`: passed.

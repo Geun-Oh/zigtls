@@ -170,6 +170,7 @@ pub const Engine = struct {
     latest_secret: ?TrafficSecret = null,
     early_data_idempotent: bool = false,
     early_data_within_window: bool = true,
+    early_data_admitted: bool = false,
     early_data_ticket: ?[]u8 = null,
     saw_close_notify: bool = false,
     metrics: Metrics = .{},
@@ -199,6 +200,7 @@ pub const Engine = struct {
         @memcpy(self.early_data_ticket.?, ticket);
         self.early_data_idempotent = idempotent;
         self.early_data_within_window = true;
+        self.early_data_admitted = false;
     }
 
     pub fn beginEarlyDataWithTimes(
@@ -290,13 +292,16 @@ pub const Engine = struct {
                     if (!self.config.early_data.enabled) return error.EarlyDataRejected;
                     if (!self.early_data_idempotent) return error.EarlyDataRejected;
                     if (!self.early_data_within_window) return error.EarlyDataTicketExpired;
-                    const replay_filter = self.config.early_data.replay_filter orelse return error.MissingReplayFilter;
-                    const ticket = self.early_data_ticket orelse return error.EarlyDataRejected;
-                    const scope: early_data.ReplayScopeKey = .{
-                        .node_id = self.config.early_data.replay_node_id,
-                        .epoch = self.config.early_data.replay_epoch,
-                    };
-                    if (replay_filter.seenOrInsertScoped(scope, ticket)) return error.EarlyDataRejected;
+                    if (!self.early_data_admitted) {
+                        const replay_filter = self.config.early_data.replay_filter orelse return error.MissingReplayFilter;
+                        const ticket = self.early_data_ticket orelse return error.EarlyDataRejected;
+                        const scope: early_data.ReplayScopeKey = .{
+                            .node_id = self.config.early_data.replay_node_id,
+                            .epoch = self.config.early_data.replay_epoch,
+                        };
+                        if (replay_filter.seenOrInsertScoped(scope, ticket)) return error.EarlyDataRejected;
+                        self.early_data_admitted = true;
+                    }
                 }
                 try result.push(.{ .application_data = parsed.payload });
             },
@@ -501,6 +506,7 @@ pub const Engine = struct {
             self.allocator.free(ticket);
             self.early_data_ticket = null;
         }
+        self.early_data_admitted = false;
     }
 
     fn zeroizeLatestSecret(self: *Engine) void {
@@ -2282,7 +2288,7 @@ test "estimated connection memory ceiling includes early data ticket cap when en
     try std.testing.expectEqual(@as(usize, @sizeOf(Engine) + 2048), enabled);
 }
 
-test "early data requires idempotent mark and anti-replay" {
+test "early data gates replay once then accepts additional records in same connection" {
     var replay = try early_data.ReplayFilter.init(std.testing.allocator, 4096);
     defer replay.deinit();
 
@@ -2299,9 +2305,7 @@ test "early data requires idempotent mark and anti-replay" {
 
     try engine.beginEarlyData("ticket-1", true);
     _ = try engine.ingestRecord(&rec);
-
-    // Same replay token is rejected on subsequent early-data records.
-    try std.testing.expectError(error.EarlyDataRejected, engine.ingestRecord(&rec));
+    _ = try engine.ingestRecord(&rec);
 }
 
 test "early data replay scope isolates duplicate tickets across node and epoch" {
@@ -2339,6 +2343,43 @@ test "early data replay scope isolates duplicate tickets across node and epoch" 
 
     try node_b.beginEarlyData("ticket-shared", true);
     _ = try node_b.ingestRecord(&rec);
+}
+
+test "early data replay rejects duplicate ticket across sessions in same scope" {
+    var replay = try early_data.ReplayFilter.init(std.testing.allocator, 4096);
+    defer replay.deinit();
+
+    const rec = appDataRecord("hello");
+
+    var first = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+        .early_data = .{
+            .enabled = true,
+            .replay_filter = &replay,
+            .replay_node_id = 7,
+            .replay_epoch = 42,
+        },
+    });
+    defer first.deinit();
+
+    var second = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+        .early_data = .{
+            .enabled = true,
+            .replay_filter = &replay,
+            .replay_node_id = 7,
+            .replay_epoch = 42,
+        },
+    });
+    defer second.deinit();
+
+    try first.beginEarlyData("ticket-dup", true);
+    _ = try first.ingestRecord(&rec);
+
+    try second.beginEarlyData("ticket-dup", true);
+    try std.testing.expectError(error.EarlyDataRejected, second.ingestRecord(&rec));
 }
 
 test "early data ticket freshness window rejects stale ticket" {
