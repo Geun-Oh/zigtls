@@ -1958,3 +1958,67 @@ Observed Results
 - `certificate_validation.zig`: 15/15 tests passed.
 - `session.zig`: 58/58 tests passed.
 - Full test target passed.
+===
+timestamp: 2026-02-15T02:48:00+09:00
+description: Plan explicit trust-store loading strategy with deterministic fallback behavior
+type: plan
+===
+Motivation
+- `_task.md` requires explicit and testable trust-anchor loading strategy with deterministic fallback for custom bundles.
+- Current trust-store wrapper exposes primitives but no policy function encoding loading order/results.
+
+Scope
+- Add strategy/result types and a `loadWithStrategy` API.
+- Encode deterministic precedence: system -> fallback file -> fallback dir.
+- Add unit tests that avoid host-specific assumptions.
+
+Design
+- `LoadStrategy` controls whether system scan is attempted and optional fallback sources.
+- `loadWithStrategy` returns `LoadResult` to make source-of-trust explicit.
+- Errors from selected fallback sources propagate to caller.
+
+Risks/Perf Impact
+- Startup-only control-flow addition; no steady-state overhead.
+- System store variability handled by making tests use `prefer_system=false` where determinism is required.
+
+Test Plan (commands)
+- `zig test src/tls13/trust_store.zig`
+- `zig build test`
+
+Rollback
+- Keep existing primitive APIs; revert strategy wrapper if downstream integration requires alternate policy semantics.
+
+Commit Plan
+- `MINOR: tls13: add explicit trust store loading strategy`
+===
+timestamp: 2026-02-15T02:50:00+09:00
+description: Add explicit trust-store loading strategy with deterministic fallback order
+type: code change
+===
+Decisions + Rationale
+- Added strategy-driven loading API so trust source precedence is encoded in one function and returned explicitly.
+- Implemented deterministic fallback order: system scan (optional) -> PEM file -> PEM directory.
+- Preserved existing primitive load methods to avoid breaking callers.
+
+Files/Functions Touched
+- `src/tls13/trust_store.zig`
+  - Added `LoadStrategy` and `LoadResult`
+  - Added `TrustStore.loadWithStrategy`
+  - Added deterministic behavior tests.
+
+Risks/Perf Notes
+- Startup path only; no runtime data-plane impact.
+- Strategy API makes source ambiguity observable by callers.
+===
+timestamp: 2026-02-15T02:51:00+09:00
+description: Validate trust-store strategy behavior and full regression suite
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/trust_store.zig`
+- `zig test src/tls13/trust_store.zig`
+- `zig build test`
+
+Observed Results
+- `trust_store.zig`: 4/4 tests passed.
+- Full test target passed.
