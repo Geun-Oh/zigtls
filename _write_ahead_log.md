@@ -2022,3 +2022,70 @@ Commands Executed
 Observed Results
 - `trust_store.zig`: 4/4 tests passed.
 - Full test target passed.
+===
+timestamp: 2026-02-15T03:00:00+09:00
+description: Plan extension coverage enforcement for ClientHello/ServerHello validation in session ingest
+type: plan
+===
+Motivation
+- `_task.md` Phase 2 requires extension coverage (SNI/ALPN/groups).
+- Current parser validates extension structure only, not required extension presence/semantic minima.
+
+Scope
+- Enforce client-side minimum extension set for ClientHello: `supported_versions`, `server_name`, `supported_groups`, `key_share`.
+- Enforce server-side minimum extension set for ServerHello: `supported_versions`, `key_share`.
+- Add explicit engine errors and regression tests for missing extensions.
+
+Design
+- Reuse decoded `messages.ClientHello`/`messages.ServerHello` extension vectors in `session.validateHandshakeBody`.
+- Presence checks only (semantic-deep checks deferred).
+- Keep behavior role-aware: ClientHello policy on server role, ServerHello policy on client role.
+
+Risks/Perf Impact
+- O(n_ext) scans during handshake message validation; negligible.
+- Potential compatibility tightening for tests using minimal hello fixtures; fixtures will be upgraded to include required extensions.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- If strict set is too aggressive for interim interop vectors, gate specific extension requirements via config in later commit.
+
+Commit Plan
+- `MINOR: tls13: enforce required hello extension presence`
+===
+timestamp: 2026-02-15T03:06:00+09:00
+description: Enforce required hello extension presence for role-aware client/server validation
+type: code change
+===
+Decisions + Rationale
+- Added role-aware required extension checks in session handshake body validation to close extension-coverage gap.
+- ClientHello (server role ingest) now requires: `supported_versions`, `server_name`, `supported_groups`, `key_share`, `alpn`.
+- ServerHello (client role ingest, non-HRR) now requires: `supported_versions`, `key_share`.
+- HRR path remains exempt from ServerHello extension-set check in this step to avoid over-constraining retry semantics before dedicated HRR extension parser work.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - `EngineError`: added missing-required-extension errors
+  - `validateHandshakeBody`: role-aware extension validation hooks
+  - Added helpers: `requireClientHelloExtensions`, `requireServerHelloExtensions`, `hasExtension`
+  - Upgraded hello fixture builders to include required extensions
+  - Added regression helpers and tests for missing-extension rejection.
+
+Risks/Perf Notes
+- Adds linear scans over extension vector on hello validation path only.
+- Tightens acceptance behavior intentionally; malformed/minimal hello fixtures without required extensions now fail closed.
+===
+timestamp: 2026-02-15T03:07:00+09:00
+description: Validate required extension presence checks with session and full test suite
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 60/60 tests passed (including new missing-required-extension cases).
+- Full test target passed.

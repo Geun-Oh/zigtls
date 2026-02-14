@@ -78,8 +78,16 @@ pub const EngineError = error{
     InvalidCertificateVerifyMessage,
     InvalidEncryptedExtensionsMessage,
     InvalidNewSessionTicketMessage,
+    MissingRequiredClientHelloExtension,
+    MissingRequiredServerHelloExtension,
     UnsupportedSignatureAlgorithm,
 } || record.ParseError || handshake.ParseError || handshake.KeyUpdateError || state.TransitionError || alerts.DecodeError;
+
+const ext_server_name: u16 = 0x0000;
+const ext_supported_groups: u16 = 0x000a;
+const ext_alpn: u16 = 0x0010;
+const ext_supported_versions: u16 = 0x002b;
+const ext_key_share: u16 = 0x0033;
 
 const Transcript = union(enum) {
     sha256: std.crypto.hash.sha2.Sha256,
@@ -276,10 +284,16 @@ pub const Engine = struct {
             .server_hello => {
                 var sh = messages.ServerHello.decode(self.allocator, body) catch return error.InvalidHelloMessage;
                 defer sh.deinit(self.allocator);
+                if (self.config.role == .client and !messages.serverHelloHasHrrRandom(body)) {
+                    try self.requireServerHelloExtensions(sh.extensions);
+                }
             },
             .client_hello => {
                 var ch = messages.ClientHello.decode(self.allocator, body) catch return error.InvalidHelloMessage;
                 defer ch.deinit(self.allocator);
+                if (self.config.role == .server) {
+                    try self.requireClientHelloExtensions(ch.extensions);
+                }
             },
             .certificate => {
                 var cert = messages.CertificateMsg.decode(self.allocator, body) catch return error.InvalidCertificateMessage;
@@ -310,7 +324,29 @@ pub const Engine = struct {
         }
         return false;
     }
+
+    fn requireClientHelloExtensions(self: Engine, extensions: []const messages.Extension) EngineError!void {
+        _ = self;
+        if (!hasExtension(extensions, ext_supported_versions)) return error.MissingRequiredClientHelloExtension;
+        if (!hasExtension(extensions, ext_server_name)) return error.MissingRequiredClientHelloExtension;
+        if (!hasExtension(extensions, ext_supported_groups)) return error.MissingRequiredClientHelloExtension;
+        if (!hasExtension(extensions, ext_key_share)) return error.MissingRequiredClientHelloExtension;
+        if (!hasExtension(extensions, ext_alpn)) return error.MissingRequiredClientHelloExtension;
+    }
+
+    fn requireServerHelloExtensions(self: Engine, extensions: []const messages.Extension) EngineError!void {
+        _ = self;
+        if (!hasExtension(extensions, ext_supported_versions)) return error.MissingRequiredServerHelloExtension;
+        if (!hasExtension(extensions, ext_key_share)) return error.MissingRequiredServerHelloExtension;
+    }
 };
+
+fn hasExtension(extensions: []const messages.Extension, extension_type: u16) bool {
+    for (extensions) |ext| {
+        if (ext.extension_type == extension_type) return true;
+    }
+    return false;
+}
 
 fn handshakeRecord(comptime ty: state.HandshakeType) [9]u8 {
     var frame: [9]u8 = undefined;
@@ -326,14 +362,14 @@ fn handshakeRecord(comptime ty: state.HandshakeType) [9]u8 {
     return frame;
 }
 
-fn serverHelloRecord() [49]u8 {
-    var frame: [49]u8 = undefined;
+fn serverHelloRecord() [63]u8 {
+    var frame: [63]u8 = undefined;
     frame[0] = @intFromEnum(record.ContentType.handshake);
     frame[1] = 0x03;
     frame[2] = 0x03;
-    std.mem.writeInt(u16, frame[3..5], 40 + 4, .big);
+    std.mem.writeInt(u16, frame[3..5], 54 + 4, .big);
     frame[5] = @intFromEnum(state.HandshakeType.server_hello);
-    const hs_len = handshake.writeU24(40);
+    const hs_len = handshake.writeU24(54);
     @memcpy(frame[6..9], &hs_len);
     frame[9] = 0x03;
     frame[10] = 0x03;
@@ -343,20 +379,36 @@ fn serverHelloRecord() [49]u8 {
     frame[45] = 0x01; // cipher suite low byte (0x1301)
     frame[46] = 0x00; // compression method
     frame[47] = 0x00; // exts len hi
-    frame[48] = 0x00; // exts len lo
+    frame[48] = 0x0e; // exts len lo (14)
+    // supported_versions: type=0x002b len=2 val=0x0304
+    frame[49] = 0x00;
+    frame[50] = 0x2b;
+    frame[51] = 0x00;
+    frame[52] = 0x02;
+    frame[53] = 0x03;
+    frame[54] = 0x04;
+    // key_share: type=0x0033 len=4 group=x25519 key_exchange_len=0
+    frame[55] = 0x00;
+    frame[56] = 0x33;
+    frame[57] = 0x00;
+    frame[58] = 0x04;
+    frame[59] = 0x00;
+    frame[60] = 0x1d;
+    frame[61] = 0x00;
+    frame[62] = 0x00;
     return frame;
 }
 
-fn clientHelloRecord() [52]u8 {
+fn clientHelloRecord() [101]u8 {
     // ClientHello body length:
-    // version(2)+random(32)+sidlen(1)+suites_len(2)+suite(2)+comp_len(1)+comp(1)+exts_len(2)=43
-    var frame: [52]u8 = undefined;
+    // base(43) + extensions(49) = 92
+    var frame: [101]u8 = undefined;
     frame[0] = @intFromEnum(record.ContentType.handshake);
     frame[1] = 0x03;
     frame[2] = 0x03;
-    std.mem.writeInt(u16, frame[3..5], 4 + 43, .big);
+    std.mem.writeInt(u16, frame[3..5], 4 + 92, .big);
     frame[5] = @intFromEnum(state.HandshakeType.client_hello);
-    const hs_len = handshake.writeU24(43);
+    const hs_len = handshake.writeU24(92);
     @memcpy(frame[6..9], &hs_len);
     frame[9] = 0x03;
     frame[10] = 0x03;
@@ -369,7 +421,75 @@ fn clientHelloRecord() [52]u8 {
     frame[48] = 0x01; // comp len
     frame[49] = 0x00; // null compression
     frame[50] = 0x00;
-    frame[51] = 0x00; // exts len
+    frame[51] = 0x31; // exts len (49)
+    // server_name: type=0x0000 len=10 list_len=8 name_type=0 host_len=5 "a.com"
+    frame[52] = 0x00;
+    frame[53] = 0x00;
+    frame[54] = 0x00;
+    frame[55] = 0x0a;
+    frame[56] = 0x00;
+    frame[57] = 0x08;
+    frame[58] = 0x00;
+    frame[59] = 0x00;
+    frame[60] = 0x05;
+    frame[61] = 'a';
+    frame[62] = '.';
+    frame[63] = 'c';
+    frame[64] = 'o';
+    frame[65] = 'm';
+    // supported_versions: type=0x002b len=3 list_len=2 v=0x0304
+    frame[66] = 0x00;
+    frame[67] = 0x2b;
+    frame[68] = 0x00;
+    frame[69] = 0x03;
+    frame[70] = 0x02;
+    frame[71] = 0x03;
+    frame[72] = 0x04;
+    // supported_groups: type=0x000a len=4 list_len=2 group=x25519
+    frame[73] = 0x00;
+    frame[74] = 0x0a;
+    frame[75] = 0x00;
+    frame[76] = 0x04;
+    frame[77] = 0x00;
+    frame[78] = 0x02;
+    frame[79] = 0x00;
+    frame[80] = 0x1d;
+    // key_share: type=0x0033 len=7 vec_len=5 group=x25519 key_len=1 key=0xaa
+    frame[81] = 0x00;
+    frame[82] = 0x33;
+    frame[83] = 0x00;
+    frame[84] = 0x07;
+    frame[85] = 0x00;
+    frame[86] = 0x05;
+    frame[87] = 0x00;
+    frame[88] = 0x1d;
+    frame[89] = 0x00;
+    frame[90] = 0x01;
+    frame[91] = 0xaa;
+    // alpn: type=0x0010 len=5 protocol_name_list_len=3 name_len=2 "h2"
+    frame[92] = 0x00;
+    frame[93] = 0x10;
+    frame[94] = 0x00;
+    frame[95] = 0x05;
+    frame[96] = 0x00;
+    frame[97] = 0x03;
+    frame[98] = 0x02;
+    frame[99] = 'h';
+    frame[100] = '2';
+    return frame;
+}
+
+fn serverHelloRecordWithoutKeyShare() [63]u8 {
+    var frame = serverHelloRecord();
+    frame[55] = 0xff;
+    frame[56] = 0xfe;
+    return frame;
+}
+
+fn clientHelloRecordWithoutAlpn() [101]u8 {
+    var frame = clientHelloRecord();
+    frame[92] = 0xff;
+    frame[93] = 0xfe;
     return frame;
 }
 
@@ -659,6 +779,28 @@ test "invalid client hello body is rejected for server role" {
     defer engine.deinit();
 
     try std.testing.expectError(error.InvalidHelloMessage, engine.ingestRecord(&handshakeRecord(.client_hello)));
+}
+
+test "client rejects server hello without required extension" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const rec = serverHelloRecordWithoutKeyShare();
+    try std.testing.expectError(error.MissingRequiredServerHelloExtension, engine.ingestRecord(&rec));
+}
+
+test "server rejects client hello without required extension" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const rec = clientHelloRecordWithoutAlpn();
+    try std.testing.expectError(error.MissingRequiredClientHelloExtension, engine.ingestRecord(&rec));
 }
 
 test "valid client hello body is accepted for server role" {
