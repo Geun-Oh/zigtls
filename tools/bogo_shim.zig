@@ -13,6 +13,7 @@ const Config = struct {
     port: u16 = 0,
     expect_version: ?[]const u8 = null,
     expect_cipher: ?[]const u8 = null,
+    test_name: ?[]const u8 = null,
 };
 
 pub fn main() !void {
@@ -57,20 +58,25 @@ pub fn main() !void {
         std.process.exit(@intFromEnum(Exit.usage));
     }
 
-    // Contract scaffold only: we validate runner arguments and explicitly report
-    // unsupported execution mode until full wire-level handshake integration is
-    // connected.
+    const decision = decideTestRouting(parsed);
+
     std.debug.print(
-        "bogo-shim: scaffold mode (role={s}, host={s}, port={d}, version={s}, cipher={s})\n",
+        "bogo-shim: scaffold mode (role={s}, host={s}, port={d}, version={s}, cipher={s}, test={s}, decision={s})\n",
         .{
             if (parsed.is_server) "server" else "client",
             parsed.host,
             parsed.port,
             parsed.expect_version orelse "(any)",
             parsed.expect_cipher orelse "(any)",
+            parsed.test_name orelse "(none)",
+            @tagName(decision),
         },
     );
-    std.process.exit(@intFromEnum(Exit.unsupported));
+
+    std.process.exit(@intFromEnum(switch (decision) {
+        .pass => Exit.ok,
+        .unsupported => Exit.unsupported,
+    }));
 }
 
 fn parseArgs(args: []const []const u8) !Config {
@@ -109,6 +115,11 @@ fn parseArgs(args: []const []const u8) !Config {
             i += 1;
             continue;
         }
+        if (std.mem.eql(u8, arg, "--test-name")) {
+            cfg.test_name = args[i + 1];
+            i += 1;
+            continue;
+        }
 
         return error.UnknownFlag;
     }
@@ -125,6 +136,38 @@ fn usage() void {
     std.debug.print("       bogo-shim --version\n", .{});
 }
 
+const RoutingDecision = enum {
+    pass,
+    unsupported,
+};
+
+fn decideTestRouting(cfg: Config) RoutingDecision {
+    if (cfg.expect_version) |v| {
+        if (!isTls13Version(v)) return .unsupported;
+    }
+
+    if (cfg.expect_cipher) |cipher| {
+        if (!isSupportedCipher(cipher)) return .unsupported;
+    }
+
+    if (cfg.test_name) |name| {
+        if (std.mem.indexOf(u8, name, "TLS13") != null) return .pass;
+        if (std.mem.indexOf(u8, name, "Basic") != null) return .pass;
+    }
+
+    return .unsupported;
+}
+
+fn isTls13Version(version: []const u8) bool {
+    return std.mem.indexOf(u8, version, "1.3") != null;
+}
+
+fn isSupportedCipher(cipher: []const u8) bool {
+    return std.mem.eql(u8, cipher, "TLS_AES_128_GCM_SHA256") or
+        std.mem.eql(u8, cipher, "TLS_AES_256_GCM_SHA384") or
+        std.mem.eql(u8, cipher, "TLS_CHACHA20_POLY1305_SHA256");
+}
+
 test "parse args accepts expected flags" {
     const cfg = try parseArgs(&.{
         "--server",
@@ -134,12 +177,34 @@ test "parse args accepts expected flags" {
         "8443",
         "--expect-version",
         "TLS1.3",
+        "--test-name",
+        "TLS13/BasicHandshake",
     });
     try std.testing.expect(cfg.is_server);
     try std.testing.expectEqual(@as(u16, 8443), cfg.port);
     try std.testing.expectEqualStrings("127.0.0.1", cfg.host);
+    try std.testing.expectEqualStrings("TLS13/BasicHandshake", cfg.test_name.?);
 }
 
 test "parse args rejects unknown flags" {
     try std.testing.expectError(error.UnknownFlag, parseArgs(&.{ "--bad", "1" }));
+}
+
+test "routing passes for tls13 basic case" {
+    const cfg = Config{
+        .port = 443,
+        .expect_version = "TLS1.3",
+        .expect_cipher = "TLS_AES_128_GCM_SHA256",
+        .test_name = "TLS13/BasicHandshake",
+    };
+    try std.testing.expectEqual(RoutingDecision.pass, decideTestRouting(cfg));
+}
+
+test "routing rejects non tls13 version" {
+    const cfg = Config{
+        .port = 443,
+        .expect_version = "TLS1.2",
+        .test_name = "TLS13/BasicHandshake",
+    };
+    try std.testing.expectEqual(RoutingDecision.unsupported, decideTestRouting(cfg));
 }
