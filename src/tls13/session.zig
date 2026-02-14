@@ -3,6 +3,7 @@ const alerts = @import("alerts.zig");
 const early_data = @import("early_data.zig");
 const handshake = @import("handshake.zig");
 const keyschedule = @import("keyschedule.zig");
+const messages = @import("messages.zig");
 const record = @import("record.zig");
 const state = @import("state.zig");
 
@@ -54,6 +55,7 @@ pub const EngineError = error{
     EarlyDataRejected,
     MissingReplayFilter,
     TruncationDetected,
+    InvalidHelloMessage,
 } || record.ParseError || handshake.ParseError || handshake.KeyUpdateError || state.TransitionError || alerts.DecodeError;
 
 const Transcript = union(enum) {
@@ -129,6 +131,7 @@ pub const Engine = struct {
                     const frame = try handshake.parseOne(cursor);
                     const frame_len = 4 + @as(usize, @intCast(frame.header.length));
                     self.transcript.update(cursor[0..frame_len]);
+                    try self.validateHandshakeBody(frame.header.handshake_type, frame.body);
 
                     const event = handshake.classifyEvent(frame);
                     try self.machine.onEvent(event);
@@ -218,6 +221,20 @@ pub const Engine = struct {
             self.early_data_ticket = null;
         }
     }
+
+    fn validateHandshakeBody(self: *Engine, handshake_type: state.HandshakeType, body: []const u8) EngineError!void {
+        switch (handshake_type) {
+            .server_hello => {
+                var sh = messages.ServerHello.decode(self.allocator, body) catch return error.InvalidHelloMessage;
+                defer sh.deinit(self.allocator);
+            },
+            .client_hello => {
+                var ch = messages.ClientHello.decode(self.allocator, body) catch return error.InvalidHelloMessage;
+                defer ch.deinit(self.allocator);
+            },
+            else => {},
+        }
+    }
 };
 
 fn handshakeRecord(comptime ty: state.HandshakeType) [9]u8 {
@@ -234,18 +251,71 @@ fn handshakeRecord(comptime ty: state.HandshakeType) [9]u8 {
     return frame;
 }
 
-fn hrrServerHelloRecord() [43]u8 {
-    var frame: [43]u8 = undefined;
+fn serverHelloRecord() [49]u8 {
+    var frame: [49]u8 = undefined;
     frame[0] = @intFromEnum(record.ContentType.handshake);
     frame[1] = 0x03;
     frame[2] = 0x03;
-    std.mem.writeInt(u16, frame[3..5], 38, .big);
+    std.mem.writeInt(u16, frame[3..5], 40 + 4, .big);
     frame[5] = @intFromEnum(state.HandshakeType.server_hello);
-    const len = handshake.writeU24(34);
+    const hs_len = handshake.writeU24(40);
+    @memcpy(frame[6..9], &hs_len);
+    frame[9] = 0x03;
+    frame[10] = 0x03;
+    @memset(frame[11..43], 0x11);
+    frame[43] = 0x00; // session id len
+    frame[44] = 0x13;
+    frame[45] = 0x01; // cipher suite low byte (0x1301)
+    frame[46] = 0x00; // compression method
+    frame[47] = 0x00; // exts len hi
+    frame[48] = 0x00; // exts len lo
+    return frame;
+}
+
+fn clientHelloRecord() [52]u8 {
+    // ClientHello body length:
+    // version(2)+random(32)+sidlen(1)+suites_len(2)+suite(2)+comp_len(1)+comp(1)+exts_len(2)=43
+    var frame: [52]u8 = undefined;
+    frame[0] = @intFromEnum(record.ContentType.handshake);
+    frame[1] = 0x03;
+    frame[2] = 0x03;
+    std.mem.writeInt(u16, frame[3..5], 4 + 43, .big);
+    frame[5] = @intFromEnum(state.HandshakeType.client_hello);
+    const hs_len = handshake.writeU24(43);
+    @memcpy(frame[6..9], &hs_len);
+    frame[9] = 0x03;
+    frame[10] = 0x03;
+    @memset(frame[11..43], 0x22);
+    frame[43] = 0x00; // sid len
+    frame[44] = 0x00;
+    frame[45] = 0x02; // suites len
+    frame[46] = 0x13;
+    frame[47] = 0x01; // TLS_AES_128_GCM_SHA256
+    frame[48] = 0x01; // comp len
+    frame[49] = 0x00; // null compression
+    frame[50] = 0x00;
+    frame[51] = 0x00; // exts len
+    return frame;
+}
+
+fn hrrServerHelloRecord() [49]u8 {
+    var frame: [49]u8 = undefined;
+    frame[0] = @intFromEnum(record.ContentType.handshake);
+    frame[1] = 0x03;
+    frame[2] = 0x03;
+    std.mem.writeInt(u16, frame[3..5], 44, .big);
+    frame[5] = @intFromEnum(state.HandshakeType.server_hello);
+    const len = handshake.writeU24(40);
     @memcpy(frame[6..9], &len);
     frame[9] = 0x03;
     frame[10] = 0x03;
     @memcpy(frame[11..43], &handshake.hello_retry_request_random);
+    frame[43] = 0x00; // session id len
+    frame[44] = 0x13;
+    frame[45] = 0x01; // cipher suite
+    frame[46] = 0x00; // compression
+    frame[47] = 0x00;
+    frame[48] = 0x00; // extensions len
     return frame;
 }
 
@@ -279,7 +349,7 @@ test "client side handshake flow reaches connected" {
     });
     defer engine.deinit();
 
-    _ = try engine.ingestRecord(&handshakeRecord(.server_hello));
+    _ = try engine.ingestRecord(&serverHelloRecord());
     _ = try engine.ingestRecord(&handshakeRecord(.encrypted_extensions));
     _ = try engine.ingestRecord(&handshakeRecord(.finished));
 
@@ -312,7 +382,7 @@ test "close_notify transitions to closed" {
 
 test "client accepts hrr then server hello" {
     const hrr = hrrServerHelloRecord();
-    const second_sh = handshakeRecord(.server_hello);
+    const second_sh = serverHelloRecord();
 
     var engine = Engine.init(std.testing.allocator, .{
         .role = .client,
@@ -338,7 +408,7 @@ test "keyupdate request is surfaced in action" {
         .suite = .tls_aes_128_gcm_sha256,
     });
     defer engine.deinit();
-    _ = try engine.ingestRecord(&handshakeRecord(.server_hello));
+    _ = try engine.ingestRecord(&serverHelloRecord());
     _ = try engine.ingestRecord(&handshakeRecord(.encrypted_extensions));
     _ = try engine.ingestRecord(&handshakeRecord(.finished));
 
@@ -411,4 +481,35 @@ test "transport eof after close_notify is clean close" {
     _ = try engine.ingestRecord(&frame);
     try engine.onTransportEof();
     try std.testing.expectEqual(state.ConnectionState.closed, engine.machine.state);
+}
+
+test "invalid server hello body is rejected" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    try std.testing.expectError(error.InvalidHelloMessage, engine.ingestRecord(&handshakeRecord(.server_hello)));
+}
+
+test "invalid client hello body is rejected for server role" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    try std.testing.expectError(error.InvalidHelloMessage, engine.ingestRecord(&handshakeRecord(.client_hello)));
+}
+
+test "valid client hello body is accepted for server role" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    _ = try engine.ingestRecord(&clientHelloRecord());
+    try std.testing.expectEqual(state.ConnectionState.wait_client_certificate_or_finished, engine.machine.state);
 }

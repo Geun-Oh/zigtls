@@ -963,3 +963,65 @@ Commands Executed
 Observed Results
 - Message and handshake tests passed.
 - Full package test build passed.
+===
+timestamp: 2026-02-15T00:18:00+09:00
+description: Enforce message-level ClientHello/ServerHello decode validation in session ingest path
+type: plan
+===
+Motivation
+- Handshake envelope parsing exists, but session ingest should reject structurally invalid hello message bodies early.
+
+Scope
+- Integrate `messages.ClientHello.decode` and `messages.ServerHello.decode` into `session.Engine.ingestRecord` path.
+- Add new engine error for invalid hello payloads.
+- Add negative tests for malformed client/server hello body handling.
+
+Design
+- Validate only hello message structural correctness at this stage; extension semantic checks remain future work.
+- Keep Sans-I/O behavior and existing state transition logic intact.
+
+Risks/Perf Impact
+- Small handshake-path decode overhead; acceptable for control-plane messages.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Revert hello-body decode checks if integration reveals incompatibility with pending handshake features.
+
+Commit Plan
+- `MINOR: tls13: validate hello message bodies during session ingest`
+===
+timestamp: 2026-02-15T00:22:00+09:00
+description: Add session-level hello body structural validation using message codecs
+type: code change
+===
+Decisions + Rationale
+- Integrated message-level decode checks into session ingest for `client_hello` and `server_hello` handshake bodies.
+- Added explicit `InvalidHelloMessage` error to fail closed on malformed hello payloads.
+- Updated hello test frame builders to emit minimally valid wire-format bodies, including HRR-compatible ServerHello variant.
+- Added server-role positive/negative tests for ClientHello body validation.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - Added `validateHandshakeBody` helper.
+  - Added hello-body decode checks in `ingestRecord`.
+  - Added invalid/valid hello body tests.
+
+Risks/Perf Notes
+- Additional decode work occurs only on hello messages (control path), not application data path.
+
+===
+timestamp: 2026-02-15T00:22:30+09:00
+description: Validate session hello-body validation integration
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- Session tests passed, including new malformed/valid hello body cases.
+- Full package test build passed.
