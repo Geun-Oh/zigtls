@@ -5783,3 +5783,87 @@ Observed Results
 
 Notes
 - Regression confirms malformed ALPN payload with zero-length protocol id is rejected as `InvalidAlpnExtension`.
+===
+timestamp: 2026-02-15T11:05:00+09:00
+description: Plan strict supported_groups and key_share payload validation for ClientHello
+type: plan
+===
+Motivation
+- ClientHello hello-checks now validate SNI/ALPN payload structure, but `supported_groups` and `key_share` remain presence-only.
+- Malformed extension payloads could pass required-extension checks and continue handshake policy flow.
+
+Scope
+- Add payload validation for ClientHello `supported_groups` and `key_share` extensions.
+- Add explicit error taxonomy and alert mapping.
+- Add regression fixtures/tests for malformed payload vectors.
+- Update RFC matrix HS-001B coverage wording.
+
+Design
+- Add `InvalidSupportedGroupsExtension` and `InvalidKeyShareExtension` to `EngineError`.
+- `supported_groups` validation:
+  - vector length consistency
+  - non-empty list
+  - even-byte alignment (u16 groups)
+- `key_share` validation:
+  - vector length consistency
+  - at least one entry
+  - per-entry bounds (`group`, `key_exchange_length`, key bytes)
+  - reject zero-length key_exchange.
+- Map both errors to fatal `illegal_parameter`.
+
+Risks/Perf Impact
+- Small bounded parsing in ClientHello validation path; negligible overhead.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Remove extension payload validators, new errors, and regression tests.
+
+Commit Plan
+- `MINOR: tls13: validate client hello groups and key_share payloads`
+===
+timestamp: 2026-02-15T11:10:00+09:00
+description: Add strict ClientHello supported_groups/key_share payload validation
+type: code change
+===
+Decisions + Rationale
+- Extended hello extension legality checks to include payload-level validation for `supported_groups` and `key_share`.
+- Closed remaining presence-only validation gaps in ClientHello required-extension checks.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - `EngineError`: added `InvalidSupportedGroupsExtension`, `InvalidKeyShareExtension`.
+  - `requireClientHelloExtensions`: now validates groups/key_share payloads.
+  - `classifyErrorAlert`: maps both errors to `illegal_parameter`.
+  - Added helpers:
+    - `validateClientHelloSupportedGroupsExtension`
+    - `validateClientHelloKeyShareExtension`
+  - Added fixtures/tests:
+    - `clientHelloRecordWithInvalidSupportedGroupsPayload`
+    - `clientHelloRecordWithInvalidKeySharePayload`
+    - `server rejects client hello with invalid supported_groups payload`
+    - `server rejects client hello with invalid key_share payload`
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-HS-001B` wording/coverage for invalid-groups/invalid-key-share branches.
+
+Risks/Perf Notes
+- Small bounded parsing in ClientHello validation path; negligible overhead.
+- Intentionally rejects malformed payloads previously allowed by presence-only checks.
+===
+timestamp: 2026-02-15T11:11:00+09:00
+description: Validate groups/key_share payload hardening with session and full test suites
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 114/114 tests passed.
+- `zig build test`: passed.
+
+Notes
+- Regression confirms malformed `supported_groups` and `key_share` payload vectors are rejected with dedicated error classes.

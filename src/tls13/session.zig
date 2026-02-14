@@ -104,6 +104,8 @@ pub const EngineError = error{
     MissingRequiredClientHelloExtension,
     InvalidServerNameExtension,
     InvalidAlpnExtension,
+    InvalidSupportedGroupsExtension,
+    InvalidKeyShareExtension,
     MissingRequiredServerHelloExtension,
     MissingRequiredHrrExtension,
     UnexpectedServerHelloExtension,
@@ -595,8 +597,10 @@ pub const Engine = struct {
         if (!clientHelloSupportedVersionsContainTls13(supported_versions)) return error.InvalidSupportedVersionExtension;
         const server_name = findExtensionData(extensions, ext_server_name) orelse return error.MissingRequiredClientHelloExtension;
         try validateClientHelloServerNameExtension(server_name);
-        if (!hasExtension(extensions, ext_supported_groups)) return error.MissingRequiredClientHelloExtension;
-        if (!hasExtension(extensions, ext_key_share)) return error.MissingRequiredClientHelloExtension;
+        const supported_groups = findExtensionData(extensions, ext_supported_groups) orelse return error.MissingRequiredClientHelloExtension;
+        try validateClientHelloSupportedGroupsExtension(supported_groups);
+        const key_share = findExtensionData(extensions, ext_key_share) orelse return error.MissingRequiredClientHelloExtension;
+        try validateClientHelloKeyShareExtension(key_share);
         const alpn = findExtensionData(extensions, ext_alpn) orelse return error.MissingRequiredClientHelloExtension;
         try validateClientHelloAlpnExtension(alpn);
         if (!isStrictTls13LegacyCompressionVector(compression_methods)) return error.InvalidCompressionMethod;
@@ -642,6 +646,8 @@ pub fn classifyErrorAlert(err: anyerror) alerts.Alert {
         error.InvalidSupportedVersionExtension,
         error.InvalidServerNameExtension,
         error.InvalidAlpnExtension,
+        error.InvalidSupportedGroupsExtension,
+        error.InvalidKeyShareExtension,
         error.UnexpectedServerHelloExtension,
         error.UnexpectedHrrExtension,
         error.InvalidCompressionMethod,
@@ -967,6 +973,33 @@ fn validateClientHelloAlpnExtension(data: []const u8) EngineError!void {
     if (i != end) return error.InvalidAlpnExtension;
 }
 
+fn validateClientHelloSupportedGroupsExtension(data: []const u8) EngineError!void {
+    if (data.len < 2) return error.InvalidSupportedGroupsExtension;
+    const list_len = readU16(data[0..2]);
+    if (list_len == 0) return error.InvalidSupportedGroupsExtension;
+    if (list_len % 2 != 0) return error.InvalidSupportedGroupsExtension;
+    if (list_len + 2 != data.len) return error.InvalidSupportedGroupsExtension;
+}
+
+fn validateClientHelloKeyShareExtension(data: []const u8) EngineError!void {
+    if (data.len < 2) return error.InvalidKeyShareExtension;
+    const vec_len = readU16(data[0..2]);
+    if (vec_len == 0) return error.InvalidKeyShareExtension;
+    if (vec_len + 2 != data.len) return error.InvalidKeyShareExtension;
+
+    var i: usize = 2;
+    const end = data.len;
+    while (i < end) {
+        if (i + 4 > end) return error.InvalidKeyShareExtension;
+        const key_len = readU16(data[i + 2 .. i + 4]);
+        if (key_len == 0) return error.InvalidKeyShareExtension;
+        i += 4;
+        if (i + key_len > end) return error.InvalidKeyShareExtension;
+        i += key_len;
+    }
+    if (i != end) return error.InvalidKeyShareExtension;
+}
+
 const PskCounts = struct {
     identity_count: usize,
     binder_count: usize,
@@ -1264,6 +1297,18 @@ fn clientHelloRecordWithoutAlpn() [101]u8 {
 fn clientHelloRecordWithInvalidAlpnPayload() [101]u8 {
     var frame = clientHelloRecord();
     frame[98] = 0x00; // protocol name length (invalid empty ALPN id)
+    return frame;
+}
+
+fn clientHelloRecordWithInvalidSupportedGroupsPayload() [101]u8 {
+    var frame = clientHelloRecord();
+    frame[78] = 0x01; // groups list len low byte (odd length)
+    return frame;
+}
+
+fn clientHelloRecordWithInvalidKeySharePayload() [101]u8 {
+    var frame = clientHelloRecord();
+    frame[90] = 0x00; // key_exchange_len low byte (invalid zero length)
     return frame;
 }
 
@@ -2281,6 +2326,28 @@ test "server rejects client hello with invalid alpn payload" {
 
     const rec = clientHelloRecordWithInvalidAlpnPayload();
     try std.testing.expectError(error.InvalidAlpnExtension, engine.ingestRecord(&rec));
+}
+
+test "server rejects client hello with invalid supported_groups payload" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const rec = clientHelloRecordWithInvalidSupportedGroupsPayload();
+    try std.testing.expectError(error.InvalidSupportedGroupsExtension, engine.ingestRecord(&rec));
+}
+
+test "server rejects client hello with invalid key_share payload" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const rec = clientHelloRecordWithInvalidKeySharePayload();
+    try std.testing.expectError(error.InvalidKeyShareExtension, engine.ingestRecord(&rec));
 }
 
 test "server rejects client hello without tls13 supported version" {
