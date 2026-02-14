@@ -1351,3 +1351,52 @@ Observed Results
 - Messages codec tests passed including certificate/certificate_verify decoding.
 - Session tests passed including certificate path positive/negative body-validation cases.
 - Full package tests passed.
+===
+timestamp: 2026-02-15T01:18:00+09:00
+description: Expand session integration tests for server-side certificate-path handshake flow
+type: plan
+===
+Motivation
+- Current certificate-path validation coverage focuses on client-role ingest sequence.
+- Server-role certificate-path progression should also be verified explicitly.
+
+Scope
+- Add server-role session tests for valid client certificate path and malformed certificate/certificate_verify message rejection.
+- Reuse existing test frame helpers.
+
+Design
+- Keep changes test-only for this unit; no behavior changes expected.
+
+Risks/Perf Impact
+- No runtime impact; test coverage expansion only.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Revert added tests if assumptions about role sequencing are incorrect.
+
+Commit Plan
+- `MINOR: test: add server-role certificate-path session tests`
+===
+timestamp: 2026-02-15T01:20:30+09:00
+description: Add server-role certificate-path session tests for positive and negative flows
+type: test
+===
+Decisions + Rationale
+- Expanded session integration coverage to include server-role certificate-authenticated path progression and malformed message rejection.
+- Keeps role symmetry validation explicit for certificate/certificate_verify body checks.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - Added 3 server-role certificate-path tests.
+
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- Session suite passed with new server-role certificate path tests.
+- Full package tests passed.

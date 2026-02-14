@@ -672,3 +672,40 @@ test "invalid certificate_verify body is rejected" {
     _ = try engine.ingestRecord(&certificateRecord());
     try std.testing.expectError(error.InvalidCertificateVerifyMessage, engine.ingestRecord(&handshakeRecord(.certificate_verify)));
 }
+
+test "server role certificate path valid bodies progress state" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    _ = try engine.ingestRecord(&clientHelloRecord());
+    _ = try engine.ingestRecord(&certificateRecord());
+    _ = try engine.ingestRecord(&certificateVerifyRecord());
+    _ = try engine.ingestRecord(&handshakeRecord(.finished));
+    try std.testing.expectEqual(state.ConnectionState.connected, engine.machine.state);
+}
+
+test "server role invalid certificate body is rejected" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    _ = try engine.ingestRecord(&clientHelloRecord());
+    try std.testing.expectError(error.InvalidCertificateMessage, engine.ingestRecord(&handshakeRecord(.certificate)));
+}
+
+test "server role invalid certificate_verify body is rejected" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    _ = try engine.ingestRecord(&clientHelloRecord());
+    _ = try engine.ingestRecord(&certificateRecord());
+    try std.testing.expectError(error.InvalidCertificateVerifyMessage, engine.ingestRecord(&handshakeRecord(.certificate_verify)));
+}
