@@ -4,6 +4,7 @@ pub const early_data = @import("tls13/early_data.zig");
 pub const fuzz = @import("tls13/fuzz.zig");
 pub const handshake = @import("tls13/handshake.zig");
 pub const keyschedule = @import("tls13/keyschedule.zig");
+pub const messages = @import("tls13/messages.zig");
 pub const ocsp = @import("tls13/ocsp.zig");
 pub const record = @import("tls13/record.zig");
 pub const session = @import("tls13/session.zig");

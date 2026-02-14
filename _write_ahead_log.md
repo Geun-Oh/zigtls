@@ -835,3 +835,65 @@ Observed Results
 - `bogo-shim` build target passed.
 - Full package tests passed.
 - Summary script self-test passed.
+===
+timestamp: 2026-02-14T23:52:00+09:00
+description: Add handshake message codec baseline (ClientHello/ServerHello)
+type: plan
+===
+Motivation
+- Current implementation parses handshake envelopes but lacks concrete message-level codec support.
+
+Scope
+- Add `src/tls13/messages.zig` with baseline ClientHello/ServerHello encode/decode.
+- Enforce strict length and structural checks for fixed-width fields.
+- Export module from `src/tls13.zig` and add unit tests.
+
+Design
+- Keep codec minimal and deterministic with explicit byte layout handling.
+- Use allocator-backed extension vectors for decode path and free helpers.
+
+Risks/Perf Impact
+- Decode path allocates for extension slices; acceptable for control-plane handshake path.
+- Full extension semantic validation remains future work.
+
+Test Plan (commands)
+- `zig test src/tls13/messages.zig`
+- `zig build test`
+
+Rollback
+- Revert message codec module if wire-format assumptions conflict with integration plan.
+
+Commit Plan
+- `MEDIUM: tls13: add clienthello/serverhello message codec baseline`
+===
+timestamp: 2026-02-14T23:58:00+09:00
+description: Add ClientHello/ServerHello handshake message codec baseline
+type: code change
+===
+Decisions + Rationale
+- Added `messages` module to provide concrete handshake message body codec support beyond envelope parsing.
+- Implemented ClientHello encode/decode with strict structural validation (legacy version, session ID bounds, cipher suite vector length, extension block bounds).
+- Implemented ServerHello encode baseline with extension serialization.
+- Added deinit methods for allocator-owned message fields to keep ownership explicit.
+
+Files/Functions Touched
+- `src/tls13/messages.zig` (new)
+- `src/tls13.zig` (export `messages` module)
+
+Risks/Perf Notes
+- Decode path allocates per-message vectors/extensions; acceptable for handshake path.
+- Extension semantic validation (per extension type rules) remains pending.
+
+===
+timestamp: 2026-02-14T23:58:30+09:00
+description: Validate message codec module and package tests
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/messages.zig src/tls13.zig`
+- `zig test src/tls13/messages.zig`
+- `zig build test`
+
+Observed Results
+- Message codec tests passed.
+- Full package tests passed after module integration.
