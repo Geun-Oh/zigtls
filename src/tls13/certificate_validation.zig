@@ -182,6 +182,7 @@ fn dnsNameMatchesServerName(expected_raw: []const u8, cert_raw: []const u8) bool
     if (std.mem.indexOfScalar(u8, cert[1..], '*') != null) return false;
 
     const suffix = cert[1..]; // ".example.com"
+    if (std.mem.indexOfScalar(u8, suffix[1..], '.') == null) return false; // reject broad patterns like "*.com"
     if (expected.len <= suffix.len) return false;
     const suffix_start = expected.len - suffix.len;
     if (!std.ascii.eqlIgnoreCase(expected[suffix_start..], suffix)) return false;
@@ -232,6 +233,10 @@ test "server name wildcard does not match apex" {
 
 test "server name wildcard does not match multiple labels" {
     try std.testing.expectError(error.HostnameMismatch, validateServerName("a.b.example.com", "*.example.com"));
+}
+
+test "server name wildcard rejects broad suffix pattern" {
+    try std.testing.expectError(error.HostnameMismatch, validateServerName("example.com", "*.com"));
 }
 
 test "server chain validation happy path" {

@@ -5566,3 +5566,70 @@ Observed Results
 
 Notes
 - Regression confirms ambiguous strategy config is rejected before fallback loader side effects.
+===
+timestamp: 2026-02-15T10:18:00+09:00
+description: Plan wildcard SAN hardening to reject public-suffix-like patterns (e.g. *.com)
+type: plan
+===
+Motivation
+- Wildcard SAN support was added with left-most one-label semantics.
+- Current matcher can still accept coarse wildcard patterns like `*.com`, which are overly broad and outside conservative hostname policy baselines.
+
+Scope
+- Reject wildcard SAN patterns whose suffix does not contain at least one additional label separator (e.g. `.com`).
+- Keep existing single-label wildcard semantics and boundary checks.
+- Add regression tests for rejection of coarse wildcard patterns.
+- Update RFC matrix CERT row wording/coverage note.
+
+Design
+- In wildcard matcher, require wildcard suffix segment to contain at least one `.` after the leading dot.
+- Add test: wildcard `*.com` must not match `example.com`.
+
+Risks/Perf Impact
+- One extra string scan in hostname-validation path; negligible overhead.
+- Tightens acceptance of overly broad wildcard SAN entries by design.
+
+Test Plan (commands)
+- `zig test src/tls13/certificate_validation.zig`
+- `zig build test`
+
+Rollback
+- Remove suffix-depth guard and regression test.
+
+Commit Plan
+- `MINOR: cert: reject broad wildcard SAN suffix patterns`
+===
+timestamp: 2026-02-15T10:21:00+09:00
+description: Harden wildcard SAN matching by rejecting broad suffix patterns
+type: code change
+===
+Decisions + Rationale
+- Added conservative wildcard-suffix depth guard to reject broad wildcard patterns like `*.com`.
+- Preserved existing left-most single-label wildcard semantics.
+
+Files/Functions Touched
+- `src/tls13/certificate_validation.zig`
+  - `dnsNameMatchesServerName`: now requires wildcard suffix to include at least one additional label separator beyond leading dot.
+  - Added test `server name wildcard rejects broad suffix pattern`.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-CERT-001` wording/coverage to include broad-suffix wildcard rejection.
+
+Risks/Perf Notes
+- One additional small string scan in hostname-validation path; negligible overhead.
+- Tightens wildcard acceptance policy intentionally.
+===
+timestamp: 2026-02-15T10:22:00+09:00
+description: Validate broad wildcard SAN rejection hardening with certificate and full tests
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/certificate_validation.zig`
+- `zig test src/tls13/certificate_validation.zig`
+- `zig build test`
+
+Observed Results
+- `certificate_validation.zig`: 34/34 tests passed.
+- `zig build test`: passed.
+
+Notes
+- Regression confirms `*.com` style broad wildcard SAN patterns are rejected.
