@@ -40,4 +40,12 @@ popd >/dev/null
 
 echo "BoGo runner exited with status: $STATUS"
 echo "Results: $RUNNER/$BOGO_OUTPUT"
+
+if [[ -f "$RUNNER/$BOGO_OUTPUT" ]]; then
+  echo "BoGo summary:"
+  if ! python3 "$(dirname "$0")/bogo_summary.py" "$RUNNER/$BOGO_OUTPUT"; then
+    echo "warning: failed to summarize BoGo output" >&2
+  fi
+fi
+
 exit "$STATUS"

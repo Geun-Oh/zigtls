@@ -1400,3 +1400,94 @@ Commands Executed
 Observed Results
 - Session suite passed with new server-role certificate path tests.
 - Full package tests passed.
+===
+timestamp: 2026-02-15T01:27:00+09:00
+description: Improve BoGo run wrapper to emit automatic summary report
+ntype: plan
+===
+Motivation
+- BoGo pipeline exists, but users still need a manual step to summarize JSON results.
+
+Scope
+- Update `scripts/interop/bogo_run.sh` to invoke `bogo_summary.py` automatically when JSON output exists.
+- Keep behavior non-fatal for summary generation failures.
+
+Design
+- Preserve original BoGo exit status.
+- Print summary block for quick inspection in CI/local runs.
+
+Risks/Perf Impact
+- Scripting-only change; no runtime core impact.
+
+Test Plan (commands)
+- `bash -n scripts/interop/bogo_run.sh`
+- `python3 scripts/interop/bogo_summary.py --self-test`
+- `zig build test`
+
+Rollback
+- Revert wrapper script enhancement if it interferes with existing automation parsing.
+
+Commit Plan
+- `MINOR: test: auto-summarize bogo results in runner wrapper`
+===
+timestamp: 2026-02-15T01:27:30+09:00
+description: Supersede prior malformed metadata header and restate BoGo wrapper plan entry
+type: plan
+===
+Correction
+- Previous plan entry at 2026-02-15T01:27:00+09:00 had malformed metadata key (`ntype`).
+- This entry supersedes that malformed header for WAL format compliance.
+
+Motivation
+- BoGo pipeline exists, but users still need a manual step to summarize JSON results.
+
+Scope
+- Update `scripts/interop/bogo_run.sh` to invoke `bogo_summary.py` automatically when JSON output exists.
+- Keep behavior non-fatal for summary generation failures.
+
+Design
+- Preserve original BoGo exit status.
+- Print summary block for quick inspection in CI/local runs.
+
+Risks/Perf Impact
+- Scripting-only change; no runtime core impact.
+
+Test Plan (commands)
+- `bash -n scripts/interop/bogo_run.sh`
+- `python3 scripts/interop/bogo_summary.py --self-test`
+- `zig build test`
+
+Rollback
+- Revert wrapper script enhancement if it interferes with existing automation parsing.
+
+Commit Plan
+- `MINOR: test: auto-summarize bogo results in runner wrapper`
+===
+timestamp: 2026-02-15T01:30:00+09:00
+description: Update BoGo runner wrapper to auto-print summarized JSON results
+type: code change
+===
+Decisions + Rationale
+- Enhanced `bogo_run.sh` to automatically run `bogo_summary.py` when JSON output file is present.
+- Kept summary generation non-fatal to preserve original BoGo runner exit semantics.
+
+Files/Functions Touched
+- `scripts/interop/bogo_run.sh`
+
+Risks/Perf Notes
+- Wrapper-only behavior change; no impact on TLS runtime paths.
+
+===
+timestamp: 2026-02-15T01:30:30+09:00
+description: Validate updated BoGo wrapper and related checks
+type: test
+===
+Commands Executed
+- `bash -n scripts/interop/bogo_run.sh`
+- `python3 scripts/interop/bogo_summary.py --self-test`
+- `zig build test`
+
+Observed Results
+- Wrapper shell syntax check passed.
+- Summary script self-test passed.
+- Full package tests passed.
