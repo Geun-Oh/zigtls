@@ -109,6 +109,7 @@ pub const EngineError = error{
     InvalidCompressionMethod,
     MissingPskKeyExchangeModes,
     InvalidPskBinder,
+    InvalidPskBinderLength,
     PskBinderCountMismatch,
     DowngradeDetected,
     UnsupportedSignatureAlgorithm,
@@ -475,7 +476,6 @@ pub const Engine = struct {
     }
 
     fn requireClientHelloExtensions(self: Engine, compression_methods: []const u8, extensions: []const messages.Extension) EngineError!void {
-        _ = self;
         const supported_versions = findExtensionData(extensions, ext_supported_versions) orelse return error.MissingRequiredClientHelloExtension;
         if (!clientHelloSupportedVersionsContainTls13(supported_versions)) return error.InvalidSupportedVersionExtension;
         if (!hasExtension(extensions, ext_server_name)) return error.MissingRequiredClientHelloExtension;
@@ -483,7 +483,7 @@ pub const Engine = struct {
         if (!hasExtension(extensions, ext_key_share)) return error.MissingRequiredClientHelloExtension;
         if (!hasExtension(extensions, ext_alpn)) return error.MissingRequiredClientHelloExtension;
         if (!containsNullCompressionMethod(compression_methods)) return error.InvalidCompressionMethod;
-        try validatePskOfferExtensions(extensions);
+        try validatePskOfferExtensions(extensions, self.config.suite);
     }
 
     fn requireServerHelloExtensions(self: Engine, extensions: []const messages.Extension) EngineError!void {
@@ -704,11 +704,12 @@ test "debug keylog callback is suppressed when disabled" {
     try std.testing.expect(!tracker.called);
 }
 
-fn validatePskOfferExtensions(extensions: []const messages.Extension) EngineError!void {
+fn validatePskOfferExtensions(extensions: []const messages.Extension, suite: keyschedule.CipherSuite) EngineError!void {
     const psk = findExtensionData(extensions, ext_pre_shared_key) orelse return;
     if (!hasExtension(extensions, ext_psk_key_exchange_modes)) return error.MissingPskKeyExchangeModes;
-    const counts = parsePskBinderVector(psk) catch return error.InvalidPskBinder;
+    const counts = parsePskBinderVector(psk, keyschedule.digestLen(suite)) catch return error.InvalidPskBinder;
     if (counts.identity_count != counts.binder_count) return error.PskBinderCountMismatch;
+    if (!counts.binder_len_ok) return error.InvalidPskBinderLength;
 }
 
 fn findExtensionData(extensions: []const messages.Extension, extension_type: u16) ?[]const u8 {
@@ -721,9 +722,10 @@ fn findExtensionData(extensions: []const messages.Extension, extension_type: u16
 const PskCounts = struct {
     identity_count: usize,
     binder_count: usize,
+    binder_len_ok: bool,
 };
 
-fn parsePskBinderVector(bytes: []const u8) !PskCounts {
+fn parsePskBinderVector(bytes: []const u8, expected_binder_len: usize) !PskCounts {
     // pre_shared_key (CH): identities<7..2^16-1> + binders<33..2^16-1>
     var i: usize = 0;
     if (bytes.len < 2 + 2) return error.Truncated;
@@ -751,11 +753,13 @@ fn parsePskBinderVector(bytes: []const u8) !PskCounts {
     if (i + binders_len != bytes.len) return error.Truncated;
     const binders_end = i + binders_len;
     var binder_count: usize = 0;
+    var binder_len_ok = true;
     while (i < binders_end) {
         if (i + 1 > binders_end) return error.Truncated;
         const binder_len = bytes[i];
         i += 1;
         if (binder_len == 0) return error.InvalidLength;
+        if (binder_len != expected_binder_len) binder_len_ok = false;
         if (i + binder_len > binders_end) return error.Truncated;
         i += binder_len;
         binder_count += 1;
@@ -764,6 +768,7 @@ fn parsePskBinderVector(bytes: []const u8) !PskCounts {
     return .{
         .identity_count = identity_count,
         .binder_count = binder_count,
+        .binder_len_ok = binder_len_ok,
     };
 }
 
@@ -1063,6 +1068,43 @@ fn clientHelloRecordWithPskBinderCountMismatch() [126]u8 {
     frame[123] = 0x01;
     frame[124] = 0x01;
     frame[125] = 0x02;
+    return frame;
+}
+
+fn clientHelloRecordWithPskInvalidBinderLength() [124]u8 {
+    var frame: [124]u8 = undefined;
+    const base = clientHelloRecord();
+    @memcpy(frame[0..base.len], base[0..]);
+    std.mem.writeInt(u16, frame[3..5], 119, .big);
+    const hs_len = handshake.writeU24(115);
+    @memcpy(frame[6..9], &hs_len);
+    frame[50] = 0x00;
+    frame[51] = 0x48; // exts: 49 + psk_modes(6) + psk(17)
+    // psk_key_exchange_modes extension
+    frame[101] = 0x00;
+    frame[102] = 0x2d;
+    frame[103] = 0x00;
+    frame[104] = 0x02;
+    frame[105] = 0x01;
+    frame[106] = 0x01;
+    // pre_shared_key extension with binder len=1 (invalid for SHA256 suites)
+    frame[107] = 0x00;
+    frame[108] = 0x29;
+    frame[109] = 0x00;
+    frame[110] = 0x0d;
+    frame[111] = 0x00;
+    frame[112] = 0x07;
+    frame[113] = 0x00;
+    frame[114] = 0x01;
+    frame[115] = 0xaa;
+    frame[116] = 0x00;
+    frame[117] = 0x00;
+    frame[118] = 0x00;
+    frame[119] = 0x00;
+    frame[120] = 0x00;
+    frame[121] = 0x02;
+    frame[122] = 0x01;
+    frame[123] = 0x01;
     return frame;
 }
 
@@ -1731,6 +1773,17 @@ test "server rejects psk identity and binder count mismatch" {
 
     const rec = clientHelloRecordWithPskBinderCountMismatch();
     try std.testing.expectError(error.PskBinderCountMismatch, engine.ingestRecord(&rec));
+}
+
+test "server rejects psk binder length mismatch for configured suite" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const rec = clientHelloRecordWithPskInvalidBinderLength();
+    try std.testing.expectError(error.InvalidPskBinderLength, engine.ingestRecord(&rec));
 }
 
 test "valid client hello body is accepted for server role" {
