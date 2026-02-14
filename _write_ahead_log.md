@@ -3283,3 +3283,67 @@ Commands Executed
 Observed Results
 - `session.zig`: 77/77 tests passed including HRR missing-extension negative case.
 - Full test target passed.
+===
+timestamp: 2026-02-15T07:20:00+09:00
+description: Plan KeyUpdate traffic secret ratchet on inbound key_update handling
+type: plan
+===
+Motivation
+- `_task.md` requires KeyUpdate handling for long-lived sessions.
+- Current engine parses KeyUpdate and emits actions but does not ratchet stored application traffic secret.
+
+Scope
+- On inbound `key_update`, derive next application traffic secret from current latest secret.
+- Keep action emission behavior unchanged.
+- Add tests proving secret changes on key update and remains present.
+
+Design
+- Add helper using `HKDF-Expand-Label(secret, "traffic upd", "", hashlen)`.
+- Ratchet only when connected and `latest_secret` is present.
+- Preserve suite-specific secret lengths.
+
+Risks/Perf Impact
+- One HKDF expansion per key update message; expected and bounded.
+- Requires careful secret replacement to avoid stale material retention.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Revert ratchet behavior while preserving existing key_update parse/action path.
+
+Commit Plan
+- `MINOR: tls13: ratchet traffic secret on keyupdate`
+===
+timestamp: 2026-02-15T07:24:00+09:00
+description: Ratchet latest application traffic secret when key_update is ingested
+type: code change
+===
+Decisions + Rationale
+- Added key_update-driven traffic secret ratchet using HKDF label `traffic upd`.
+- Ratchet occurs immediately when key_update handshake is parsed and validated.
+- Preserved existing key_update action emission behavior.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - Added `ratchetLatestTrafficSecret`
+  - Hooked ratchet call into inbound key_update handling path
+  - Extended keyupdate test to assert secret actually changes after ratchet.
+
+Risks/Perf Notes
+- One HKDF expansion per inbound key_update message.
+- Secret replacement remains bounded and follows existing zeroization lifecycle on teardown.
+===
+timestamp: 2026-02-15T07:25:00+09:00
+description: Validate keyupdate traffic secret ratchet changes
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 77/77 tests passed with ratchet assertion enabled.
+- Full test target passed.

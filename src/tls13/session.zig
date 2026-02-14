@@ -218,6 +218,7 @@ pub const Engine = struct {
                     if (frame.header.handshake_type == .key_update) {
                         self.metrics.keyupdate_messages += 1;
                         const req = try handshake.parseKeyUpdateRequest(frame.body);
+                        self.ratchetLatestTrafficSecret();
                         try result.push(.{ .key_update = req });
                         if (req == .update_requested) {
                             try result.push(.{ .send_key_update = .update_not_requested });
@@ -307,6 +308,15 @@ pub const Engine = struct {
                 break :blk .{ .sha384 = keyschedule.deriveLabel(.tls_aes_256_gcm_sha384, secret, "c ap traffic", &digest, 48) };
             },
         };
+    }
+
+    fn ratchetLatestTrafficSecret(self: *Engine) void {
+        const cur = self.latest_secret orelse return;
+        self.latest_secret = switch (cur) {
+            .sha256 => |secret| .{ .sha256 = keyschedule.deriveLabel(.tls_aes_128_gcm_sha256, secret, "traffic upd", "", 32) },
+            .sha384 => |secret| .{ .sha384 = keyschedule.deriveLabel(.tls_aes_256_gcm_sha384, secret, "traffic upd", "", 48) },
+        };
+        self.emitDebugKeyLog("CLIENT_TRAFFIC_SECRET_N");
     }
 
     fn emitDebugKeyLog(self: *Engine, label: []const u8) void {
@@ -1099,6 +1109,7 @@ test "keyupdate request is surfaced in action" {
     _ = try engine.ingestRecord(&serverHelloRecord());
     _ = try engine.ingestRecord(&encryptedExtensionsRecord());
     _ = try engine.ingestRecord(&finishedRecord());
+    const before = engine.latest_secret orelse return error.TestUnexpectedResult;
 
     const ku = keyUpdateRecord(.update_requested);
     const res = try engine.ingestRecord(&ku);
@@ -1112,6 +1123,18 @@ test "keyupdate request is surfaced in action" {
     switch (res.actions[2]) {
         .send_key_update => |req| try std.testing.expectEqual(handshake.KeyUpdateRequest.update_not_requested, req),
         else => return error.TestUnexpectedResult,
+    }
+
+    const after = engine.latest_secret orelse return error.TestUnexpectedResult;
+    switch (before) {
+        .sha256 => |b| switch (after) {
+            .sha256 => |a| try std.testing.expect(!std.mem.eql(u8, &b, &a)),
+            else => return error.TestUnexpectedResult,
+        },
+        .sha384 => |b| switch (after) {
+            .sha384 => |a| try std.testing.expect(!std.mem.eql(u8, &b, &a)),
+            else => return error.TestUnexpectedResult,
+        },
     }
 }
 
