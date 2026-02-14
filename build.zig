@@ -99,6 +99,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(bogo_shim);
 
+    const corpus_replay = b.addExecutable(.{
+        .name = "corpus-replay",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/corpus_replay.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zigtls", .module = mod },
+            },
+        }),
+    });
+    b.installArtifact(corpus_replay);
+    const install_corpus_replay = b.addInstallArtifact(corpus_replay, .{});
+
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).
     // This will evaluate the `run` step rather than the default step.
@@ -128,6 +142,9 @@ pub fn build(b: *std.Build) void {
     const bogo_step = b.step("bogo-shim", "Build BoGo shim executable");
     bogo_step.dependOn(&bogo_shim.step);
 
+    const replay_step = b.step("corpus-replay", "Build corpus replay executable");
+    replay_step.dependOn(&install_corpus_replay.step);
+
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
     // set the releative field.
@@ -148,12 +165,25 @@ pub fn build(b: *std.Build) void {
     // A run step that will run the second test executable.
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
+    const corpus_replay_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/corpus_replay.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zigtls", .module = mod },
+            },
+        }),
+    });
+    const run_corpus_replay_tests = b.addRunArtifact(corpus_replay_tests);
+
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+    test_step.dependOn(&run_corpus_replay_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

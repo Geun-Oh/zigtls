@@ -9,6 +9,10 @@ Layout convention:
 
 Keep historical crashers and minimized repro cases here.
 
+Replay behavior:
+- `scripts/fuzz/replay_corpus.sh` builds and invokes `zig-out/bin/corpus-replay`.
+- Each corpus file is dispatched by top-level bucket (`record`, `handshake`, `session`) into the corresponding parser/session ingest path.
+
 Current baseline seeds:
 - `record/invalid-legacy-version.bin`: malformed record legacy version probe
 - `handshake/truncated-serverhello.bin`: truncated handshake framing probe

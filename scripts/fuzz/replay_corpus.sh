@@ -22,6 +22,7 @@ run_replay() {
   local record_count=0
   local handshake_count=0
   local session_count=0
+  local replay_bin="./zig-out/bin/corpus-replay"
 
   if [[ ! -d "$corpus_dir" ]]; then
     echo "corpus directory not found: $corpus_dir" >&2
@@ -32,18 +33,25 @@ run_replay() {
     zig test src/tls13/fuzz.zig >/dev/null
   fi
 
+  zig build corpus-replay >/dev/null
+  if [[ ! -x "$replay_bin" ]]; then
+    echo "replay binary not found: $replay_bin" >&2
+    return 1
+  fi
+
   local replayed=0
   while IFS= read -r -d '' file; do
     local rel
+    local bucket
     rel="${file#$corpus_dir/}"
-    case "${rel%%/*}" in
+    bucket="${rel%%/*}"
+    case "$bucket" in
       record) record_count=$((record_count + 1)) ;;
       handshake) handshake_count=$((handshake_count + 1)) ;;
       session) session_count=$((session_count + 1)) ;;
+      *) continue ;;
     esac
-    # Placeholder replay hook: ensure corpus files are readable and tracked.
-    # Target-specific harness execution can be wired here in follow-up commits.
-    wc -c <"$file" >/dev/null
+    "$replay_bin" "$bucket" "$file" >/dev/null
     replayed=$((replayed + 1))
   done < <(find "$corpus_dir" -type f -print0)
 
