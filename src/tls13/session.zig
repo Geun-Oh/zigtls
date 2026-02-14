@@ -91,6 +91,7 @@ pub const EngineError = error{
     InvalidNewSessionTicketMessage,
     MissingRequiredClientHelloExtension,
     MissingRequiredServerHelloExtension,
+    MissingRequiredHrrExtension,
     MissingPskKeyExchangeModes,
     InvalidPskBinder,
     PskBinderCountMismatch,
@@ -345,8 +346,12 @@ pub const Engine = struct {
                 if (self.config.role == .client and hasDowngradeMarker(sh.random)) {
                     return error.DowngradeDetected;
                 }
-                if (self.config.role == .client and !messages.serverHelloHasHrrRandom(body)) {
-                    try self.requireServerHelloExtensions(sh.extensions);
+                if (self.config.role == .client) {
+                    if (messages.serverHelloHasHrrRandom(body)) {
+                        try self.requireHrrExtensions(sh.extensions);
+                    } else {
+                        try self.requireServerHelloExtensions(sh.extensions);
+                    }
                 }
             },
             .client_hello => {
@@ -405,6 +410,12 @@ pub const Engine = struct {
         _ = self;
         if (!hasExtension(extensions, ext_supported_versions)) return error.MissingRequiredServerHelloExtension;
         if (!hasExtension(extensions, ext_key_share)) return error.MissingRequiredServerHelloExtension;
+    }
+
+    fn requireHrrExtensions(self: Engine, extensions: []const messages.Extension) EngineError!void {
+        _ = self;
+        if (!hasExtension(extensions, ext_supported_versions)) return error.MissingRequiredHrrExtension;
+        if (!hasExtension(extensions, ext_key_share)) return error.MissingRequiredHrrExtension;
     }
 };
 
@@ -835,14 +846,14 @@ fn clientHelloRecordWithPskBinderCountMismatch() [126]u8 {
     return frame;
 }
 
-fn hrrServerHelloRecord() [49]u8 {
-    var frame: [49]u8 = undefined;
+fn hrrServerHelloRecord() [61]u8 {
+    var frame: [61]u8 = undefined;
     frame[0] = @intFromEnum(record.ContentType.handshake);
     frame[1] = 0x03;
     frame[2] = 0x03;
-    std.mem.writeInt(u16, frame[3..5], 44, .big);
+    std.mem.writeInt(u16, frame[3..5], 56, .big);
     frame[5] = @intFromEnum(state.HandshakeType.server_hello);
-    const len = handshake.writeU24(40);
+    const len = handshake.writeU24(52);
     @memcpy(frame[6..9], &len);
     frame[9] = 0x03;
     frame[10] = 0x03;
@@ -852,7 +863,28 @@ fn hrrServerHelloRecord() [49]u8 {
     frame[45] = 0x01; // cipher suite
     frame[46] = 0x00; // compression
     frame[47] = 0x00;
-    frame[48] = 0x00; // extensions len
+    frame[48] = 0x0c; // extensions len
+    // supported_versions: type=0x002b len=2 val=0x0304
+    frame[49] = 0x00;
+    frame[50] = 0x2b;
+    frame[51] = 0x00;
+    frame[52] = 0x02;
+    frame[53] = 0x03;
+    frame[54] = 0x04;
+    // key_share (selected_group): type=0x0033 len=2 group=x25519
+    frame[55] = 0x00;
+    frame[56] = 0x33;
+    frame[57] = 0x00;
+    frame[58] = 0x02;
+    frame[59] = 0x00;
+    frame[60] = 0x1d;
+    return frame;
+}
+
+fn hrrServerHelloRecordWithoutKeyShare() [61]u8 {
+    var frame = hrrServerHelloRecord();
+    frame[55] = 0xff;
+    frame[56] = 0xfe;
     return frame;
 }
 
@@ -1045,6 +1077,17 @@ test "client accepts hrr then server hello" {
 
     _ = try engine.ingestRecord(&second_sh);
     try std.testing.expectEqual(state.ConnectionState.wait_encrypted_extensions, engine.machine.state);
+}
+
+test "client rejects hrr missing required extension" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const hrr = hrrServerHelloRecordWithoutKeyShare();
+    try std.testing.expectError(error.MissingRequiredHrrExtension, engine.ingestRecord(&hrr));
 }
 
 test "keyupdate request is surfaced in action" {

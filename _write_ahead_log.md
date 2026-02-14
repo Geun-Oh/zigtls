@@ -3217,3 +3217,69 @@ Commands Executed
 Observed Results
 - `certificate_validation.zig`: 21/21 tests passed.
 - Full test target passed.
+===
+timestamp: 2026-02-15T07:05:00+09:00
+description: Plan HRR ServerHello required extension checks in client validation path
+type: plan
+===
+Motivation
+- HRR handling is state-level accepted but body-level extension requirements are lenient.
+- `_task.md` asks HRR fully implemented/tested beyond baseline transition behavior.
+
+Scope
+- For HRR-marked ServerHello, require `supported_versions` and `key_share` extensions.
+- Add dedicated HRR-specific missing-extension error classification.
+- Update HRR fixture and add HRR negative test.
+
+Design
+- Reuse existing ServerHello decode extension vector.
+- In server_hello validation branch, split checks by HRR vs non-HRR.
+
+Risks/Perf Impact
+- Extension-presence checks only; negligible overhead.
+- Existing HRR test fixture with empty extension set must be updated.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Remove HRR-specific check if compatibility vectors require transitional leniency.
+
+Commit Plan
+- `MINOR: tls13: enforce hrr required serverhello extensions`
+===
+timestamp: 2026-02-15T07:10:00+09:00
+description: Enforce required extension presence for HRR ServerHello validation path
+type: code change
+===
+Decisions + Rationale
+- Added HRR-specific server_hello extension checks in client validation path.
+- HRR now requires `supported_versions` and `key_share` extension presence.
+- Added dedicated `MissingRequiredHrrExtension` error classification.
+- Corrected HRR fixture encoding to include valid extension vector with selected_group key_share shape.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - `EngineError`: added `MissingRequiredHrrExtension`
+  - `validateHandshakeBody`: split HRR vs non-HRR server_hello extension checks
+  - Added `requireHrrExtensions`
+  - Updated HRR fixture helpers
+  - Added HRR missing-extension negative test.
+
+Risks/Perf Notes
+- Adds extension presence checks on HRR path only.
+- Tightens malformed HRR rejection behavior.
+===
+timestamp: 2026-02-15T07:11:00+09:00
+description: Validate HRR extension enforcement changes
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 77/77 tests passed including HRR missing-extension negative case.
+- Full test target passed.
