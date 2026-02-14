@@ -109,6 +109,7 @@ pub const EngineError = error{
     InvalidCompressionMethod,
     MissingPskKeyExchangeModes,
     InvalidPskKeyExchangeModes,
+    MissingPskDheKeyExchangeMode,
     InvalidPskBinder,
     InvalidPskBinderLength,
     PskBinderCountMismatch,
@@ -539,6 +540,7 @@ pub fn classifyErrorAlert(err: anyerror) alerts.Alert {
         error.InvalidCompressionMethod,
         error.MissingPskKeyExchangeModes,
         error.InvalidPskKeyExchangeModes,
+        error.MissingPskDheKeyExchangeMode,
         error.InvalidPskBinder,
         error.PskBinderCountMismatch,
         error.UnsupportedSignatureAlgorithm,
@@ -757,23 +759,34 @@ test "debug keylog callback uses server label in server role" {
 fn validatePskOfferExtensions(extensions: []const messages.Extension, suite: keyschedule.CipherSuite) EngineError!void {
     const psk = findExtensionData(extensions, ext_pre_shared_key) orelse return;
     const psk_modes = findExtensionData(extensions, ext_psk_key_exchange_modes) orelse return error.MissingPskKeyExchangeModes;
-    try validatePskKeyExchangeModes(psk_modes);
+    const modes = try validatePskKeyExchangeModes(psk_modes);
+    if (!modes.has_psk_dhe_ke) return error.MissingPskDheKeyExchangeMode;
     const counts = parsePskBinderVector(psk, keyschedule.digestLen(suite)) catch return error.InvalidPskBinder;
     if (counts.identity_count != counts.binder_count) return error.PskBinderCountMismatch;
     if (!counts.binder_len_ok) return error.InvalidPskBinderLength;
 }
 
-fn validatePskKeyExchangeModes(data: []const u8) EngineError!void {
+const PskModes = struct {
+    has_psk_dhe_ke: bool,
+};
+
+fn validatePskKeyExchangeModes(data: []const u8) EngineError!PskModes {
     if (data.len < 2) return error.InvalidPskKeyExchangeModes;
     const list_len = data[0];
     if (list_len == 0) return error.InvalidPskKeyExchangeModes;
     if (list_len + 1 != data.len) return error.InvalidPskKeyExchangeModes;
 
+    var has_psk_dhe_ke = false;
     var i: usize = 1;
     while (i < data.len) : (i += 1) {
         const mode = data[i];
-        if (mode != 0 and mode != 1) return error.InvalidPskKeyExchangeModes;
+        if (mode == 1) {
+            has_psk_dhe_ke = true;
+            continue;
+        }
+        if (mode != 0) return error.InvalidPskKeyExchangeModes;
     }
+    return .{ .has_psk_dhe_ke = has_psk_dhe_ke };
 }
 
 fn findExtensionData(extensions: []const messages.Extension, extension_type: u16) ?[]const u8 {
@@ -1105,6 +1118,13 @@ fn clientHelloRecordWithUnknownPskMode() [115]u8 {
     var frame = clientHelloRecordWithMalformedPskBinder();
     // psk_key_exchange_modes extension: one mode byte with unknown value.
     frame[106] = 0x07;
+    return frame;
+}
+
+fn clientHelloRecordWithPskKeOnlyMode() [126]u8 {
+    var frame = clientHelloRecordWithPskBinderCountMismatch();
+    // psk_key_exchange_modes extension: one mode byte set to psk_ke(0) only.
+    frame[106] = 0x00;
     return frame;
 }
 
@@ -1862,6 +1882,17 @@ test "server rejects unknown psk key exchange mode value" {
 
     const rec = clientHelloRecordWithUnknownPskMode();
     try std.testing.expectError(error.InvalidPskKeyExchangeModes, engine.ingestRecord(&rec));
+}
+
+test "server rejects psk offer without psk_dhe_ke mode" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const rec = clientHelloRecordWithPskKeOnlyMode();
+    try std.testing.expectError(error.MissingPskDheKeyExchangeMode, engine.ingestRecord(&rec));
 }
 
 test "server rejects psk identity and binder count mismatch" {

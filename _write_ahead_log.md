@@ -4817,3 +4817,75 @@ Observed Results
 
 Notes
 - Added regression coverage confirms malformed length and unknown mode value are rejected with `InvalidPskKeyExchangeModes`.
+===
+timestamp: 2026-02-15T07:30:00+09:00
+description: Plan enforcement of psk_dhe_ke mode requirement for PSK offers with key_share
+type: plan
+===
+Motivation
+- PSK modes payload now has structural validation, but semantic mode requirement is still loose.
+- With `key_share` present in ClientHello policy path, PSK offers should include `psk_dhe_ke(1)` to match expected key exchange semantics.
+
+Scope
+- Enforce presence of mode `1` in `psk_key_exchange_modes` when validating PSK offers.
+- Add explicit error classification and regression test.
+- Update RFC matrix PSK row wording/coverage.
+
+Design
+- Add `MissingPskDheKeyExchangeMode` to `EngineError`.
+- Extend modes parser helper to track whether `psk_dhe_ke(1)` exists.
+- In PSK offer validation, reject when mode `1` is absent.
+- Map new error to `illegal_parameter` alert intent.
+
+Risks/Perf Impact
+- No meaningful perf change; one extra boolean check during small vector scan.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Remove semantic mode check and regression test.
+
+Commit Plan
+- `MINOR: tls13: require psk_dhe_ke mode for PSK offers`
+===
+timestamp: 2026-02-15T07:33:00+09:00
+description: Enforce psk_dhe_ke mode presence for PSK offers during ClientHello validation
+type: code change
+===
+Decisions + Rationale
+- Tightened PSK mode semantics by requiring `psk_dhe_ke(1)` presence when PSK is offered.
+- This aligns mode semantics with key_share-based handshake expectations in current server-side validation policy.
+- Added dedicated error classification for clearer failure surface and alert mapping.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - `EngineError`: added `MissingPskDheKeyExchangeMode`.
+  - `classifyErrorAlert`: mapped `MissingPskDheKeyExchangeMode` to `illegal_parameter`.
+  - `validatePskOfferExtensions`: enforces `psk_dhe_ke` presence after payload validation.
+  - `validatePskKeyExchangeModes`: now returns parsed mode metadata (`has_psk_dhe_ke`).
+  - Added fixture/test:
+    - `clientHelloRecordWithPskKeOnlyMode`
+    - `server rejects psk offer without psk_dhe_ke mode`
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-PSK-001` wording/coverage to include missing `psk_dhe_ke` rejection.
+
+Risks/Perf Notes
+- Adds only a boolean accumulation/check during existing small mode-vector scan; negligible overhead.
+===
+timestamp: 2026-02-15T07:34:00+09:00
+description: Validate psk_dhe_ke mode requirement with session and full test suites
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 98/98 tests passed.
+- `zig build test`: passed.
+
+Notes
+- Regression confirms PSK offers with `psk_ke`-only mode list are rejected with `MissingPskDheKeyExchangeMode`.
