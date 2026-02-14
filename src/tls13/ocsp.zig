@@ -142,3 +142,76 @@ test "produced_at before this_update is rejected unless soft-fail policy allows"
     }, now, true);
     try std.testing.expectEqual(ValidationResult.soft_fail, soft);
 }
+
+test "unknown status hard-fails or soft-fails by policy" {
+    const now: i64 = 1_700_000_000;
+    try std.testing.expectError(error.UnknownStatus, checkStapled(.{
+        .status = .unknown,
+        .produced_at = now,
+        .this_update = now,
+        .next_update = now + 60,
+    }, now, false));
+
+    const soft = try checkStapled(.{
+        .status = .unknown,
+        .produced_at = now,
+        .this_update = now,
+        .next_update = now + 60,
+    }, now, true);
+    try std.testing.expectEqual(ValidationResult.soft_fail, soft);
+}
+
+test "future this_update is rejected unless soft-fail policy allows" {
+    const now: i64 = 1_700_000_000;
+    try std.testing.expectError(error.FutureThisUpdate, checkStapled(.{
+        .status = .good,
+        .produced_at = now + 1,
+        .this_update = now + max_clock_skew_sec + 1,
+        .next_update = now + max_clock_skew_sec + 100,
+    }, now, false));
+
+    const soft = try checkStapled(.{
+        .status = .good,
+        .produced_at = now + 1,
+        .this_update = now + max_clock_skew_sec + 1,
+        .next_update = now + max_clock_skew_sec + 100,
+    }, now, true);
+    try std.testing.expectEqual(ValidationResult.soft_fail, soft);
+}
+
+test "invalid next_update window is rejected unless soft-fail policy allows" {
+    const now: i64 = 1_700_000_000;
+    try std.testing.expectError(error.InvalidTimeWindow, checkStapled(.{
+        .status = .good,
+        .produced_at = now - 10,
+        .this_update = now - 10,
+        .next_update = now - 20,
+    }, now, false));
+
+    const soft = try checkStapled(.{
+        .status = .good,
+        .produced_at = now - 10,
+        .this_update = now - 10,
+        .next_update = now - 20,
+    }, now, true);
+    try std.testing.expectEqual(ValidationResult.soft_fail, soft);
+}
+
+test "stale response boundary accepts skew limit and rejects beyond limit" {
+    const now: i64 = 1_700_000_000;
+
+    const at_boundary = try checkStapled(.{
+        .status = .good,
+        .produced_at = now - 3600,
+        .this_update = now - 3600,
+        .next_update = now - max_clock_skew_sec,
+    }, now, false);
+    try std.testing.expectEqual(ValidationResult.accepted, at_boundary);
+
+    try std.testing.expectError(error.StaleResponse, checkStapled(.{
+        .status = .good,
+        .produced_at = now - 3600,
+        .this_update = now - 3600,
+        .next_update = now - max_clock_skew_sec - 1,
+    }, now, false));
+}
