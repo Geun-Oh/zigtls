@@ -46,6 +46,41 @@ pub fn digestLen(suite: CipherSuite) usize {
     };
 }
 
+pub fn deriveSecret(comptime suite: CipherSuite, secret: SecretType(suite), label: []const u8, transcript_hash: []const u8) SecretType(suite) {
+    return deriveLabel(suite, secret, label, transcript_hash, digestLen(suite));
+}
+
+pub fn finishedKey(comptime suite: CipherSuite, base_key: SecretType(suite)) SecretType(suite) {
+    return deriveLabel(suite, base_key, "finished", "", digestLen(suite));
+}
+
+pub fn finishedVerifyData(comptime suite: CipherSuite, fin_key: SecretType(suite), transcript_hash: []const u8) SecretType(suite) {
+    var out: SecretType(suite) = undefined;
+    switch (suite) {
+        .tls_aes_128_gcm_sha256, .tls_chacha20_poly1305_sha256 => HmacSha256.create(&out, transcript_hash, &fin_key),
+        .tls_aes_256_gcm_sha384 => HmacSha384.create(&out, transcript_hash, &fin_key),
+    }
+    return out;
+}
+
+pub fn verifyFinished(
+    comptime suite: CipherSuite,
+    fin_key: SecretType(suite),
+    transcript_hash: []const u8,
+    expected: []const u8,
+) bool {
+    if (expected.len != digestLen(suite)) return false;
+    const computed = finishedVerifyData(suite, fin_key, transcript_hash);
+    return timingSafeEqual(computed[0..], expected);
+}
+
+fn timingSafeEqual(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    var diff: u8 = 0;
+    for (a, b) |x, y| diff |= x ^ y;
+    return diff == 0;
+}
+
 test "hkdf extract sha256 known vector" {
     const ikm = [_]u8{0x0b} ** 22;
     const salt = [_]u8{ 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c };
@@ -66,4 +101,33 @@ test "derive label output size follows request" {
 
 test "sha384 suite digest length" {
     try std.testing.expectEqual(@as(usize, 48), digestLen(.tls_aes_256_gcm_sha384));
+}
+
+test "derive secret output size follows suite digest length" {
+    const base = extract(.tls_aes_128_gcm_sha256, "salt", "ikm");
+    const derived = deriveSecret(.tls_aes_128_gcm_sha256, base, "hs traffic", "thash");
+    try std.testing.expectEqual(@as(usize, 32), derived.len);
+
+    const base384 = extract(.tls_aes_256_gcm_sha384, "salt", "ikm");
+    const derived384 = deriveSecret(.tls_aes_256_gcm_sha384, base384, "hs traffic", "thash");
+    try std.testing.expectEqual(@as(usize, 48), derived384.len);
+}
+
+test "finished verify data is deterministic" {
+    const base = extract(.tls_chacha20_poly1305_sha256, "salt", "ikm");
+    const fin = finishedKey(.tls_chacha20_poly1305_sha256, base);
+    const a = finishedVerifyData(.tls_chacha20_poly1305_sha256, fin, "transcript");
+    const b = finishedVerifyData(.tls_chacha20_poly1305_sha256, fin, "transcript");
+    try std.testing.expectEqualSlices(u8, &a, &b);
+}
+
+test "verify finished accepts match and rejects mismatch" {
+    const base = extract(.tls_aes_128_gcm_sha256, "salt", "ikm");
+    const fin = finishedKey(.tls_aes_128_gcm_sha256, base);
+    const expected = finishedVerifyData(.tls_aes_128_gcm_sha256, fin, "txhash");
+    try std.testing.expect(verifyFinished(.tls_aes_128_gcm_sha256, fin, "txhash", &expected));
+
+    var tampered = expected;
+    tampered[0] ^= 0x01;
+    try std.testing.expect(!verifyFinished(.tls_aes_128_gcm_sha256, fin, "txhash", &tampered));
 }

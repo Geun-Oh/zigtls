@@ -2154,3 +2154,73 @@ Commands Executed
 Observed Results
 - `session.zig`: 62/62 tests passed, including new PSK missing-modes and malformed-binder negatives.
 - Full test target passed.
+===
+timestamp: 2026-02-15T03:30:00+09:00
+description: Plan TLS 1.3 key schedule expansion for derive_secret and Finished verify_data primitives
+type: plan
+===
+Motivation
+- `_task.md` core TLS1.3 requires key schedule correctness across secret derivations.
+- Current `keyschedule` module provides only extract and hkdf-expand-label baseline.
+
+Scope
+- Add primitives:
+  - `deriveSecret` (`Derive-Secret` helper)
+  - `finishedKey`
+  - `finishedVerifyData`
+  - `verifyFinished` (constant-time equality)
+- Add unit tests for determinism, suite-length behavior, and verify pass/fail.
+
+Design
+- Keep API `comptime suite`-driven to preserve fixed-size outputs and no heap allocation.
+- Use existing suite-specific HKDF/HMAC bindings from Zig stdlib.
+- Expose digest-size helper for transcript hash expectations.
+
+Risks/Perf Impact
+- Cryptographic operations are handshake-only; negligible steady-state impact.
+- Incorrect output lengths are mitigated via compile-time suite-specific sizes and tests.
+
+Test Plan (commands)
+- `zig test src/tls13/keyschedule.zig`
+- `zig build test`
+
+Rollback
+- Revert newly added helper APIs while preserving existing extract/expand-label behavior.
+
+Commit Plan
+- `MINOR: tls13: add derive-secret and finished verify-data helpers`
+===
+timestamp: 2026-02-15T03:34:00+09:00
+description: Expand key schedule with derive-secret and Finished verify-data helpers
+type: code change
+===
+Decisions + Rationale
+- Added TLS1.3 schedule helpers beyond extract/expand-label baseline:
+  - `deriveSecret`
+  - `finishedKey`
+  - `finishedVerifyData`
+  - `verifyFinished`
+- Implemented suite-aware HMAC production for Finished verify_data and constant-time byte comparison helper.
+- Kept compile-time suite typing for fixed-size secret arrays and no heap overhead.
+
+Files/Functions Touched
+- `src/tls13/keyschedule.zig`
+  - Added key-schedule helpers and constant-time compare utility.
+  - Added deterministic and pass/fail verification tests.
+
+Risks/Perf Notes
+- Handshake-only crypto helpers; no data-path performance impact.
+- Constant-time compare prevents early-exit timing leakage on Finished verification.
+===
+timestamp: 2026-02-15T03:35:00+09:00
+description: Validate key schedule helper expansion
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/keyschedule.zig`
+- `zig test src/tls13/keyschedule.zig`
+- `zig build test`
+
+Observed Results
+- `keyschedule.zig`: 6/6 tests passed.
+- Full test target passed.
