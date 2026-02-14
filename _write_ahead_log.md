@@ -1590,3 +1590,71 @@ Commands Executed
 Observed Results
 - Session tests passed including unsupported algorithm rejection case.
 - Full package tests passed.
+===
+timestamp: 2026-02-15T01:38:00+09:00
+description: Harden message decoders with extension-duplication checks and defensive size limits
+type: plan
+===
+Motivation
+- Strict parser validation is a release requirement; duplicate extension abuse and unbounded decoded vectors should be rejected early.
+
+Scope
+- Add duplicate-extension detection across decoded extension vectors.
+- Add defensive size limits for decoded hello and certificate-path message components.
+- Add unit tests for duplicate extension rejection and limit enforcement.
+
+Design
+- Introduce shared extension validator helper in `messages.zig`.
+- Keep limits conservative and explicit in module-level constants.
+
+Risks/Perf Impact
+- Small additional O(n^2) checks over extension count; acceptable for handshake control path where extension vectors are small.
+
+Test Plan (commands)
+- `zig test src/tls13/messages.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Revert checks if legitimate vectors are blocked by too strict limits; adjust limits in follow-up WAL entry.
+
+Commit Plan
+- `MINOR: tls13: harden message decoder extension validation`
+===
+timestamp: 2026-02-15T01:41:00+09:00
+description: Harden message decoders against duplicate extension abuse and oversized certificate entries
+type: code change
+===
+Decisions + Rationale
+- Added extension duplication checks to ClientHello/ServerHello and CertificateEntry extension decoding paths.
+- Added defensive limits:
+  - max extensions per message
+  - max certificate entries
+  - max certificate entry byte length
+- Added tests for duplicate extension rejection and oversized certificate entry rejection.
+
+Files/Functions Touched
+- `src/tls13/messages.zig`
+  - Added limit constants.
+  - Added duplicate-extension checks in hello and certificate decode loops.
+  - Added `containsExtensionType` helper.
+  - Added/updated negative tests.
+
+Risks/Perf Notes
+- Duplicate detection uses linear scan across extension vectors; acceptable for handshake control-plane sizes.
+
+===
+timestamp: 2026-02-15T01:41:30+09:00
+description: Validate hardened message decoder checks across module and integration tests
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/messages.zig`
+- `zig test src/tls13/messages.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- Messages tests passed including duplicate extension and oversized certificate entry cases.
+- Session tests passed with decoder hardening in place.
+- Full package tests passed.

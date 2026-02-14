@@ -1,6 +1,9 @@
 const std = @import("std");
 
 pub const legacy_version_tls12: u16 = 0x0303;
+pub const max_extensions_per_message: usize = 64;
+pub const max_certificate_entries: usize = 16;
+pub const max_certificate_entry_size: usize = 64 * 1024;
 const hrr_random = [32]u8{
     0xCF, 0x21, 0xAD, 0x74, 0xE5, 0x9A, 0x61, 0x11,
     0xBE, 0x1D, 0x8C, 0x02, 0x1E, 0x65, 0xB8, 0x91,
@@ -154,6 +157,8 @@ pub const ClientHello = struct {
             const ext_len = readU16(bytes[i .. i + 2]);
             i += 2;
             if (i + ext_len > exts_end) return error.Truncated;
+            if (ext_list.items.len >= max_extensions_per_message) return error.TooManyExtensions;
+            if (containsExtensionType(ext_list.items, ext_type)) return error.DuplicateExtension;
             try ext_list.append(allocator, .{
                 .extension_type = ext_type,
                 .data = try allocator.dupe(u8, bytes[i .. i + ext_len]),
@@ -268,6 +273,8 @@ pub const ServerHello = struct {
             const ext_len = readU16(bytes[i .. i + 2]);
             i += 2;
             if (i + ext_len > exts_end) return error.Truncated;
+            if (ext_list.items.len >= max_extensions_per_message) return error.TooManyExtensions;
+            if (containsExtensionType(ext_list.items, ext_type)) return error.DuplicateExtension;
 
             try ext_list.append(allocator, .{
                 .extension_type = ext_type,
@@ -341,9 +348,11 @@ pub const CertificateMsg = struct {
         }
 
         while (i < cert_list_end) {
+            if (entries.items.len >= max_certificate_entries) return error.TooManyCertificateEntries;
             if (i + 3 > cert_list_end) return error.Truncated;
             const cert_len = readU24(bytes[i .. i + 3]);
             i += 3;
+            if (cert_len > max_certificate_entry_size) return error.CertificateEntryTooLarge;
             if (i + cert_len > cert_list_end) return error.Truncated;
             const cert_data = try allocator.dupe(u8, bytes[i .. i + cert_len]);
             i += cert_len;
@@ -378,6 +387,14 @@ pub const CertificateMsg = struct {
                 if (i + one_ext_len > ext_end) {
                     allocator.free(cert_data);
                     return error.Truncated;
+                }
+                if (exts.items.len >= max_extensions_per_message) {
+                    allocator.free(cert_data);
+                    return error.TooManyExtensions;
+                }
+                if (containsExtensionType(exts.items, ext_type)) {
+                    allocator.free(cert_data);
+                    return error.DuplicateExtension;
                 }
                 try exts.append(allocator, .{
                     .extension_type = ext_type,
@@ -542,6 +559,44 @@ test "certificate verify rejects empty signature" {
     try std.testing.expectError(error.EmptySignature, CertificateVerifyMsg.decode(allocator, &bytes));
 }
 
+test "clienthello rejects duplicate extensions" {
+    const allocator = std.testing.allocator;
+
+    var random: [32]u8 = undefined;
+    @memset(&random, 0x44);
+    var hello = ClientHello{
+        .random = random,
+        .session_id = try allocator.dupe(u8, ""),
+        .cipher_suites = try allocator.dupe(u16, &.{0x1301}),
+        .compression_methods = try allocator.dupe(u8, &.{0}),
+        .extensions = try allocator.dupe(Extension, &.{
+            .{ .extension_type = 0x0000, .data = try allocator.dupe(u8, "a") },
+            .{ .extension_type = 0x0000, .data = try allocator.dupe(u8, "b") },
+        }),
+    };
+    defer hello.deinit(allocator);
+
+    const encoded = try hello.encode(allocator);
+    defer allocator.free(encoded);
+
+    try std.testing.expectError(error.DuplicateExtension, ClientHello.decode(allocator, encoded));
+}
+
+test "certificate rejects oversized entry length" {
+    const allocator = std.testing.allocator;
+    // context=0, cert_list_len=3, first cert_len set to 0x010001 (65537) > limit.
+    const bytes = [_]u8{
+        0x00,
+        0x00,
+        0x00,
+        0x03,
+        0x01,
+        0x00,
+        0x01,
+    };
+    try std.testing.expectError(error.CertificateEntryTooLarge, CertificateMsg.decode(allocator, &bytes));
+}
+
 fn readU16(bytes: []const u8) u16 {
     return (@as(u16, bytes[0]) << 8) | @as(u16, bytes[1]);
 }
@@ -553,4 +608,11 @@ fn writeU16(bytes: []u8, value: u16) void {
 
 fn readU24(bytes: []const u8) usize {
     return (@as(usize, bytes[0]) << 16) | (@as(usize, bytes[1]) << 8) | @as(usize, bytes[2]);
+}
+
+fn containsExtensionType(exts: []const Extension, extension_type: u16) bool {
+    for (exts) |ext| {
+        if (ext.extension_type == extension_type) return true;
+    }
+    return false;
 }
