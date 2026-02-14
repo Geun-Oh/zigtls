@@ -580,3 +580,64 @@ Commands Executed
 Observed Results
 - All OCSP/trust-store/certificate-validation tests passed.
 - Full package test build passed.
+===
+timestamp: 2026-02-14T23:06:00+09:00
+description: Add RFC8446 requirement matrix and interop harness script scaffolding
+type: plan
+===
+Motivation
+- `_task.md` immediate actions require a traceable RFC matrix and initial interop harness setup (OpenSSL and rustls first).
+
+Scope
+- Add `docs/rfc8446-matrix.md` with section-level requirement mapping to current modules/tests and status markers.
+- Add `scripts/interop/openssl_local.sh` and `scripts/interop/rustls_local.sh` scaffolding scripts for local handshake checks.
+- Add minimal script syntax validation tests.
+
+Design
+- Matrix uses concise IDs and status (`implemented`, `partial`, `pending`) to keep progress auditable.
+- Interop scripts are deterministic local harness wrappers (no hidden network dependencies beyond local loopback).
+
+Risks/Perf Impact
+- Documentation and scripting only; no runtime TLS core behavior changes.
+- rustls script may depend on tool availability in host environment.
+
+Test Plan (commands)
+- `bash -n scripts/interop/openssl_local.sh scripts/interop/rustls_local.sh`
+- `zig build test`
+
+Rollback
+- Revert docs/scripts if format or assumptions are rejected.
+
+Commit Plan
+- `MINOR: docs: add rfc8446 matrix and interop script scaffolding`
+===
+timestamp: 2026-02-14T23:10:00+09:00
+description: Add RFC8446 matrix document and initial OpenSSL/rustls interop harness scripts
+type: docs
+===
+Decisions + Rationale
+- Added `docs/rfc8446-matrix.md` as a traceability map from RFC topics to modules/tests and implementation status.
+- Added local interop harness scripts for OpenSSL and rustls to bootstrap Phase 4 interoperability workflow.
+- Kept scripts explicit and environment-driven (rustls binary paths via env vars) to avoid hidden dependency assumptions.
+
+Files/Sections Touched
+- `docs/rfc8446-matrix.md` (new)
+- `scripts/interop/openssl_local.sh` (new)
+- `scripts/interop/rustls_local.sh` (new)
+
+Risks/Perf Notes
+- Scripts are scaffolding and may require environment-specific binary flags for rustls tools.
+- No runtime core TLS path change.
+
+===
+timestamp: 2026-02-14T23:10:30+09:00
+description: Validate matrix/docs and interop script syntax
+type: test
+===
+Commands Executed
+- `bash -n scripts/interop/openssl_local.sh scripts/interop/rustls_local.sh`
+- `zig build test`
+
+Observed Results
+- Shell syntax checks passed.
+- Full package tests passed after adding docs/scripts.
