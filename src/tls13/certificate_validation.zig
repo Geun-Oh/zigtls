@@ -32,6 +32,8 @@ pub const CertificateView = struct {
     path_len_constraint: ?u8 = null,
     key_usage: KeyUsage = .{},
     ext_key_usages: []const ExtendedKeyUsage = &.{},
+    permitted_dns_suffixes: []const []const u8 = &.{},
+    excluded_dns_suffixes: []const []const u8 = &.{},
 };
 
 pub const ValidationError = error{
@@ -41,6 +43,7 @@ pub const ValidationError = error{
     InvalidChain,
     IntermediateNotCa,
     PathLenExceeded,
+    NameConstraintsViolation,
     LeafMissingDigitalSignature,
     LeafMissingServerAuthEku,
 } || ocsp.CheckError;
@@ -74,6 +77,7 @@ pub fn validateServerChain(chain: []const CertificateView) ValidationError!void 
 
     const leaf = chain[0];
     try validateLeafServerUsage(leaf);
+    try validateNameConstraints(leaf.dns_name, chain[1..]);
 
     if (chain.len == 1) return;
 
@@ -84,6 +88,27 @@ pub fn validateServerChain(chain: []const CertificateView) ValidationError!void 
         if (cert.path_len_constraint) |limit| {
             const below = (chain.len - 2) - idx;
             if (below > limit) return error.PathLenExceeded;
+        }
+    }
+}
+
+fn validateNameConstraints(leaf_dns_name: []const u8, cas: []const CertificateView) ValidationError!void {
+    for (cas) |ca| {
+        for (ca.excluded_dns_suffixes) |excluded| {
+            if (dnsMatchesConstraint(leaf_dns_name, excluded)) {
+                return error.NameConstraintsViolation;
+            }
+        }
+
+        if (ca.permitted_dns_suffixes.len > 0) {
+            var match = false;
+            for (ca.permitted_dns_suffixes) |permitted| {
+                if (dnsMatchesConstraint(leaf_dns_name, permitted)) {
+                    match = true;
+                    break;
+                }
+            }
+            if (!match) return error.NameConstraintsViolation;
         }
     }
 }
@@ -113,6 +138,30 @@ fn hasEku(usages: []const ExtendedKeyUsage, target: ExtendedKeyUsage) bool {
         if (usage == target) return true;
     }
     return false;
+}
+
+fn dnsMatchesConstraint(hostname_raw: []const u8, constraint_raw: []const u8) bool {
+    const hostname = trimTrailingDot(hostname_raw);
+    var constraint = trimTrailingDot(constraint_raw);
+    if (constraint.len == 0) return false;
+    if (constraint[0] == '.') {
+        constraint = constraint[1..];
+        if (constraint.len == 0) return false;
+    }
+
+    if (std.ascii.eqlIgnoreCase(hostname, constraint)) return true;
+    if (hostname.len <= constraint.len) return false;
+
+    const suffix_start = hostname.len - constraint.len;
+    if (!std.ascii.eqlIgnoreCase(hostname[suffix_start..], constraint)) return false;
+    return hostname[suffix_start - 1] == '.';
+}
+
+fn trimTrailingDot(name: []const u8) []const u8 {
+    if (name.len > 0 and name[name.len - 1] == '.') {
+        return name[0 .. name.len - 1];
+    }
+    return name;
 }
 
 test "server name validation ignores case" {
@@ -175,6 +224,84 @@ test "server chain rejects missing server eku" {
     };
 
     try std.testing.expectError(error.LeafMissingServerAuthEku, validateServerChain(&chain));
+}
+
+test "name constraints allow permitted dns subtree" {
+    const chain = [_]CertificateView{
+        .{
+            .dns_name = "api.example.com",
+            .is_ca = false,
+            .key_usage = .{ .digital_signature = true },
+            .ext_key_usages = &.{.server_auth},
+        },
+        .{
+            .dns_name = "Constrained CA",
+            .is_ca = true,
+            .permitted_dns_suffixes = &.{"example.com"},
+        },
+    };
+
+    try validateServerChain(&chain);
+}
+
+test "name constraints reject dns outside permitted subtree" {
+    const chain = [_]CertificateView{
+        .{
+            .dns_name = "api.other.com",
+            .is_ca = false,
+            .key_usage = .{ .digital_signature = true },
+            .ext_key_usages = &.{.server_auth},
+        },
+        .{
+            .dns_name = "Constrained CA",
+            .is_ca = true,
+            .permitted_dns_suffixes = &.{"example.com"},
+        },
+    };
+
+    try std.testing.expectError(error.NameConstraintsViolation, validateServerChain(&chain));
+}
+
+test "name constraints reject excluded dns subtree" {
+    const chain = [_]CertificateView{
+        .{
+            .dns_name = "dev.example.com",
+            .is_ca = false,
+            .key_usage = .{ .digital_signature = true },
+            .ext_key_usages = &.{.server_auth},
+        },
+        .{
+            .dns_name = "Constrained CA",
+            .is_ca = true,
+            .permitted_dns_suffixes = &.{"example.com"},
+            .excluded_dns_suffixes = &.{"dev.example.com"},
+        },
+    };
+
+    try std.testing.expectError(error.NameConstraintsViolation, validateServerChain(&chain));
+}
+
+test "name constraints require match across constrained issuers" {
+    const chain = [_]CertificateView{
+        .{
+            .dns_name = "api.example.com",
+            .is_ca = false,
+            .key_usage = .{ .digital_signature = true },
+            .ext_key_usages = &.{.server_auth},
+        },
+        .{
+            .dns_name = "Intermediate CA",
+            .is_ca = true,
+            .permitted_dns_suffixes = &.{"api.example.com"},
+        },
+        .{
+            .dns_name = "Policy Root",
+            .is_ca = true,
+            .permitted_dns_suffixes = &.{"example.com"},
+        },
+    };
+
+    try validateServerChain(&chain);
 }
 
 test "ocsp policy delegates hard/soft fail behavior" {

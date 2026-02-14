@@ -1886,3 +1886,75 @@ Observed Results
 - `messages.zig`: 12/12 tests passed.
 - `session.zig`: 58/58 tests passed, including new invalid/valid EE/NST validation tests.
 - Full build test target passed.
+===
+timestamp: 2026-02-15T02:40:00+09:00
+description: Plan RFC5280-style DNS name constraints enforcement in certificate chain validation
+type: plan
+===
+Motivation
+- `_task.md` requires name constraints support for constrained CAs.
+- Current chain validator checks CA/path-len/EKU basics but has no name constraints enforcement.
+
+Scope
+- Extend certificate view model with permitted/excluded DNS suffix constraints.
+- Enforce constraints against leaf DNS name during `validateServerChain`.
+- Add positive/negative unit tests for constraint intersections and exclusions.
+
+Design
+- Constraints are evaluated on CA certificates (`chain[1..]`).
+- Excluded constraints are fail-fast.
+- Permitted constraints are intersection-like: if a CA declares permitted set, leaf must match at least one in that CA's set.
+- Matching is ASCII case-insensitive and label-aware suffix match.
+
+Risks/Perf Impact
+- Additional per-chain string comparisons; negligible compared with full PKI processing.
+- Risk of over/under-matching mitigated by boundary-aware suffix matcher tests.
+
+Test Plan (commands)
+- `zig test src/tls13/certificate_validation.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Revert name constraints checks if they block existing fixtures unexpectedly; keep fields optional with default empty constraints.
+
+Commit Plan
+- `MINOR: tls13: enforce dns name constraints in chain validation`
+===
+timestamp: 2026-02-15T02:43:00+09:00
+description: Enforce DNS name constraints in server certificate chain policy checks
+type: code change
+===
+Decisions + Rationale
+- Added DNS name constraints to certificate-view model and enforced them during `validateServerChain`.
+- Applied constraints only from CA chain elements (`chain[1..]`) and evaluated as:
+  - excluded subtree match => reject
+  - permitted set present => leaf must match at least one value
+- Implemented case-insensitive, label-boundary suffix matching to avoid partial-label false matches.
+
+Files/Functions Touched
+- `src/tls13/certificate_validation.zig`
+  - `CertificateView`: added `permitted_dns_suffixes`, `excluded_dns_suffixes`
+  - `ValidationError`: added `NameConstraintsViolation`
+  - `validateServerChain`: integrated name constraints check
+  - New helpers: `validateNameConstraints`, `dnsMatchesConstraint`, `trimTrailingDot`
+  - Added unit tests for permit/reject/intersection behavior.
+
+Risks/Perf Notes
+- Lightweight additional string checks only during chain validation.
+- Constraint semantics are DNS-suffix focused and intentionally conservative.
+===
+timestamp: 2026-02-15T02:44:00+09:00
+description: Validate DNS name constraints implementation with unit and full-suite tests
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/certificate_validation.zig`
+- `zig test src/tls13/certificate_validation.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `certificate_validation.zig`: 15/15 tests passed.
+- `session.zig`: 58/58 tests passed.
+- Full test target passed.
