@@ -501,7 +501,7 @@ pub const Engine = struct {
         if (!hasExtension(extensions, ext_supported_groups)) return error.MissingRequiredClientHelloExtension;
         if (!hasExtension(extensions, ext_key_share)) return error.MissingRequiredClientHelloExtension;
         if (!hasExtension(extensions, ext_alpn)) return error.MissingRequiredClientHelloExtension;
-        if (!containsNullCompressionMethod(compression_methods)) return error.InvalidCompressionMethod;
+        if (!isStrictTls13LegacyCompressionVector(compression_methods)) return error.InvalidCompressionMethod;
         try validatePskOfferExtensions(extensions, self.config.suite);
     }
 
@@ -622,11 +622,8 @@ fn containsCipherSuite(cipher_suites: []const u16, wanted: u16) bool {
     return false;
 }
 
-fn containsNullCompressionMethod(compression_methods: []const u8) bool {
-    for (compression_methods) |method| {
-        if (method == 0x00) return true;
-    }
-    return false;
+fn isStrictTls13LegacyCompressionVector(compression_methods: []const u8) bool {
+    return compression_methods.len == 1 and compression_methods[0] == 0x00;
 }
 
 fn serverHelloSupportedVersionIsTls13(data: []const u8) bool {
@@ -1089,6 +1086,20 @@ fn clientHelloRecordWithoutAlpn() [101]u8 {
 fn clientHelloRecordWithoutNullCompression() [101]u8 {
     var frame = clientHelloRecord();
     frame[49] = 0x01;
+    return frame;
+}
+
+fn clientHelloRecordWithExtraCompressionMethod() [102]u8 {
+    var frame: [102]u8 = undefined;
+    const base = clientHelloRecord();
+    @memcpy(frame[0..50], base[0..50]);
+    @memcpy(frame[51..], base[50..]);
+    std.mem.writeInt(u16, frame[3..5], 97, .big);
+    const hs_len = handshake.writeU24(93);
+    @memcpy(frame[6..9], &hs_len);
+    frame[48] = 0x02; // comp len
+    frame[49] = 0x00; // null compression
+    frame[50] = 0x01; // illegal extra method in TLS1.3
     return frame;
 }
 
@@ -1915,6 +1926,17 @@ test "server rejects client hello without null compression method" {
     defer engine.deinit();
 
     const rec = clientHelloRecordWithoutNullCompression();
+    try std.testing.expectError(error.InvalidCompressionMethod, engine.ingestRecord(&rec));
+}
+
+test "server rejects client hello with extra compression methods" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const rec = clientHelloRecordWithExtraCompressionMethod();
     try std.testing.expectError(error.InvalidCompressionMethod, engine.ingestRecord(&rec));
 }
 

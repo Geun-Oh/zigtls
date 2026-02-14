@@ -4970,3 +4970,71 @@ Observed Results
 
 Notes
 - Added explicit regression tests for unexpected extension rejection on both ServerHello and HRR paths.
+===
+timestamp: 2026-02-15T08:05:00+09:00
+description: Plan strict ClientHello legacy_compression_methods enforcement (exactly one null)
+type: plan
+===
+Motivation
+- Current ClientHello validation only checks whether compression methods contain `0x00`.
+- TLS 1.3 requires `legacy_compression_methods` to be exactly one byte and that byte must be `0x00`.
+
+Scope
+- Replace permissive compression-method check with strict equality rule.
+- Add regression tests for extra method vector and non-null single method.
+- Update RFC matrix HS-001B wording/coverage to reflect strict compression semantics.
+
+Design
+- Replace `containsNullCompressionMethod` helper usage with strict helper (`len == 1 && methods[0] == 0x00`).
+- Keep error taxonomy unchanged (`InvalidCompressionMethod`).
+
+Risks/Perf Impact
+- Constant-time-size check on tiny vector; negligible overhead.
+- Potentially rejects previously accepted malformed ClientHello inputs by design.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Restore permissive null-presence check and remove strictness regression tests.
+
+Commit Plan
+- `MINOR: tls13: enforce strict client hello compression vector`
+===
+timestamp: 2026-02-15T08:10:00+09:00
+description: Enforce strict TLS1.3 ClientHello legacy_compression_methods semantics
+type: code change
+===
+Decisions + Rationale
+- Replaced permissive null-presence check with strict TLS1.3 rule: `legacy_compression_methods` must be exactly `[0x00]`.
+- Added dedicated regression fixture for multi-entry compression vectors to prevent future regressions.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - `requireClientHelloExtensions`: now uses strict compression-vector validator.
+  - Replaced helper `containsNullCompressionMethod` with `isStrictTls13LegacyCompressionVector`.
+  - Added fixture `clientHelloRecordWithExtraCompressionMethod`.
+  - Added test `server rejects client hello with extra compression methods`.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-HS-001B` wording/coverage to reflect strict `[0x00]` compression semantics.
+
+Risks/Perf Notes
+- Constant-time checks on tiny vector; no meaningful performance impact.
+- Intentionally rejects previously tolerated malformed ClientHello messages.
+===
+timestamp: 2026-02-15T08:11:00+09:00
+description: Validate strict compression-vector enforcement with session and full test suites
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 101/101 tests passed.
+- `zig build test`: passed.
+
+Notes
+- New regression confirms multi-entry compression vectors (e.g. `[0x00,0x01]`) are rejected.
