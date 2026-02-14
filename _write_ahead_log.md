@@ -897,3 +897,69 @@ Commands Executed
 Observed Results
 - Message codec tests passed.
 - Full package tests passed after module integration.
+===
+timestamp: 2026-02-15T00:03:00+09:00
+description: Integrate ServerHello message decode into HRR classification path
+type: plan
+===
+Motivation
+- HRR detection currently depends on raw byte offsets.
+- Message-level decode should be used to improve structural validation and keep logic centralized.
+
+Scope
+- Add ServerHello decode function in `messages` module.
+- Refactor `handshake.classifyEvent` to decode ServerHello and detect HRR from parsed random field.
+- Add/adjust unit tests for decode and classification behavior.
+
+Design
+- Keep classification fallback safe: malformed ServerHello stays as normal handshake type event, and parser errors are handled by existing envelope checks.
+
+Risks/Perf Impact
+- Slight extra parsing overhead on ServerHello classification, acceptable for handshake control path.
+
+Test Plan (commands)
+- `zig test src/tls13/messages.zig`
+- `zig test src/tls13/handshake.zig`
+- `zig build test`
+
+Rollback
+- Revert decode-based classification if it conflicts with incremental integration assumptions.
+
+Commit Plan
+- `MINOR: tls13: use serverhello decode for hrr classification`
+===
+timestamp: 2026-02-15T00:09:00+09:00
+description: Refactor HRR classification to use ServerHello structural decoding helper
+type: code change
+===
+Decisions + Rationale
+- Extended `messages` module with `ServerHello.decode` and `serverHelloHasHrrRandom` helper.
+- Switched `handshake.classifyEvent` from raw offset-based HRR detection to message-structure-aware helper.
+- Added ServerHello decode roundtrip test and updated HRR classification test to use structurally valid ServerHello body.
+
+Files/Functions Touched
+- `src/tls13/messages.zig`
+  - Added `ServerHello.decode`.
+  - Added `serverHelloHasHrrRandom` helper.
+  - Added decode roundtrip test.
+- `src/tls13/handshake.zig`
+  - Updated `classifyEvent` to use message helper.
+  - Updated HRR test fixture.
+
+Risks/Perf Notes
+- Slightly stronger structural checks in HRR classification may reject malformed-but-previously-accepted test fixtures; this is intended hardening.
+
+===
+timestamp: 2026-02-15T00:09:30+09:00
+description: Validate decode-based HRR classification integration
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/messages.zig src/tls13/handshake.zig`
+- `zig test src/tls13/messages.zig`
+- `zig test src/tls13/handshake.zig`
+- `zig build test`
+
+Observed Results
+- Message and handshake tests passed.
+- Full package test build passed.

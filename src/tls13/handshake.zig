@@ -1,4 +1,5 @@
 const std = @import("std");
+const messages = @import("messages.zig");
 const state = @import("state.zig");
 
 pub const HandshakeType = state.HandshakeType;
@@ -67,7 +68,7 @@ pub fn parseOne(bytes: []const u8) ParseError!ParsedHandshake {
 }
 
 pub fn classifyEvent(parsed: ParsedHandshake) HandshakeEvent {
-    if (parsed.header.handshake_type == .server_hello and isHelloRetryRequest(parsed.body)) {
+    if (parsed.header.handshake_type == .server_hello and messages.serverHelloHasHrrRandom(parsed.body)) {
         return .hello_retry_request;
     }
     return state.fromHandshakeType(parsed.header.handshake_type);
@@ -109,12 +110,6 @@ pub fn writeU24(value: u24) [3]u8 {
     };
 }
 
-fn isHelloRetryRequest(body: []const u8) bool {
-    // ServerHello body starts with legacy_version(2) then random(32).
-    if (body.len < 34) return false;
-    return std.mem.eql(u8, body[2..34], &hello_retry_request_random);
-}
-
 test "parse handshake frame" {
     var msg: [7]u8 = undefined;
     msg[0] = @intFromEnum(HandshakeType.server_hello);
@@ -144,13 +139,19 @@ test "sha256 transcript is deterministic" {
 }
 
 test "classify hello retry request from server hello random marker" {
-    var body: [34]u8 = undefined;
+    var body: [40]u8 = undefined;
     body[0] = 0x03;
     body[1] = 0x03;
     @memcpy(body[2..34], &hello_retry_request_random);
+    body[34] = 0x00; // session id len
+    body[35] = 0x13;
+    body[36] = 0x01; // cipher suite
+    body[37] = 0x00; // compression
+    body[38] = 0x00;
+    body[39] = 0x00; // extensions len
 
     const parsed: ParsedHandshake = .{
-        .header = .{ .handshake_type = .server_hello, .length = 34 },
+        .header = .{ .handshake_type = .server_hello, .length = 40 },
         .body = &body,
         .rest = "",
     };

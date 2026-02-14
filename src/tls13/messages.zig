@@ -1,6 +1,12 @@
 const std = @import("std");
 
 pub const legacy_version_tls12: u16 = 0x0303;
+const hrr_random = [32]u8{
+    0xCF, 0x21, 0xAD, 0x74, 0xE5, 0x9A, 0x61, 0x11,
+    0xBE, 0x1D, 0x8C, 0x02, 0x1E, 0x65, 0xB8, 0x91,
+    0xC2, 0xA2, 0x11, 0x16, 0x7A, 0xBB, 0x8C, 0x5E,
+    0x07, 0x9E, 0x09, 0xE2, 0xC8, 0xA8, 0x33, 0x9C,
+};
 
 pub const Extension = struct {
     extension_type: u16,
@@ -218,7 +224,76 @@ pub const ServerHello = struct {
         std.debug.assert(i == out.len);
         return out;
     }
+
+    pub fn decode(allocator: std.mem.Allocator, bytes: []const u8) !ServerHello {
+        var i: usize = 0;
+        if (bytes.len < 2 + 32 + 1 + 2 + 1 + 2) return error.Truncated;
+
+        const version = readU16(bytes[i .. i + 2]);
+        if (version != legacy_version_tls12) return error.InvalidLegacyVersion;
+        i += 2;
+
+        var random: [32]u8 = undefined;
+        @memcpy(&random, bytes[i .. i + 32]);
+        i += 32;
+
+        const sid_len = bytes[i];
+        i += 1;
+        if (sid_len > 32) return error.InvalidSessionIdLength;
+        if (i + sid_len > bytes.len) return error.Truncated;
+        const session_id_echo = try allocator.dupe(u8, bytes[i .. i + sid_len]);
+        errdefer allocator.free(session_id_echo);
+        i += sid_len;
+
+        if (i + 2 + 1 + 2 > bytes.len) return error.Truncated;
+        const cipher_suite = readU16(bytes[i .. i + 2]);
+        i += 2;
+        const compression_method = bytes[i];
+        i += 1;
+        const exts_len = readU16(bytes[i .. i + 2]);
+        i += 2;
+        if (i + exts_len > bytes.len) return error.Truncated;
+
+        var ext_list: std.ArrayList(Extension) = .empty;
+        errdefer {
+            for (ext_list.items) |*ext| ext.deinit(allocator);
+            ext_list.deinit(allocator);
+        }
+
+        const exts_end = i + exts_len;
+        while (i < exts_end) {
+            if (i + 4 > exts_end) return error.Truncated;
+            const ext_type = readU16(bytes[i .. i + 2]);
+            i += 2;
+            const ext_len = readU16(bytes[i .. i + 2]);
+            i += 2;
+            if (i + ext_len > exts_end) return error.Truncated;
+
+            try ext_list.append(allocator, .{
+                .extension_type = ext_type,
+                .data = try allocator.dupe(u8, bytes[i .. i + ext_len]),
+            });
+            i += ext_len;
+        }
+
+        if (i != bytes.len) return error.TrailingBytes;
+
+        return .{
+            .random = random,
+            .session_id_echo = session_id_echo,
+            .cipher_suite = cipher_suite,
+            .compression_method = compression_method,
+            .extensions = try ext_list.toOwnedSlice(allocator),
+        };
+    }
 };
+
+pub fn serverHelloHasHrrRandom(bytes: []const u8) bool {
+    if (bytes.len < 2 + 32 + 1 + 2 + 1 + 2) return false;
+    const version = readU16(bytes[0..2]);
+    if (version != legacy_version_tls12) return false;
+    return std.mem.eql(u8, bytes[2..34], &hrr_random);
+}
 
 test "clienthello encode/decode roundtrip" {
     const allocator = std.testing.allocator;
@@ -282,6 +357,30 @@ test "serverhello encode baseline" {
     defer allocator.free(encoded);
 
     try std.testing.expect(encoded.len > 38);
+}
+
+test "serverhello decode roundtrip" {
+    const allocator = std.testing.allocator;
+    var random: [32]u8 = undefined;
+    @memset(&random, 0x99);
+
+    var sh = ServerHello{
+        .random = random,
+        .session_id_echo = try allocator.dupe(u8, "id"),
+        .cipher_suite = 0x1301,
+        .compression_method = 0,
+        .extensions = try allocator.dupe(Extension, &.{.{ .extension_type = 0x002b, .data = try allocator.dupe(u8, &.{ 0x03, 0x04 }) }}),
+    };
+    defer sh.deinit(allocator);
+
+    const encoded = try sh.encode(allocator);
+    defer allocator.free(encoded);
+
+    var dec = try ServerHello.decode(allocator, encoded);
+    defer dec.deinit(allocator);
+
+    try std.testing.expectEqual(sh.cipher_suite, dec.cipher_suite);
+    try std.testing.expectEqualSlices(u8, sh.session_id_echo, dec.session_id_echo);
 }
 
 fn readU16(bytes: []const u8) u16 {
