@@ -5332,3 +5332,89 @@ Observed Results
 
 Notes
 - Added coverage now verifies KeyUpdate no-response branch and invalid-request handling/classification path.
+===
+timestamp: 2026-02-15T09:28:00+09:00
+description: Plan role-scoped early-data admission hardening for pre-connected application data
+type: plan
+===
+Motivation
+- Pre-connected application-data handling currently applies early-data gates without role scoping.
+- TLS 1.3 early data admission is a server-side policy decision; client path should not accept inbound early application data before connected.
+
+Scope
+- Restrict pre-connected early-data admission path to server role only.
+- Keep existing idempotency/replay/freshness gates unchanged for server role.
+- Add regression test for client-side pre-connected application-data rejection even when early-data config is enabled.
+- Update RFC matrix 0-RTT row wording/coverage.
+
+Design
+- In `session.ingestRecord` application_data branch, return `EarlyDataRejected` when `role != .server` and state is not connected.
+- Add test case with client role + early-data enabled + replay filter configured to verify hard rejection.
+
+Risks/Perf Impact
+- One role comparison in non-connected application-data branch; negligible overhead.
+- Tightens acceptance behavior for malformed/invalid role usage.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Remove role guard and associated regression test.
+
+Commit Plan
+- `MINOR: tls13: scope early-data admission to server role`
+===
+timestamp: 2026-02-15T09:31:00+09:00
+description: Scope pre-connected early-data admission to server role and add regression coverage
+type: code change
+===
+Decisions + Rationale
+- Added explicit role gate in pre-connected application-data handling so early-data admission remains server-policy-only.
+- Prevents client role from accepting inbound early application data prior to connected state even when early-data config flags are set.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - `ingestRecord` application-data branch: added `role == .server` guard before early-data gates.
+  - Added test: `client role rejects pre-connected early data even when enabled`.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-0RTT-002` wording/coverage to include server-role admission gate.
+
+Risks/Perf Notes
+- Single role comparison in non-connected application-data path; negligible overhead.
+- Tightens invalid-role acceptance behavior by design.
+===
+timestamp: 2026-02-15T09:32:00+09:00
+description: Validate server-role-scoped early-data admission hardening
+ type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 110/110 tests passed.
+- `zig build test`: passed.
+
+Notes
+- Regression confirms client role pre-connected application data is rejected regardless of early-data enablement.
+===
+timestamp: 2026-02-15T09:33:00+09:00
+description: Correct metadata key formatting for early-data role-gate validation entry
+type: test
+===
+Supersedes
+- Previous entry at `2026-02-15T09:32:00+09:00` had malformed metadata key (` type`).
+
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 110/110 tests passed.
+- `zig build test`: passed.
+
+Notes
+- Regression confirms client role pre-connected application data is rejected regardless of early-data enablement.

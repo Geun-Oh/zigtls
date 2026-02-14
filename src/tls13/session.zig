@@ -279,6 +279,7 @@ pub const Engine = struct {
             },
             .application_data => {
                 if (self.machine.state != .connected) {
+                    if (self.config.role != .server) return error.EarlyDataRejected;
                     if (!self.config.early_data.enabled) return error.EarlyDataRejected;
                     if (!self.early_data_idempotent) return error.EarlyDataRejected;
                     if (!self.early_data_within_window) return error.EarlyDataTicketExpired;
@@ -1901,6 +1902,25 @@ test "early data is rejected by default" {
     });
     defer engine.deinit();
 
+    const rec = appDataRecord("hello");
+    try std.testing.expectError(error.EarlyDataRejected, engine.ingestRecord(&rec));
+}
+
+test "client role rejects pre-connected early data even when enabled" {
+    var replay = try early_data.ReplayFilter.init(std.testing.allocator, 4096);
+    defer replay.deinit();
+
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+        .early_data = .{
+            .enabled = true,
+            .replay_filter = &replay,
+        },
+    });
+    defer engine.deinit();
+
+    try engine.beginEarlyData("ticket-c", true);
     const rec = appDataRecord("hello");
     try std.testing.expectError(error.EarlyDataRejected, engine.ingestRecord(&rec));
 }
