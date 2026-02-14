@@ -144,6 +144,7 @@ pub const Engine = struct {
     }
 
     pub fn deinit(self: *Engine) void {
+        self.zeroizeLatestSecret();
         self.clearEarlyDataTicket();
     }
 
@@ -296,8 +297,19 @@ pub const Engine = struct {
 
     fn clearEarlyDataTicket(self: *Engine) void {
         if (self.early_data_ticket) |ticket| {
+            std.crypto.secureZero(u8, ticket);
             self.allocator.free(ticket);
             self.early_data_ticket = null;
+        }
+    }
+
+    fn zeroizeLatestSecret(self: *Engine) void {
+        if (self.latest_secret) |*secret| {
+            switch (secret.*) {
+                .sha256 => |*s| std.crypto.secureZero(u8, s[0..]),
+                .sha384 => |*s| std.crypto.secureZero(u8, s[0..]),
+            }
+            self.latest_secret = null;
         }
     }
 
@@ -369,6 +381,33 @@ fn hasExtension(extensions: []const messages.Extension, extension_type: u16) boo
         if (ext.extension_type == extension_type) return true;
     }
     return false;
+}
+
+test "zeroize latest secret clears secret bytes and resets option" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const secret = [_]u8{0xaa} ** 32;
+    engine.latest_secret = .{ .sha256 = secret };
+    engine.zeroizeLatestSecret();
+
+    try std.testing.expect(engine.latest_secret == null);
+}
+
+test "clear early data ticket zeroes and clears pointer" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    try engine.beginEarlyData("ticket-z", true);
+    try std.testing.expect(engine.early_data_ticket != null);
+    engine.clearEarlyDataTicket();
+    try std.testing.expect(engine.early_data_ticket == null);
 }
 
 fn validatePskOfferExtensions(extensions: []const messages.Extension) EngineError!void {

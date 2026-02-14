@@ -2493,3 +2493,67 @@ Observed Results
 - `ocsp.zig`: 5/5 tests passed.
 - `certificate_validation.zig`: 20/20 tests passed.
 - Full test target passed.
+===
+timestamp: 2026-02-15T04:35:00+09:00
+description: Plan secret lifecycle hardening with explicit zeroization on session teardown
+type: plan
+===
+Motivation
+- `_task.md` requires key material zeroization on lifecycle end.
+- Current session teardown frees early-data ticket and drops latest traffic secret without explicit wipe.
+
+Scope
+- Zeroize `latest_secret` in `Engine.deinit` before discard.
+- Zeroize early-data ticket bytes before allocator free.
+- Add regression tests validating zeroization helper behavior.
+
+Design
+- Add dedicated zeroization helpers in `session.zig` for secret union and ticket slices.
+- Preserve existing API behavior; hardening is internal implementation detail.
+
+Risks/Perf Impact
+- Teardown-only memory writes; no hot-path cost.
+- Requires careful avoid-optimization semantics via `std.crypto.secureZero`.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Revert zeroization helpers if allocator/platform constraints arise, preserving existing free/deinit logic.
+
+Commit Plan
+- `MINOR: tls13: zeroize session secrets on teardown`
+===
+timestamp: 2026-02-15T04:39:00+09:00
+description: Zeroize session traffic secrets and early-data tickets during teardown
+type: code change
+===
+Decisions + Rationale
+- Added explicit zeroization path for `latest_secret` before discard in engine teardown.
+- Zeroized early-data ticket bytes before allocator free to reduce residual secret exposure in heap memory.
+- Kept hardening internal to session lifecycle functions with no API break.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - `Engine.deinit`: now calls `zeroizeLatestSecret` prior to ticket cleanup
+  - `clearEarlyDataTicket`: secure-zero + free
+  - Added `zeroizeLatestSecret` helper
+  - Added teardown zeroization regression tests.
+
+Risks/Perf Notes
+- Teardown-only writes; no handshake/data-path runtime overhead.
+- Uses `std.crypto.secureZero` to prevent compiler-elision of wipe operations.
+===
+timestamp: 2026-02-15T04:40:00+09:00
+description: Validate session secret zeroization hardening changes
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 69/69 tests passed, including zeroization-focused tests.
+- Full test target passed.
