@@ -2747,3 +2747,77 @@ Observed Results
 - Replay script syntax and self-test passed.
 - Corpus replay reported files successfully.
 - Full test target passed.
+===
+timestamp: 2026-02-15T05:20:00+09:00
+description: Plan release preflight gate script to automate runbook verification commands
+type: plan
+===
+Motivation
+- Runbook exists, but release preflight checks are still manual and error-prone.
+- `_task.md` release-gate workflow benefits from executable, repeatable validation entrypoint.
+
+Scope
+- Add `scripts/release/preflight.sh` executing core module tests + tooling checks.
+- Support `--dry-run` mode for CI/job wiring validation.
+- Keep command list aligned with `docs/release-runbook.md`.
+
+Design
+- Fail-fast shell script with explicit command list and per-step logging.
+- Avoid external-network dependencies.
+
+Risks/Perf Impact
+- Tooling-only change.
+- Runtime is bounded by existing test suite duration.
+
+Test Plan (commands)
+- `bash -n scripts/release/preflight.sh`
+- `bash scripts/release/preflight.sh --dry-run`
+- `zig build test`
+
+Rollback
+- Remove preflight script if workflow is migrated to task runner/CI template.
+
+Commit Plan
+- `MINOR: test: add release preflight gate script`
+===
+timestamp: 2026-02-15T05:23:00+09:00
+description: Add executable release preflight gate script aligned with runbook checks
+type: code change
+===
+Decisions + Rationale
+- Added single-entry preflight script to automate release verification command sequence.
+- Included dry-run mode for CI wiring and quick inspection.
+- Updated runbook to reference script as automation option while preserving explicit command list.
+
+Files/Functions Touched
+- `scripts/release/preflight.sh` (new)
+- `docs/release-runbook.md` (automation invocation note)
+
+Risks/Perf Notes
+- Tooling-only change.
+- Uses existing test/tool commands; no protocol runtime impact.
+===
+timestamp: 2026-02-15T05:24:00+09:00
+description: Validate release preflight automation script
+ type: test
+===
+Correction
+- This entry intentionally supersedes the malformed metadata key formatting in the same append block.
+===
+timestamp: 2026-02-15T05:24:30+09:00
+description: Supersede malformed metadata line for preflight script validation log
+type: test
+===
+Correction
+- Previous entry at 2026-02-15T05:24:00+09:00 used malformed metadata key formatting (` type:`).
+- This entry supersedes that malformed header for WAL compliance.
+
+Commands Executed
+- `bash -n scripts/release/preflight.sh`
+- `bash scripts/release/preflight.sh --dry-run`
+- `zig build test`
+
+Observed Results
+- Preflight script syntax check passed.
+- Dry-run printed full command sequence and completed.
+- Full test target passed.
