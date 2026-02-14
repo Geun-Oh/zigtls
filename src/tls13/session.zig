@@ -448,6 +448,58 @@ pub fn estimatedConnectionMemoryCeiling(config: Config) usize {
     return @sizeOf(Engine) + ticket_cap;
 }
 
+pub fn classifyErrorAlert(err: anyerror) alerts.Alert {
+    const description: alerts.AlertDescription = switch (err) {
+        error.IllegalTransition, error.UnsupportedRecordType => .unexpected_message,
+
+        error.MissingRequiredClientHelloExtension,
+        error.MissingRequiredServerHelloExtension,
+        error.MissingRequiredHrrExtension,
+        => .missing_extension,
+
+        error.InvalidLegacyVersion => .protocol_version,
+        error.RecordOverflow => .record_overflow,
+
+        error.DowngradeDetected,
+        error.ConfiguredCipherSuiteMismatch,
+        error.InvalidSupportedVersionExtension,
+        error.InvalidCompressionMethod,
+        error.MissingPskKeyExchangeModes,
+        error.InvalidPskBinder,
+        error.PskBinderCountMismatch,
+        error.UnsupportedSignatureAlgorithm,
+        error.InvalidRequest,
+        => .illegal_parameter,
+
+        error.EarlyDataRejected,
+        error.MissingReplayFilter,
+        error.EarlyDataTicketExpired,
+        error.EarlyDataTicketTooLarge,
+        => .handshake_failure,
+
+        error.InvalidDescription,
+        error.InvalidLevel,
+        error.InvalidContentType,
+        error.IncompleteHeader,
+        error.IncompletePayload,
+        error.InvalidHandshakeType,
+        error.MessageTooLarge,
+        error.IncompleteBody,
+        error.InvalidLength,
+        error.InvalidHelloMessage,
+        error.InvalidCertificateMessage,
+        error.InvalidCertificateVerifyMessage,
+        error.InvalidFinishedMessage,
+        error.InvalidEncryptedExtensionsMessage,
+        error.InvalidNewSessionTicketMessage,
+        => .decode_error,
+
+        else => .internal_error,
+    };
+
+    return .{ .level = .fatal, .description = description };
+}
+
 fn hasExtension(extensions: []const messages.Extension, extension_type: u16) bool {
     for (extensions) |ext| {
         if (ext.extension_type == extension_type) return true;
@@ -1589,6 +1641,44 @@ test "metrics counts truncation events" {
     try std.testing.expectError(error.TruncationDetected, engine.onTransportEof());
     const m = engine.snapshotMetrics();
     try std.testing.expectEqual(@as(u64, 1), m.truncation_events);
+}
+
+test "classify error alert maps representative protocol errors" {
+    try std.testing.expectEqual(
+        alerts.Alert{ .level = .fatal, .description = .unexpected_message },
+        classifyErrorAlert(error.IllegalTransition),
+    );
+    try std.testing.expectEqual(
+        alerts.Alert{ .level = .fatal, .description = .missing_extension },
+        classifyErrorAlert(error.MissingRequiredServerHelloExtension),
+    );
+    try std.testing.expectEqual(
+        alerts.Alert{ .level = .fatal, .description = .protocol_version },
+        classifyErrorAlert(error.InvalidLegacyVersion),
+    );
+    try std.testing.expectEqual(
+        alerts.Alert{ .level = .fatal, .description = .record_overflow },
+        classifyErrorAlert(error.RecordOverflow),
+    );
+    try std.testing.expectEqual(
+        alerts.Alert{ .level = .fatal, .description = .illegal_parameter },
+        classifyErrorAlert(error.InvalidSupportedVersionExtension),
+    );
+    try std.testing.expectEqual(
+        alerts.Alert{ .level = .fatal, .description = .decode_error },
+        classifyErrorAlert(error.InvalidHelloMessage),
+    );
+    try std.testing.expectEqual(
+        alerts.Alert{ .level = .fatal, .description = .handshake_failure },
+        classifyErrorAlert(error.EarlyDataRejected),
+    );
+}
+
+test "classify error alert falls back to internal_error for unknown errors" {
+    try std.testing.expectEqual(
+        alerts.Alert{ .level = .fatal, .description = .internal_error },
+        classifyErrorAlert(error.OutOfMemory),
+    );
 }
 
 test "build keyupdate record is parseable" {
