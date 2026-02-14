@@ -75,6 +75,16 @@ pub const IngestResult = struct {
     }
 };
 
+pub const FatalFailure = struct {
+    err: anyerror,
+    alert: alerts.Alert,
+};
+
+pub const IngestWithAlertOutcome = union(enum) {
+    ok: IngestResult,
+    fatal: FatalFailure,
+};
+
 pub const EngineError = error{
     TooManyActions,
     UnsupportedRecordType,
@@ -264,6 +274,19 @@ pub const Engine = struct {
         }
 
         return result;
+    }
+
+    pub fn ingestRecordWithAlertIntent(self: *Engine, record_bytes: []const u8) IngestWithAlertOutcome {
+        const result = self.ingestRecord(record_bytes) catch |err| {
+            self.machine.markClosing();
+            return .{
+                .fatal = .{
+                    .err = err,
+                    .alert = classifyErrorAlert(err),
+                },
+            };
+        };
+        return .{ .ok = result };
     }
 
     pub fn buildAlertRecord(alert: alerts.Alert) [7]u8 {
@@ -1679,6 +1702,42 @@ test "classify error alert falls back to internal_error for unknown errors" {
         alerts.Alert{ .level = .fatal, .description = .internal_error },
         classifyErrorAlert(error.OutOfMemory),
     );
+}
+
+test "ingest wrapper returns ok outcome on success" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const out = engine.ingestRecordWithAlertIntent(&serverHelloRecord());
+    switch (out) {
+        .ok => |res| {
+            try std.testing.expectEqual(@as(usize, 2), res.action_count);
+            try std.testing.expectEqual(state.ConnectionState.wait_encrypted_extensions, engine.machine.state);
+        },
+        .fatal => return error.TestUnexpectedResult,
+    }
+}
+
+test "ingest wrapper returns fatal alert intent on decode failure" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const out = engine.ingestRecordWithAlertIntent(&handshakeRecord(.server_hello));
+    switch (out) {
+        .ok => return error.TestUnexpectedResult,
+        .fatal => |failure| {
+            try std.testing.expectEqual(error.InvalidHelloMessage, failure.err);
+            try std.testing.expectEqual(alerts.AlertLevel.fatal, failure.alert.level);
+            try std.testing.expectEqual(alerts.AlertDescription.decode_error, failure.alert.description);
+            try std.testing.expectEqual(state.ConnectionState.closing, engine.machine.state);
+        },
+    }
 }
 
 test "build keyupdate record is parseable" {
