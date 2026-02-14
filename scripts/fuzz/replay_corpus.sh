@@ -19,6 +19,9 @@ USAGE
 run_replay() {
   local corpus_dir="$1"
   local run_baseline="$2"
+  local record_count=0
+  local handshake_count=0
+  local session_count=0
 
   if [[ ! -d "$corpus_dir" ]]; then
     echo "corpus directory not found: $corpus_dir" >&2
@@ -31,6 +34,13 @@ run_replay() {
 
   local replayed=0
   while IFS= read -r -d '' file; do
+    local rel
+    rel="${file#$corpus_dir/}"
+    case "${rel%%/*}" in
+      record) record_count=$((record_count + 1)) ;;
+      handshake) handshake_count=$((handshake_count + 1)) ;;
+      session) session_count=$((session_count + 1)) ;;
+    esac
     # Placeholder replay hook: ensure corpus files are readable and tracked.
     # Target-specific harness execution can be wired here in follow-up commits.
     wc -c <"$file" >/dev/null
@@ -42,14 +52,24 @@ run_replay() {
     return 1
   fi
 
+  if [[ "$record_count" -eq 0 || "$handshake_count" -eq 0 || "$session_count" -eq 0 ]]; then
+    echo "missing required corpus buckets (record=$record_count handshake=$handshake_count session=$session_count)" >&2
+    return 1
+  fi
+
   echo "replayed corpus files: $replayed"
+  echo "bucket counts: record=$record_count handshake=$handshake_count session=$session_count"
   return 0
 }
 
 self_test() {
   local tmp
   tmp="$(mktemp -d)"
+  mkdir -p "$tmp/record"
+  mkdir -p "$tmp/handshake"
   mkdir -p "$tmp/session"
+  printf '\x16\x03\x04\x00\x00' >"$tmp/record/seed1.bin"
+  printf '\x01\x00\x00' >"$tmp/handshake/seed1.bin"
   printf 'seed-case\n' >"$tmp/session/seed1.bin"
 
   run_replay "$tmp" 0 >/dev/null
