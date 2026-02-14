@@ -2,6 +2,7 @@ const std = @import("std");
 
 pub const TrustStoreError = error{
     PathNotAbsolute,
+    AmbiguousFallbackSource,
 };
 
 pub const LoadStrategy = struct {
@@ -62,6 +63,10 @@ pub const TrustStore = struct {
         strategy: LoadStrategy,
         system_loader: SystemLoaderFn,
     ) !LoadResult {
+        if (strategy.fallback_pem_file_absolute != null and strategy.fallback_pem_dir_absolute != null) {
+            return error.AmbiguousFallbackSource;
+        }
+
         if (strategy.prefer_system) {
             system_loader(self, allocator) catch |err| {
                 if (strategy.fail_on_system_error) return err;
@@ -166,4 +171,15 @@ test "strategy can ignore system load errors and continue fallback path" {
         .fail_on_system_error = false,
     }, Hooks.failSystemLoad);
     try std.testing.expectEqual(LoadResult.none, result);
+}
+
+test "strategy rejects ambiguous dual fallback sources" {
+    var store = TrustStore.initEmpty();
+    defer store.deinit(std.testing.allocator);
+
+    try std.testing.expectError(error.AmbiguousFallbackSource, store.loadWithStrategy(std.testing.allocator, .{
+        .prefer_system = false,
+        .fallback_pem_file_absolute = "/tmp/ca.pem",
+        .fallback_pem_dir_absolute = "/tmp/certs",
+    }));
 }

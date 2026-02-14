@@ -5497,3 +5497,72 @@ Observed Results
 
 Notes
 - Wildcard matching now accepts single-label wildcard only and rejects apex/multi-label overmatch.
+===
+timestamp: 2026-02-15T10:00:00+09:00
+description: Plan deterministic trust strategy validation by rejecting ambiguous dual fallback sources
+type: plan
+===
+Motivation
+- Trust load strategy currently permits both `fallback_pem_file_absolute` and `fallback_pem_dir_absolute` simultaneously.
+- Dual fallback specification introduces ambiguity in operator intent and weakens deterministic policy behavior.
+
+Scope
+- Reject strategy configs that provide both fallback sources at once.
+- Add explicit error classification for ambiguous fallback configuration.
+- Add regression tests for strategy rejection and non-ambiguous behavior continuity.
+- Update RFC matrix TRUST row wording/coverage.
+
+Design
+- Add `AmbiguousFallbackSource` to `TrustStoreError`.
+- Validate strategy at start of `loadWithStrategyInternal` and return error on dual fallback configuration.
+- Keep existing absolute-path and strict/lenient system-error behavior intact.
+
+Risks/Perf Impact
+- Constant-time option check in trust-load setup path; no meaningful overhead.
+- May reject previously accepted ambiguous configs by design.
+
+Test Plan (commands)
+- `zig test src/tls13/trust_store.zig`
+- `zig build test`
+
+Rollback
+- Remove ambiguity check and regression tests.
+
+Commit Plan
+- `MINOR: trust: reject ambiguous dual fallback strategy`
+===
+timestamp: 2026-02-15T10:03:00+09:00
+description: Enforce deterministic trust strategy by rejecting dual fallback source configuration
+type: code change
+===
+Decisions + Rationale
+- Added explicit strategy validation to prevent ambiguous trust fallback configuration (file+dir simultaneously).
+- Kept existing behavior for absolute-path enforcement and strict/lenient system-load handling unchanged.
+
+Files/Functions Touched
+- `src/tls13/trust_store.zig`
+  - `TrustStoreError`: added `AmbiguousFallbackSource`.
+  - `loadWithStrategyInternal`: now rejects configs with both fallback file and dir set.
+  - Added regression test `strategy rejects ambiguous dual fallback sources`.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-TRUST-001` wording/coverage to include dual-fallback rejection.
+
+Risks/Perf Notes
+- Constant-time option check in strategy setup path; negligible overhead.
+- Intentionally rejects previously accepted ambiguous strategy inputs.
+===
+timestamp: 2026-02-15T10:04:00+09:00
+description: Validate trust dual-fallback rejection policy with targeted and full tests
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/trust_store.zig`
+- `zig test src/tls13/trust_store.zig`
+- `zig build test`
+
+Observed Results
+- `trust_store.zig`: 9/9 tests passed.
+- `zig build test`: passed.
+
+Notes
+- Regression confirms ambiguous strategy config is rejected before fallback loader side effects.
