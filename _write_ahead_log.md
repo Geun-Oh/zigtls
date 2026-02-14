@@ -1101,3 +1101,58 @@ Files/Sections Touched
 
 Risks/Perf Notes
 - Repository hygiene change only; no runtime impact.
+===
+timestamp: 2026-02-15T00:37:00+09:00
+description: Refresh RFC8446 matrix statuses to reflect latest implementation progress
+type: docs
+===
+Motivation
+- Multiple feature units were added (message codec, close semantics, early-data policy, CI/BoGo scaffolding); matrix should reflect current state.
+
+Scope
+- Update `docs/rfc8446-matrix.md` status rows and notes for newly completed/expanded items.
+- Add references to new modules where appropriate.
+
+Design
+- Keep conservative status semantics: only mark `implemented` where baseline behavior + tests exist.
+- Keep remaining complex flows marked `partial`/`pending` with clear rationale.
+
+Risks/Perf Impact
+- Documentation-only change.
+
+Test Plan (commands)
+- `sed -n '1,260p' docs/rfc8446-matrix.md`
+- `zig build test`
+
+Rollback
+- Revert matrix update if status interpretation is deemed too optimistic/pessimistic.
+
+Commit Plan
+- `MINOR: docs: update rfc8446 matrix with current feature coverage`
+===
+timestamp: 2026-02-15T00:40:00+09:00
+description: Update RFC8446 matrix statuses for newly implemented features
+type: docs
+===
+Decisions + Rationale
+- Updated matrix to reflect newly added message codec coverage, deterministic fuzz robustness tests, and BoGo scaffolding.
+- Kept conservative `partial` status for areas where baseline exists but full protocol completeness is pending.
+
+Files/Sections Touched
+- `docs/rfc8446-matrix.md`
+
+Risks/Perf Notes
+- Documentation-only status refresh.
+
+===
+timestamp: 2026-02-15T00:40:30+09:00
+description: Validate matrix update and package tests
+type: test
+===
+Commands Executed
+- `sed -n '1,260p' docs/rfc8446-matrix.md`
+- `zig build test`
+
+Observed Results
+- Matrix update rendered as expected.
+- Full package tests passed.
