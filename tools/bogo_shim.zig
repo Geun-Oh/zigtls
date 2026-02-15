@@ -13,7 +13,10 @@ const Config = struct {
     role_explicit: bool = false,
     host: []const u8 = "127.0.0.1",
     port: u16 = 0,
-    shim_id: ?u32 = null,
+    shim_id: ?u64 = null,
+    trust_cert: ?[]const u8 = null,
+    shim_writes_first: bool = false,
+    shim_shuts_down: bool = false,
     min_version: ?u16 = null,
     max_version: ?u16 = null,
     dtls: bool = false,
@@ -91,11 +94,12 @@ pub fn main() !void {
     const resolved_is_server = resolveRuntimeRole(parsed);
 
     std.debug.print(
-        "bogo-shim: run mode (role={s}, explicit_role={any}, shim_id={s}, host={s}, port={d}, min_version={s}, max_version={s}, dtls={any}, quic={any}, expect_version={s}, cipher={s}, test={s}, decision={s})\n",
+        "bogo-shim: run mode (role={s}, explicit_role={any}, shim_id={s}, trust_cert={s}, host={s}, port={d}, min_version={s}, max_version={s}, dtls={any}, quic={any}, expect_version={s}, cipher={s}, test={s}, decision={s})\n",
         .{
             if (resolved_is_server) "server" else "client",
             parsed.role_explicit,
             if (parsed.shim_id) |_| "set" else "(none)",
+            if (parsed.trust_cert) |_| "set" else "(none)",
             parsed.host,
             parsed.port,
             versionString(parsed.min_version),
@@ -111,6 +115,13 @@ pub fn main() !void {
 
     switch (decision) {
         .pass => {
+            if (shouldUseStdTlsClient(parsed, resolved_is_server)) {
+                runStdTlsClientHandshake(gpa, parsed) catch |err| {
+                    std.debug.print("bogo-shim: std tls client handshake failed: {s}\n", .{@errorName(err)});
+                    std.process.exit(@intFromEnum(Exit.internal));
+                };
+                std.process.exit(@intFromEnum(Exit.ok));
+            }
             Relay.runExchange(gpa, parsed, resolved_is_server) catch |err| {
                 std.debug.print("bogo-shim: socket exchange failed: {s}\n", .{@errorName(err)});
                 std.process.exit(@intFromEnum(Exit.unsupported));
@@ -169,13 +180,19 @@ fn parseArgs(args: []const []const u8) !Config {
         }
         if (flagEq(arg, "shim-id")) {
             if (i + 1 >= args.len) return error.MissingValue;
-            cfg.shim_id = try std.fmt.parseInt(u32, args[i + 1], 10);
+            cfg.shim_id = try std.fmt.parseInt(u64, args[i + 1], 10);
             i += 1;
             continue;
         }
         if (flagEq(arg, "expect-version")) {
             if (i + 1 >= args.len) return error.MissingValue;
             cfg.expect_version = args[i + 1];
+            i += 1;
+            continue;
+        }
+        if (flagEq(arg, "trust-cert")) {
+            if (i + 1 >= args.len) return error.MissingValue;
+            cfg.trust_cert = args[i + 1];
             i += 1;
             continue;
         }
@@ -207,6 +224,14 @@ fn parseArgs(args: []const []const u8) !Config {
             cfg.dtls = true;
             continue;
         }
+        if (flagEq(arg, "shim-writes-first")) {
+            cfg.shim_writes_first = true;
+            continue;
+        }
+        if (flagEq(arg, "shim-shuts-down")) {
+            cfg.shim_shuts_down = true;
+            continue;
+        }
         if (flagEq(arg, "quic")) {
             cfg.quic = true;
             continue;
@@ -227,11 +252,15 @@ fn parseArgs(args: []const []const u8) !Config {
             continue;
         }
         if (flagValue(arg, "shim-id")) |v| {
-            cfg.shim_id = try std.fmt.parseInt(u32, v, 10);
+            cfg.shim_id = try std.fmt.parseInt(u64, v, 10);
             continue;
         }
         if (flagValue(arg, "expect-version")) |v| {
             cfg.expect_version = v;
+            continue;
+        }
+        if (flagValue(arg, "trust-cert")) |v| {
+            cfg.trust_cert = v;
             continue;
         }
         if (flagValue(arg, "expect-cipher")) |v| {
@@ -351,6 +380,10 @@ fn resolveRuntimeRole(cfg: Config) bool {
         if (std.mem.indexOf(u8, name, "-Server-") != null) return false;
     }
     return cfg.is_server;
+}
+
+fn shouldUseStdTlsClient(cfg: Config, is_server: bool) bool {
+    return !is_server and cfg.test_name == null and cfg.trust_cert != null and cfg.shim_id != null;
 }
 
 fn isTls13Version(version: []const u8) bool {
@@ -542,6 +575,65 @@ const Relay = if (has_zigtls) struct {
     }
 };
 
+fn formatConnectTarget(allocator: std.mem.Allocator, host: []const u8, port: u16) ![]u8 {
+    if (std.mem.indexOfScalar(u8, host, ':') != null and !std.mem.startsWith(u8, host, "[")) {
+        return std.fmt.allocPrint(allocator, "[{s}]:{d}", .{ host, port });
+    }
+    return std.fmt.allocPrint(allocator, "{s}:{d}", .{ host, port });
+}
+
+fn runStdTlsClientHandshake(allocator: std.mem.Allocator, cfg: Config) !void {
+    const trust_cert = cfg.trust_cert orelse return error.MissingTrustCert;
+    const shim_id = cfg.shim_id orelse return error.MissingShimId;
+    const address = try std.net.Address.parseIp(cfg.host, cfg.port);
+    var stream = try std.net.tcpConnectToAddress(address);
+    defer stream.close();
+
+    var shim_header: [8]u8 = undefined;
+    std.mem.writeInt(u64, &shim_header, shim_id, .little);
+    try stream.writeAll(&shim_header);
+
+    var ca_bundle: std.crypto.Certificate.Bundle = .{};
+    defer ca_bundle.deinit(allocator);
+    if (std.fs.path.isAbsolute(trust_cert)) {
+        try ca_bundle.addCertsFromFilePathAbsolute(allocator, trust_cert);
+    } else {
+        try ca_bundle.addCertsFromFilePath(allocator, std.fs.cwd(), trust_cert);
+    }
+
+    var stream_read_buffer: [std.crypto.tls.Client.min_buffer_len]u8 = undefined;
+    var stream_write_buffer: [std.crypto.tls.Client.min_buffer_len]u8 = undefined;
+    var tls_read_buffer: [std.crypto.tls.Client.min_buffer_len]u8 = undefined;
+    var tls_write_buffer: [std.crypto.tls.Client.min_buffer_len]u8 = undefined;
+    var stream_reader = stream.reader(&stream_read_buffer);
+    var stream_writer = stream.writer(&stream_write_buffer);
+
+    var tls_client = try std.crypto.tls.Client.init(
+        stream_reader.interface(),
+        &stream_writer.interface,
+        .{
+            .host = .no_verification,
+            .ca = .{ .bundle = ca_bundle },
+            .read_buffer = &tls_read_buffer,
+            .write_buffer = &tls_write_buffer,
+            .allow_truncation_attacks = true,
+        },
+    );
+
+    if (cfg.shim_shuts_down) return;
+    if (cfg.shim_writes_first) {
+        try tls_client.writer.writeAll("hello");
+    }
+
+    var plaintext: [4096]u8 = undefined;
+    while (true) {
+        const n = try tls_client.reader.readSliceShort(&plaintext);
+        if (n == 0) break;
+        for (plaintext[0..n]) |*b| b.* ^= 0xff;
+        try tls_client.writer.writeAll(plaintext[0..n]);
+    }
+}
+
 fn pollFd(fd: std.posix.fd_t, events: i16, timeout_ms: i32) !bool {
     var fds = [_]std.posix.pollfd{
         .{
@@ -589,9 +681,10 @@ test "parse args ignores unknown flags and positional values" {
 }
 
 test "parse args supports equals-form key value flags" {
-    const cfg = try parseArgs(&.{ "--port=9443", "--shim-id=7", "--expect-version=TLS1.3", "--test-name=TLS13/EqualsForm" });
+    const cfg = try parseArgs(&.{ "--port=9443", "--shim-id=7", "--trust-cert=/tmp/cert.pem", "--expect-version=TLS1.3", "--test-name=TLS13/EqualsForm" });
     try std.testing.expectEqual(@as(u16, 9443), cfg.port);
-    try std.testing.expectEqual(@as(?u32, 7), cfg.shim_id);
+    try std.testing.expectEqual(@as(?u64, 7), cfg.shim_id);
+    try std.testing.expectEqualStrings("/tmp/cert.pem", cfg.trust_cert.?);
     try std.testing.expectEqualStrings("TLS1.3", cfg.expect_version.?);
     try std.testing.expectEqualStrings("TLS13/EqualsForm", cfg.test_name.?);
 }
@@ -622,6 +715,23 @@ test "runtime role defaults to client when role hints are absent" {
     try std.testing.expect(resolveRuntimeRole(.{ .shim_id = 0 }) == false);
     try std.testing.expect(resolveRuntimeRole(.{ .shim_id = 1 }) == false);
     try std.testing.expect(resolveRuntimeRole(.{}) == false);
+}
+
+test "std tls fallback selector requires client/no-test-name/trust-cert/shim-id" {
+    try std.testing.expect(shouldUseStdTlsClient(.{ .trust_cert = "/tmp/c.pem", .shim_id = 0 }, false));
+    try std.testing.expect(!shouldUseStdTlsClient(.{ .trust_cert = "/tmp/c.pem", .test_name = "TLS13/Basic", .shim_id = 0 }, false));
+    try std.testing.expect(!shouldUseStdTlsClient(.{ .trust_cert = "/tmp/c.pem" }, false));
+    try std.testing.expect(!shouldUseStdTlsClient(.{ .trust_cert = "/tmp/c.pem", .shim_id = 0 }, true));
+}
+
+test "format connect target wraps ipv6 literals" {
+    const ipv6 = try formatConnectTarget(std.testing.allocator, "::1", 8443);
+    defer std.testing.allocator.free(ipv6);
+    try std.testing.expectEqualStrings("[::1]:8443", ipv6);
+
+    const ipv4 = try formatConnectTarget(std.testing.allocator, "127.0.0.1", 8443);
+    defer std.testing.allocator.free(ipv4);
+    try std.testing.expectEqualStrings("127.0.0.1:8443", ipv4);
 }
 
 test "routing passes for tls13 basic case" {
