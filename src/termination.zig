@@ -1,10 +1,13 @@
 const std = @import("std");
+const rate_limit = @import("rate_limit.zig");
 const tls13 = @import("tls13.zig");
 
 pub const Config = struct {
     session: tls13.session.Config,
     on_client_hello: ?ClientHelloCallback = null,
     callback_userdata: usize = 0,
+    handshake_rate_limiter: ?*rate_limit.TokenBucket = null,
+    now_ns: ?NowNsFn = null,
 };
 
 pub const ConnectionContext = struct {
@@ -15,6 +18,7 @@ pub const Error = error{
     NotAccepted,
     OutputBufferTooSmall,
     InvalidConfiguration,
+    HandshakeRateLimited,
 } || tls13.session.EngineError || std.mem.Allocator.Error;
 
 pub const ClientHelloMetadata = struct {
@@ -23,6 +27,7 @@ pub const ClientHelloMetadata = struct {
 };
 
 pub const ClientHelloCallback = *const fn (meta: ClientHelloMetadata, userdata: usize) void;
+pub const NowNsFn = *const fn () u64;
 
 pub const Connection = struct {
     allocator: std.mem.Allocator,
@@ -60,6 +65,7 @@ pub const Connection = struct {
 
     pub fn ingest_tls_bytes(self: *Connection, record_bytes: []const u8) Error!tls13.session.IngestResult {
         if (!self.accepted) return error.NotAccepted;
+        try self.enforceHandshakeRateLimit();
         self.emitClientHelloMetadata(record_bytes);
         const result = try self.engine.ingestRecord(record_bytes);
         try self.collectActions(result);
@@ -68,6 +74,7 @@ pub const Connection = struct {
 
     pub fn ingest_tls_bytes_with_alert(self: *Connection, record_bytes: []const u8) Error!tls13.session.IngestWithAlertOutcome {
         if (!self.accepted) return error.NotAccepted;
+        try self.enforceHandshakeRateLimit();
         self.emitClientHelloMetadata(record_bytes);
         const out = self.engine.ingestRecordWithAlertIntent(record_bytes);
         switch (out) {
@@ -193,6 +200,17 @@ pub const Connection = struct {
         errdefer self.allocator.free(frame);
         @memcpy(frame, bytes);
         try self.pending_records.append(self.allocator, frame);
+    }
+
+    fn enforceHandshakeRateLimit(self: *Connection) Error!void {
+        if (self.engine.machine.state == .connected) return;
+        const limiter = self.config.handshake_rate_limiter orelse return;
+        if (!limiter.allowAt(self.nowNs())) return error.HandshakeRateLimited;
+    }
+
+    fn nowNs(self: Connection) u64 {
+        if (self.config.now_ns) |f| return f();
+        return @as(u64, @intCast(std.time.nanoTimestamp()));
     }
 };
 
@@ -384,4 +402,45 @@ test "initChecked returns explicit config error instead of panic path" {
             .early_data = .{ .enabled = true },
         },
     }));
+}
+
+test "ingest enforces handshake rate limiter before connected state" {
+    var bucket = try rate_limit.TokenBucket.init(1, 1, 0);
+    _ = bucket.allowAt(0); // drain single burst token so next handshake event is denied.
+    const Hooks = struct {
+        fn nowNs() u64 {
+            return 0;
+        }
+    };
+
+    var conn = Connection.init(std.testing.allocator, .{
+        .session = .{ .role = .server, .suite = .tls_aes_128_gcm_sha256 },
+        .handshake_rate_limiter = &bucket,
+        .now_ns = Hooks.nowNs,
+    });
+    defer conn.deinit();
+    conn.accept(.{});
+
+    try std.testing.expectError(error.HandshakeRateLimited, conn.ingest_tls_bytes(&.{ 22, 3, 3, 0, 0 }));
+}
+
+test "ingest bypasses handshake rate limiter after connected state" {
+    var bucket = try rate_limit.TokenBucket.init(1, 1, 0);
+    _ = bucket.allowAt(0); // force limiter deny path if checked.
+    const Hooks = struct {
+        fn nowNs() u64 {
+            return 0;
+        }
+    };
+
+    var conn = Connection.init(std.testing.allocator, .{
+        .session = .{ .role = .server, .suite = .tls_aes_128_gcm_sha256 },
+        .handshake_rate_limiter = &bucket,
+        .now_ns = Hooks.nowNs,
+    });
+    defer conn.deinit();
+    conn.accept(.{});
+    conn.engine.machine.state = .connected;
+
+    try std.testing.expectError(error.IncompleteHeader, conn.ingest_tls_bytes(&.{}));
 }
