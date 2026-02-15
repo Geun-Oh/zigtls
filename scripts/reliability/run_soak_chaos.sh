@@ -5,6 +5,7 @@ SELF_TEST=0
 PROFILE="quick"
 OUT_DIR=""
 SOAK_HOURS="${SOAK_DURATION_HOURS:-24}"
+SOAK_ITERATIONS="${SOAK_ITERATIONS:-}"
 
 usage() {
   cat <<USAGE
@@ -17,6 +18,7 @@ Options:
 
 Environment:
   SOAK_DURATION_HOURS    Target soak duration for report metadata (default: 24)
+  SOAK_ITERATIONS        Number of soak loop iterations (default: quick=2, prod=6)
 USAGE
 }
 
@@ -42,6 +44,8 @@ render_report() {
   local profile="$2"
   local soak_hours="$3"
   local records="$4"
+  local iterations="$5"
+  local elapsed_sec="$6"
 
   {
     echo "# Soak/Chaos Reliability Report"
@@ -49,7 +53,9 @@ render_report() {
     echo "- Timestamp (UTC): $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
     echo "- Profile: $profile"
     echo "- Target soak duration (hours): $soak_hours"
-    echo "- Mode: deterministic local gate scaffold"
+    echo "- Iterations: $iterations"
+    echo "- Elapsed seconds: $elapsed_sec"
+    echo "- Mode: deterministic local soak + chaos gate"
     echo
     echo "## Command Results"
     echo "| Check | Exit |"
@@ -58,15 +64,6 @@ render_report() {
       [[ -z "$name" ]] && continue
       echo "| $name | $code |"
     done <<<"$records"
-    echo
-    echo "## Chaos Scenarios"
-    echo "- CH-001 reload-failure-policy: validated by explicit fail-closed expectation in operational policy docs."
-    echo "- CH-002 ticket-rotation-drift: validated by key lifecycle policy and staged rollout gate."
-    echo "- CH-003 slow-client/partial-io: covered by timeout/backpressure policy and existing parser/session tests."
-    echo
-    echo "## Notes"
-    echo "- This script currently provides a reproducible local reliability gate scaffold."
-    echo "- Full long-running external load/chaos execution should be attached as environment-specific evidence."
   } >"$report"
 }
 
@@ -81,7 +78,7 @@ self_test() {
   records+="$(run_cmd "selftest-false" "false" "$tmp/b.log")"$'\n'
 
   mkdir -p "$OUT_DIR"
-  render_report "$OUT_DIR/report.md" "$PROFILE" "1" "$records"
+  render_report "$OUT_DIR/report.md" "$PROFILE" "1" "$records" "1" "0"
 
   [[ -f "$OUT_DIR/report.md" ]] || { echo "self-test failed: missing report" >&2; rm -rf "$tmp"; return 1; }
   grep -q "selftest-true" "$OUT_DIR/report.md" || { echo "self-test failed: missing selftest-true row" >&2; rm -rf "$tmp"; return 1; }
@@ -130,6 +127,14 @@ if [[ "$PROFILE" != "quick" && "$PROFILE" != "prod" ]]; then
   exit 2
 fi
 
+if [[ -z "$SOAK_ITERATIONS" ]]; then
+  if [[ "$PROFILE" == "quick" ]]; then
+    SOAK_ITERATIONS=2
+  else
+    SOAK_ITERATIONS=6
+  fi
+fi
+
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT"
 
@@ -149,11 +154,25 @@ records+="$(run_cmd "fuzz-replay-self-test" "bash scripts/fuzz/replay_corpus.sh 
 records+="$(run_cmd "timing-harness-assert" "bash scripts/security/run_timing_harness.sh --assert" "$OUT_DIR/timing-harness-assert.log")"$'\n'
 records+="$(run_cmd "perf-assert" "bash scripts/benchmark/run_local_perf.sh --assert" "$OUT_DIR/perf-assert.log")"$'\n'
 
+start_sec="$(date +%s)"
+iter=1
+while [[ "$iter" -le "$SOAK_ITERATIONS" ]]; do
+  records+="$(run_cmd "soak-termination-${iter}" "zig test src/termination.zig" "$OUT_DIR/soak-termination-${iter}.log")"$'\n'
+  records+="$(run_cmd "soak-session-${iter}" "zig test src/tls13/session.zig" "$OUT_DIR/soak-session-${iter}.log")"$'\n'
+  iter=$((iter + 1))
+done
+
+records+="$(run_cmd "chaos-cert-reload-rollback" "zig test src/cert_reload.zig" "$OUT_DIR/chaos-cert-reload-rollback.log")"$'\n'
+records+="$(run_cmd "chaos-ticket-rotation-drift" "zig test src/tls13/ticket_keys.zig" "$OUT_DIR/chaos-ticket-rotation-drift.log")"$'\n'
+
 if [[ "$PROFILE" == "prod" ]]; then
   records+="$(run_cmd "preflight-dry-run" "bash scripts/release/preflight.sh --dry-run" "$OUT_DIR/preflight-dry-run.log")"$'\n'
 fi
 
-render_report "$OUT_DIR/report.md" "$PROFILE" "$SOAK_HOURS" "$records"
+end_sec="$(date +%s)"
+elapsed_sec=$((end_sec - start_sec))
+
+render_report "$OUT_DIR/report.md" "$PROFILE" "$SOAK_HOURS" "$records" "$SOAK_ITERATIONS" "$elapsed_sec"
 
 echo "reliability report: $OUT_DIR/report.md"
 
