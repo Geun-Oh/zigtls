@@ -1,4 +1,5 @@
 const std = @import("std");
+const metrics = @import("metrics.zig");
 const rate_limit = @import("rate_limit.zig");
 const tls13 = @import("tls13.zig");
 
@@ -36,6 +37,9 @@ pub const Connection = struct {
     accepted: bool = false,
     pending_records: std.ArrayList([]u8),
     pending_plaintext: std.ArrayList(u8),
+    telemetry: metrics.Metrics = .{},
+    handshake_started_at_ns: ?u64 = null,
+    handshake_finalized: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, config: Config) Connection {
         return .{
@@ -66,8 +70,12 @@ pub const Connection = struct {
     pub fn ingest_tls_bytes(self: *Connection, record_bytes: []const u8) Error!tls13.session.IngestResult {
         if (!self.accepted) return error.NotAccepted;
         try self.enforceHandshakeRateLimit();
+        self.observeHandshakeStartIfNeeded();
         self.emitClientHelloMetadata(record_bytes);
-        const result = try self.engine.ingestRecord(record_bytes);
+        const result = self.engine.ingestRecord(record_bytes) catch |err| {
+            self.observeHandshakeFailureIfNeeded();
+            return err;
+        };
         try self.collectActions(result);
         return result;
     }
@@ -75,6 +83,7 @@ pub const Connection = struct {
     pub fn ingest_tls_bytes_with_alert(self: *Connection, record_bytes: []const u8) Error!tls13.session.IngestWithAlertOutcome {
         if (!self.accepted) return error.NotAccepted;
         try self.enforceHandshakeRateLimit();
+        self.observeHandshakeStartIfNeeded();
         self.emitClientHelloMetadata(record_bytes);
         const out = self.engine.ingestRecordWithAlertIntent(record_bytes);
         switch (out) {
@@ -82,7 +91,11 @@ pub const Connection = struct {
                 try self.collectActions(res);
                 return .{ .ok = res };
             },
-            .fatal => return out,
+            .fatal => |f| {
+                self.telemetry.observeAlert(@intFromEnum(f.alert.description));
+                self.observeHandshakeFailureIfNeeded();
+                return out;
+            },
         }
     }
 
@@ -151,17 +164,32 @@ pub const Connection = struct {
         return self.engine.snapshotMetrics();
     }
 
+    pub fn snapshot_telemetry(self: Connection) metrics.Metrics {
+        return self.telemetry;
+    }
+
     fn collectActions(self: *Connection, result: tls13.session.IngestResult) Error!void {
         var i: usize = 0;
         while (i < result.action_count) : (i += 1) {
             switch (result.actions[i]) {
                 .send_alert => |alert| {
+                    self.telemetry.observeAlert(@intFromEnum(alert.description));
                     const frame = tls13.session.Engine.buildAlertRecord(alert);
                     try self.pushPendingRecord(frame[0..]);
                 },
+                .received_alert => |alert| {
+                    self.telemetry.observeAlert(@intFromEnum(alert.description));
+                },
                 .send_key_update => |req| {
+                    self.telemetry.observeKeyUpdate();
                     const frame = tls13.session.Engine.buildKeyUpdateRecord(req);
                     try self.pushPendingRecord(frame[0..]);
+                },
+                .key_update => {
+                    self.telemetry.observeKeyUpdate();
+                },
+                .state_changed => |state_now| {
+                    if (state_now == .connected) self.observeHandshakeSuccessIfNeeded();
                 },
                 .application_data => |data| {
                     try self.pending_plaintext.appendSlice(self.allocator, data);
@@ -206,6 +234,29 @@ pub const Connection = struct {
         if (self.engine.machine.state == .connected) return;
         const limiter = self.config.handshake_rate_limiter orelse return;
         if (!limiter.allowAt(self.nowNs())) return error.HandshakeRateLimited;
+    }
+
+    fn observeHandshakeStartIfNeeded(self: *Connection) void {
+        if (self.handshake_started_at_ns != null) return;
+        if (self.engine.machine.state == .connected) return;
+        self.handshake_started_at_ns = self.nowNs();
+        self.telemetry.observeHandshakeStart();
+    }
+
+    fn observeHandshakeSuccessIfNeeded(self: *Connection) void {
+        if (self.handshake_finalized) return;
+        const started = self.handshake_started_at_ns orelse return;
+        const now = self.nowNs();
+        self.telemetry.observeHandshakeFinished(true, now - started);
+        self.handshake_finalized = true;
+    }
+
+    fn observeHandshakeFailureIfNeeded(self: *Connection) void {
+        if (self.handshake_finalized) return;
+        const started = self.handshake_started_at_ns orelse self.nowNs();
+        const now = self.nowNs();
+        self.telemetry.observeHandshakeFinished(false, now - started);
+        self.handshake_finalized = true;
     }
 
     fn nowNs(self: Connection) u64 {
@@ -443,4 +494,39 @@ test "ingest bypasses handshake rate limiter after connected state" {
     conn.engine.machine.state = .connected;
 
     try std.testing.expectError(error.IncompleteHeader, conn.ingest_tls_bytes(&.{}));
+}
+
+test "handshake telemetry tracks start and failure on ingest error" {
+    var conn = Connection.init(std.testing.allocator, .{
+        .session = .{ .role = .server, .suite = .tls_aes_128_gcm_sha256 },
+    });
+    defer conn.deinit();
+    conn.accept(.{});
+
+    try std.testing.expectError(error.IncompleteHeader, conn.ingest_tls_bytes(&.{}));
+    const snapshot = conn.snapshot_telemetry();
+    try std.testing.expectEqual(@as(u64, 1), snapshot.handshake_started);
+    try std.testing.expectEqual(@as(u64, 1), snapshot.handshake_fail);
+}
+
+test "collect actions counts alerts and keyupdates in telemetry" {
+    var conn = Connection.init(std.testing.allocator, .{
+        .session = .{ .role = .server, .suite = .tls_aes_128_gcm_sha256 },
+    });
+    defer conn.deinit();
+    conn.accept(.{});
+
+    var res = tls13.session.IngestResult{
+        .consumed = 0,
+        .actions = undefined,
+        .action_count = 3,
+    };
+    res.actions[0] = .{ .send_alert = .{ .level = .warning, .description = .close_notify } };
+    res.actions[1] = .{ .received_alert = .{ .level = .warning, .description = .close_notify } };
+    res.actions[2] = .{ .key_update = .update_requested };
+    try conn.collectActions(res);
+
+    const snapshot = conn.snapshot_telemetry();
+    try std.testing.expectEqual(@as(u64, 2), snapshot.alert_counts[@intFromEnum(tls13.alerts.AlertDescription.close_notify)]);
+    try std.testing.expectEqual(@as(u64, 1), snapshot.keyupdate_count);
 }
