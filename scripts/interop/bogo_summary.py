@@ -47,15 +47,27 @@ def summarize(path: str) -> dict:
     category_counter = defaultdict(Counter)
     critical_failures = []
 
-    for t in tests:
-        name = t.get("name", "unknown")
-        status = t.get("result", "unknown").lower()
+    iterable = []
+    if isinstance(tests, list):
+        for t in tests:
+            if not isinstance(t, dict):
+                continue
+            iterable.append((t.get("name", "unknown"), t.get("result", "unknown")))
+    elif isinstance(tests, dict):
+        for name, meta in tests.items():
+            if isinstance(meta, dict):
+                iterable.append((name, meta.get("actual", "unknown")))
+            else:
+                iterable.append((name, "unknown"))
+
+    for name, raw_status in iterable:
+        status = str(raw_status).lower()
         suite = name.split("/")[0] if "/" in name else "misc"
         category = classify_test_category(name)
         status_counter[status] += 1
         suite_counter[suite][status] += 1
         category_counter[category][status] += 1
-        if status == "fail" and is_critical_test(name):
+        if status in ("fail", "crash", "timeout") and is_critical_test(name):
             critical_failures.append(name)
 
     return {
@@ -104,6 +116,22 @@ def self_test() -> int:
     assert evaluate_critical_gate(out, None) == 0
     assert evaluate_critical_gate(out, 1) == 0
     assert evaluate_critical_gate(out, 0) == 3
+
+    sample_v3 = {
+        "tests": {
+            "TLS13/BasicHandshake": {"actual": "PASS", "expected": "PASS", "is_unexpected": False},
+            "TLS13/HRR": {"actual": "FAIL", "expected": "PASS", "is_unexpected": True},
+            "NoDelimiterCase": {"actual": "SKIP", "expected": "PASS", "is_unexpected": True},
+        }
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(sample_v3, f)
+    out_v3 = summarize(path)
+    assert out_v3["total"] == 3
+    assert out_v3["status"].get("pass") == 1
+    assert out_v3["status"].get("fail") == 1
+    assert out_v3["status"].get("skip") == 1
+    assert out_v3["critical_failure_count"] == 1
     return 0
 
 

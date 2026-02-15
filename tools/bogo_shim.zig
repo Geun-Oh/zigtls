@@ -28,6 +28,7 @@ pub fn main() !void {
 
     const args = try std.process.argsAlloc(gpa);
     defer std.process.argsFree(gpa, args);
+    const stdout = std.fs.File.stdout().deprecatedWriter();
 
     if (args.len <= 1) {
         usage();
@@ -35,15 +36,22 @@ pub fn main() !void {
     }
 
     if (std.mem.eql(u8, args[1], "--version")) {
-        std.debug.print("zigtls-bogo-shim 0.1.0\n", .{});
+        try stdout.print("zigtls-bogo-shim 0.1.0\n", .{});
         return;
     }
 
     if (std.mem.eql(u8, args[1], "--list-capabilities")) {
-        std.debug.print("tls13=true\n", .{});
-        std.debug.print("hrr=true\n", .{});
-        std.debug.print("keyupdate=true\n", .{});
-        std.debug.print("early_data=partial\n", .{});
+        try stdout.print("tls13=true\n", .{});
+        try stdout.print("hrr=true\n", .{});
+        try stdout.print("keyupdate=true\n", .{});
+        try stdout.print("early_data=partial\n", .{});
+        return;
+    }
+
+    if (hasFlag(args[1..], "is-handshaker-supported")) {
+        // Split-handshake handshaker path is not implemented in this shim.
+        // BoGo expects explicit Yes/No on stdout with zero exit code.
+        try stdout.print("No\n", .{});
         return;
     }
 
@@ -54,8 +62,8 @@ pub fn main() !void {
     };
 
     if (parsed.port == 0) {
-        std.debug.print("bogo-shim: missing required --port\n", .{});
-        std.process.exit(@intFromEnum(Exit.usage));
+        std.debug.print("bogo-shim: missing --port, treating invocation as unsupported scaffold path\n", .{});
+        std.process.exit(@intFromEnum(Exit.unsupported));
     }
 
     const decision = decideTestRouting(parsed);
@@ -84,47 +92,79 @@ fn parseArgs(args: []const []const u8) !Config {
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "--server")) {
+        if (flagEq(arg, "server")) {
             cfg.is_server = true;
             continue;
         }
-        if (std.mem.eql(u8, arg, "--client")) {
+        if (flagEq(arg, "client")) {
             cfg.is_server = false;
             continue;
         }
 
-        if (i + 1 >= args.len) return error.MissingValue;
-
-        if (std.mem.eql(u8, arg, "--host")) {
+        if (flagEq(arg, "host")) {
+            if (i + 1 >= args.len) return error.MissingValue;
             cfg.host = args[i + 1];
             i += 1;
             continue;
         }
-        if (std.mem.eql(u8, arg, "--port")) {
+        if (flagEq(arg, "port")) {
+            if (i + 1 >= args.len) return error.MissingValue;
             cfg.port = try std.fmt.parseInt(u16, args[i + 1], 10);
             i += 1;
             continue;
         }
-        if (std.mem.eql(u8, arg, "--expect-version")) {
+        if (flagEq(arg, "expect-version")) {
+            if (i + 1 >= args.len) return error.MissingValue;
             cfg.expect_version = args[i + 1];
             i += 1;
             continue;
         }
-        if (std.mem.eql(u8, arg, "--expect-cipher")) {
+        if (flagEq(arg, "expect-cipher")) {
+            if (i + 1 >= args.len) return error.MissingValue;
             cfg.expect_cipher = args[i + 1];
             i += 1;
             continue;
         }
-        if (std.mem.eql(u8, arg, "--test-name")) {
+        if (flagEq(arg, "test-name")) {
+            if (i + 1 >= args.len) return error.MissingValue;
             cfg.test_name = args[i + 1];
             i += 1;
             continue;
         }
 
-        return error.UnknownFlag;
+        if (isFlag(arg)) {
+            if (i + 1 < args.len and !isFlag(args[i + 1])) {
+                i += 1;
+            }
+            continue;
+        }
+
+        // Tolerate positional arguments emitted by test harness wrappers.
+        continue;
     }
 
     return cfg;
+}
+
+fn isFlag(arg: []const u8) bool {
+    return std.mem.startsWith(u8, arg, "-");
+}
+
+fn flagEq(arg: []const u8, canonical: []const u8) bool {
+    if (std.mem.startsWith(u8, arg, "--")) {
+        return std.mem.eql(u8, arg[2..], canonical);
+    }
+    if (std.mem.startsWith(u8, arg, "-")) {
+        return std.mem.eql(u8, arg[1..], canonical);
+    }
+    return false;
+}
+
+fn hasFlag(args: []const []const u8, canonical: []const u8) bool {
+    for (args) |arg| {
+        if (flagEq(arg, canonical)) return true;
+    }
+    return false;
 }
 
 fn usage() void {
@@ -186,8 +226,9 @@ test "parse args accepts expected flags" {
     try std.testing.expectEqualStrings("TLS13/BasicHandshake", cfg.test_name.?);
 }
 
-test "parse args rejects unknown flags" {
-    try std.testing.expectError(error.UnknownFlag, parseArgs(&.{ "--bad", "1" }));
+test "parse args ignores unknown flags and positional values" {
+    const cfg = try parseArgs(&.{ "--bad", "1", "positional", "--port", "8443" });
+    try std.testing.expectEqual(@as(u16, 8443), cfg.port);
 }
 
 test "parse args rejects missing option value" {

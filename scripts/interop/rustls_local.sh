@@ -34,15 +34,38 @@ fi
 
 openssl req -x509 -newkey rsa:2048 -nodes \
   -subj "/CN=localhost" \
+  -addext "basicConstraints=critical,CA:FALSE" \
+  -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
+  -addext "extendedKeyUsage=serverAuth" \
+  -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" \
   -keyout "$KEY" -out "$CERT" -days 1 >/dev/null 2>&1
 
-"$RUSTLS_SERVER" --cert "$CERT" --key "$KEY" --port 8444 >/dev/null 2>&1 &
+server_uses_modern_cli=0
+if "$RUSTLS_SERVER" --help 2>/dev/null | grep -q -- "--certs"; then
+  server_uses_modern_cli=1
+fi
+
+if [[ "$server_uses_modern_cli" -eq 1 ]]; then
+  "$RUSTLS_SERVER" --certs "$CERT" --key "$KEY" --port 8444 http >/dev/null 2>&1 &
+else
+  "$RUSTLS_SERVER" --cert "$CERT" --key "$KEY" --port 8444 >/dev/null 2>&1 &
+fi
 SERVER_PID=$!
 
 sleep 1
+client_uses_modern_cli=0
+if "$RUSTLS_CLIENT" --help 2>/dev/null | grep -q -- "Usage: tlsclient-mio"; then
+  client_uses_modern_cli=1
+fi
+
 set +e
-"$RUSTLS_CLIENT" --cafile "$CERT" --hostname localhost --port 8444 127.0.0.1 >/dev/null 2>&1
-STATUS=$?
+if [[ "$client_uses_modern_cli" -eq 1 ]]; then
+  "$RUSTLS_CLIENT" --http --cafile "$CERT" --port 8444 localhost >/dev/null 2>&1
+  STATUS=$?
+else
+  "$RUSTLS_CLIENT" --cafile "$CERT" --hostname localhost --port 8444 127.0.0.1 >/dev/null 2>&1
+  STATUS=$?
+fi
 set -e
 
 kill "$SERVER_PID" >/dev/null 2>&1 || true

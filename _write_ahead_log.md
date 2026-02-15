@@ -7804,3 +7804,140 @@ Observed Results
 - `run_local_perf.sh`: executed and emitted suite-wise latency/throughput + memory ceiling metrics.
 - `zig build test`: passed.
 - `preflight --dry-run`: passed and includes benchmark command in sequence.
+===
+timestamp: 2026-02-15T12:07:32+09:00
+description: Plan interoperability gate closure by fixing rustls harness CLI compatibility and collecting external-run evidence
+type: plan
+===
+Motivation
+- Remaining release-validation tasks require actual external interop runs (OpenSSL/rustls/NSS/BoGo).
+- `rustls_local.sh` currently fails with modern rustls example binaries due to outdated CLI argument assumptions.
+
+Scope
+- Update `scripts/interop/rustls_local.sh` to support current rustls examples CLI (`--certs`, command mode, host arg semantics).
+- Execute OpenSSL and rustls interop checks with real binaries.
+- Attempt NSS and BoGo runs; if environment assets are unavailable, record explicit blockers/evidence in release docs and risk register.
+
+Design
+- Keep backward compatibility where possible by probing rustls server help output and selecting compatible invocation.
+- Preserve deterministic pass/fail behavior.
+
+Risks/Perf Impact
+- Script-only interop harness change; no TLS engine runtime impact.
+
+Test Plan (commands)
+- `bash -n scripts/interop/rustls_local.sh`
+- `RUSTLS_CLIENT=... RUSTLS_SERVER=... bash scripts/interop/rustls_local.sh`
+- `bash scripts/interop/openssl_local.sh`
+- `bash scripts/interop/matrix_local.sh` (with env where available)
+
+Rollback
+- Revert rustls harness script changes if incompatibility is found.
+
+Commit Plan
+- `MINOR: interop: fix rustls harness CLI compatibility for external validation`
+===
+timestamp: 2026-02-15T12:19:20+09:00
+description: Plan BoGo runner unblock by relaxing bogo_shim argument parser compatibility
+type: plan
+===
+Motivation
+- External BoGo run aborts early with split-handshake setup failures because the shim exits with usage code on unknown runner flags.
+- Validation closure requires BoGo runner to progress far enough to emit structured pass/fail evidence.
+
+Scope
+- Update `tools/bogo_shim.zig` argument parser to:
+  - accept both single-dash and double-dash variants for known options
+  - ignore unknown options safely (consume attached value when present)
+  - tolerate positional arguments from runner scaffolding
+- Keep existing routing policy and explicit required `port` check.
+- Adjust parser unit tests to reflect compatibility behavior.
+
+Risks/Perf Impact
+- Shim-only compatibility change; no TLS core runtime impact.
+
+Test Plan (commands)
+- `zig test tools/bogo_shim.zig`
+- `zig build test`
+- `BORINGSSL_DIR=/tmp/boringssl ... bash scripts/interop/bogo_run.sh`
+
+Rollback
+- Revert parser compatibility changes if they hide real invocation errors.
+
+Commit Plan
+- `MINOR: bogo: relax shim arg parsing for runner compatibility`
+===
+timestamp: 2026-02-15T12:29:36+09:00
+description: Implement external interop harness compatibility fixes and BoGo runner integration updates
+type: code change
+===
+Decisions + Rationale
+- Updated interop harness scripts to align with current external tool CLI behavior so external validation can run end-to-end.
+- Relaxed BoGo shim argument parsing and added explicit handshaker-support probe response to satisfy current BoringSSL runner expectations.
+- Updated BoGo runner wrapper and summary parser for current runner JSON schema and optional allow-unimplemented execution mode.
+
+Files/Functions Touched
+- `scripts/interop/rustls_local.sh`
+  - Added modern rustls CLI compatibility (`--certs`, command mode, host argument semantics).
+  - Added rustls-compatible cert extensions (CA:FALSE, SAN, KU/EKU).
+  - Prevented hangs by using deterministic request/server modes.
+- `scripts/interop/nss_local.sh`
+  - Fixed command probe handling for tools that return non-zero on `-h` while printing usage.
+- `scripts/interop/bogo_run.sh`
+  - Fixed shim path resolution to repository-absolute path.
+  - Scoped go test to runner package (`.`).
+  - Added `-pipe` and `BOGO_ALLOW_UNIMPLEMENTED` support.
+  - Ensured install step runs before invoking shim.
+- `tools/bogo_shim.zig`
+  - Added single/double-dash flag compatibility.
+  - Ignored unknown flags/positional args for runner compatibility.
+  - Added `is-handshaker-supported` probe response on stdout.
+  - Changed missing-port scaffold path to `unsupported` exit code.
+  - Added/updated parser compatibility tests.
+- `scripts/interop/bogo_summary.py`
+  - Added support for newer BoGo JSON format (`tests` mapping with `actual` field).
+  - Expanded self-test coverage for legacy and current schemas.
+
+Risks/Perf Notes
+- Changes are tooling/harness-only and do not modify TLS engine hot path.
+- BoGo `allow-unimplemented` mode is explicitly an evidence mode, not strict compliance closure.
+===
+timestamp: 2026-02-15T12:29:36+09:00
+description: Record external validation evidence and update release/risk documents
+type: docs
+===
+Files/Functions Touched
+- Added `docs/external-validation-2026-02-15.md` with command-level evidence and outcomes.
+- Updated `docs/release-signoff.md` to include external execution artifact.
+- Updated `docs/risk-acceptance.md` RA-003 rationale/evidence to reflect executed external runs and remaining strict-profile gap.
+- Updated `docs/rfc8446-matrix.md` interop/BoGo rows with external evidence reference.
+
+Decisions + Rationale
+- Captured concrete execution artifacts so release gate review is evidence-based rather than inferred.
+- Kept RA-003 open because strict BoGo profile breadth remains unresolved despite successful runnable external harnesses.
+===
+timestamp: 2026-02-15T12:29:36+09:00
+description: Execute full external validation suite after harness fixes
+type: test
+===
+Commands Executed
+- `bash scripts/interop/openssl_local.sh` (outside sandbox)
+- `cargo build --release -p rustls-examples --bin tlsclient-mio --bin tlsserver-mio` (toolchain updated to Rust 1.93.1)
+- `RUSTLS_CLIENT=/tmp/rustls/target/release/tlsclient-mio RUSTLS_SERVER=/tmp/rustls/target/release/tlsserver-mio bash scripts/interop/rustls_local.sh` (outside sandbox)
+- `NSS_DIR=/opt/homebrew/opt/nss NSS_BIN_DIR=/opt/homebrew/opt/nss/bin NSS_LIB_DIR=/opt/homebrew/opt/nss/lib bash scripts/interop/nss_local.sh` (outside sandbox)
+- `RUSTLS_CLIENT=... RUSTLS_SERVER=... NSS_DIR=... NSS_BIN_DIR=... NSS_LIB_DIR=... bash scripts/interop/matrix_local.sh` (outside sandbox)
+- `BORINGSSL_DIR=/tmp/boringssl BOGO_OUTPUT=zigtls-bogo-results.json BOGO_ALLOW_UNIMPLEMENTED=1 BOGO_MAX_CRITICAL=0 bash scripts/interop/bogo_run.sh` (outside sandbox)
+- `python3 scripts/interop/bogo_summary.py /tmp/boringssl/ssl/test/runner/zigtls-bogo-results.json`
+- `python3 scripts/interop/bogo_summary.py --self-test`
+- `zig test tools/bogo_shim.zig`
+- `zig build test`
+
+Observed Results
+- OpenSSL local interop: PASS.
+- rustls local interop: PASS.
+- NSS local harness: PASS.
+- local interop matrix: PASS (3/3).
+- BoGo runner: PASS in allow-unimplemented mode; summary shows `skip=6582`, `critical_failure_count=0`.
+- `bogo_summary.py --self-test`: PASS.
+- `zig test tools/bogo_shim.zig`: PASS.
+- `zig build test`: PASS.

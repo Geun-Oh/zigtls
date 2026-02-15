@@ -62,13 +62,27 @@ fi
 
 # Sanity probe: verify NSS binaries can start and report usage/version.
 # Full handshake wiring is intentionally deferred to target-environment integration.
-"$SELFSERV" -h >/dev/null 2>&1 || {
-  echo "selfserv command probe failed" >&2
-  exit 1
+probe_usage() {
+  local tool="$1"
+  local name="$2"
+  local out=""
+  local code=0
+  set +e
+  out="$("$tool" -h 2>&1)"
+  code=$?
+  set -e
+
+  if [[ "$code" -eq 0 ]]; then
+    return 0
+  fi
+  if grep -qi "usage:" <<<"$out"; then
+    return 0
+  fi
+  echo "$name command probe failed (exit=$code)" >&2
+  return 1
 }
-"$TSTCLNT" -h >/dev/null 2>&1 || {
-  echo "tstclnt command probe failed" >&2
-  exit 1
-}
+
+probe_usage "$SELFSERV" "selfserv"
+probe_usage "$TSTCLNT" "tstclnt"
 
 echo "nss local harness check passed"
