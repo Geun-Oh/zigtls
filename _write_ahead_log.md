@@ -6802,3 +6802,64 @@ Observed Results
 - `matrix_local.sh --self-test`: `self-test: ok`.
 - `bogo_summary.py --self-test`: `self-test: ok`.
 - `zig build test`: passed.
+===
+timestamp: 2026-02-15T14:50:00+09:00
+description: Plan certificate DNS trailing-dot normalization regression coverage
+type: plan
+===
+Motivation
+- Certificate name matching code normalizes trailing dots for hostname and constraint comparison, but explicit regression tests for those branches are limited.
+
+Scope
+- Add server-name validation regression for trailing-dot normalization with wildcard SAN.
+- Add name-constraints regression for dot-prefixed constraint with trailing-dot hostname.
+- Update RFC matrix CERT-001 coverage wording to mention trailing-dot normalization branch.
+
+Design
+- Reuse existing `validateServerName` and `validateServerChain` paths.
+- Construct constrained CA chain with dot-prefixed `permitted_dns_suffixes` and leaf DNS ending with trailing dot.
+
+Risks/Perf Impact
+- Test/doc-only expansion; no runtime behavior change.
+
+Test Plan (commands)
+- `zig test src/tls13/certificate_validation.zig`
+- `zig build test`
+
+Rollback
+- Remove added trailing-dot normalization regressions and matrix wording update.
+
+Commit Plan
+- `MINOR: cert: add trailing-dot dns normalization regressions`
+===
+timestamp: 2026-02-15T14:53:00+09:00
+description: Add certificate DNS trailing-dot normalization regressions for wildcard and constraints
+type: code change
+===
+Decisions + Rationale
+- Added explicit regressions to pin trailing-dot normalization behavior in hostname wildcard matching and name-constraints suffix matching.
+- Added constraint case for dot-prefixed permitted suffix to ensure normalization/constraint handling remains interoperable with common CA encodings.
+
+Files/Functions Touched
+- `src/tls13/certificate_validation.zig`
+  - Added tests:
+    - `server name wildcard matches with trailing-dot normalization`
+    - `name constraints allow dot-prefixed suffix with trailing-dot hostname`
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-CERT-001` coverage wording for trailing-dot normalization and dot-prefixed constraint handling.
+
+Risks/Perf Notes
+- Test/doc-only expansion; no runtime behavior changes.
+===
+timestamp: 2026-02-15T14:54:00+09:00
+description: Verify certificate trailing-dot normalization regression additions
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/certificate_validation.zig`
+- `zig test src/tls13/certificate_validation.zig`
+- `zig build test`
+
+Observed Results
+- `certificate_validation.zig`: 40/40 tests passed.
+- `zig build test`: passed.

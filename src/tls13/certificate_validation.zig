@@ -227,6 +227,10 @@ test "server name wildcard matches single label" {
     try validateServerName("api.example.com", "*.example.com");
 }
 
+test "server name wildcard matches with trailing-dot normalization" {
+    try validateServerName("api.example.com.", "*.example.com.");
+}
+
 test "server name wildcard does not match apex" {
     try std.testing.expectError(error.HostnameMismatch, validateServerName("example.com", "*.example.com"));
 }
@@ -361,6 +365,25 @@ test "name constraints allow permitted dns subtree" {
             .is_ca = true,
             .key_usage = .{ .key_cert_sign = true },
             .permitted_dns_suffixes = &.{"example.com"},
+        },
+    };
+
+    try validateServerChain(&chain);
+}
+
+test "name constraints allow dot-prefixed suffix with trailing-dot hostname" {
+    const chain = [_]CertificateView{
+        .{
+            .dns_name = "api.example.com.",
+            .is_ca = false,
+            .key_usage = .{ .digital_signature = true },
+            .ext_key_usages = &.{.server_auth},
+        },
+        .{
+            .dns_name = "Constrained CA",
+            .is_ca = true,
+            .key_usage = .{ .key_cert_sign = true },
+            .permitted_dns_suffixes = &.{".example.com"},
         },
     };
 
