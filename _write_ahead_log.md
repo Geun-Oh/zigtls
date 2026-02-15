@@ -7227,3 +7227,61 @@ Commands Executed
 Observed Results
 - `bogo_shim.zig`: 9/9 tests passed.
 - `zig build test`: passed.
+===
+timestamp: 2026-02-15T16:40:00+09:00
+description: Plan name-constraints excluded-suffix normalization regression coverage
+type: plan
+===
+Motivation
+- Certificate constraints tests cover excluded suffix behavior and dot-prefixed permitted suffix normalization, but do not explicitly pin dot-prefixed excluded suffix handling with trailing-dot hostnames.
+
+Scope
+- Add regression test asserting excluded `.dev.example.com` blocks leaf DNS `dev.example.com.`.
+- Update RFC matrix CERT-001 coverage wording to mention excluded dot-prefix normalization branch.
+
+Design
+- Reuse `validateServerChain` with constrained intermediate CA carrying `excluded_dns_suffixes = {".dev.example.com"}`.
+- Leaf keeps valid server usage fields and trailing-dot DNS value.
+
+Risks/Perf Impact
+- Test/doc-only expansion; no runtime behavior changes.
+
+Test Plan (commands)
+- `zig test src/tls13/certificate_validation.zig`
+- `zig build test`
+
+Rollback
+- Remove excluded-suffix normalization regression and matrix wording update.
+
+Commit Plan
+- `MINOR: cert: add excluded-suffix normalization regression`
+===
+timestamp: 2026-02-15T16:43:00+09:00
+description: Add name-constraints regression for dot-prefixed excluded suffix normalization
+type: code change
+===
+Decisions + Rationale
+- Added explicit excluded-constraint normalization regression covering dot-prefixed excluded suffix with trailing-dot leaf hostname.
+- Complements existing permitted-suffix normalization test to cover both allow and deny constraint branches under normalization.
+
+Files/Functions Touched
+- `src/tls13/certificate_validation.zig`
+  - Added test: `name constraints reject dot-prefixed excluded suffix with trailing-dot hostname`.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-CERT-001` coverage wording to mention dot-prefixed permitted/excluded suffix handling.
+
+Risks/Perf Notes
+- Test/doc-only expansion; no runtime behavior changes.
+===
+timestamp: 2026-02-15T16:44:00+09:00
+description: Verify excluded-suffix normalization regression addition
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/certificate_validation.zig`
+- `zig test src/tls13/certificate_validation.zig`
+- `zig build test`
+
+Observed Results
+- `certificate_validation.zig`: 43/43 tests passed.
+- `zig build test`: passed.

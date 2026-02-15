@@ -429,6 +429,26 @@ test "name constraints reject excluded dns subtree" {
     try std.testing.expectError(error.NameConstraintsViolation, validateServerChain(&chain));
 }
 
+test "name constraints reject dot-prefixed excluded suffix with trailing-dot hostname" {
+    const chain = [_]CertificateView{
+        .{
+            .dns_name = "dev.example.com.",
+            .is_ca = false,
+            .key_usage = .{ .digital_signature = true },
+            .ext_key_usages = &.{.server_auth},
+        },
+        .{
+            .dns_name = "Constrained CA",
+            .is_ca = true,
+            .key_usage = .{ .key_cert_sign = true },
+            .permitted_dns_suffixes = &.{"example.com"},
+            .excluded_dns_suffixes = &.{".dev.example.com"},
+        },
+    };
+
+    try std.testing.expectError(error.NameConstraintsViolation, validateServerChain(&chain));
+}
+
 test "name constraints require match across constrained issuers" {
     const chain = [_]CertificateView{
         .{
