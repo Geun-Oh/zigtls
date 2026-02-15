@@ -7532,3 +7532,60 @@ Commands Executed
 Observed Results
 - `zig build test`: passed.
 - `preflight --dry-run`: printed full command sequence and completed with "all checks passed".
+===
+timestamp: 2026-02-15T17:42:00+09:00
+description: Plan incident-response and rollback rehearsal evidence closure
+type: plan
+===
+Motivation
+- Security hardening checklist still marks incident response/rollback rehearsal as partial in release-blocking criteria.
+- Release readiness requires explicit rehearsal evidence artifact.
+
+Scope
+- Add `docs/incident-rehearsal.md` with rehearsal scenario, execution steps, outcomes, and follow-up actions.
+- Update `docs/security-hardening-checklist.md` release-blocking criterion from partial to done with reference.
+- Update `docs/release-runbook.md` rollback section to reference rehearsal artifact.
+
+Design
+- Keep evidence scoped to repository-runbook procedures and deterministic commands already available.
+- Record timestamped rehearsal narrative and outcome criteria.
+
+Risks/Perf Impact
+- Documentation-only change; no runtime impact.
+
+Test Plan (commands)
+- `zig build test`
+
+Rollback
+- Remove rehearsal artifact and checklist/runbook references.
+
+Commit Plan
+- `MINOR: docs: add incident rehearsal evidence and close checklist item`
+===
+timestamp: 2026-02-15T17:45:00+09:00
+description: Add incident-response rehearsal evidence and close final checklist blocker
+type: docs
+===
+Decisions + Rationale
+- Added explicit incident/rollback rehearsal artifact to satisfy release-blocking checklist evidence requirement.
+- Updated checklist and runbook references so rehearsal evidence is part of release process maintenance.
+
+Files/Functions Touched
+- Added:
+  - `docs/incident-rehearsal.md`
+- Updated:
+  - `docs/security-hardening-checklist.md`
+  - `docs/release-runbook.md`
+
+Risks/Perf Notes
+- Documentation-only changes; no runtime behavior changes.
+===
+timestamp: 2026-02-15T17:46:00+09:00
+description: Verify incident rehearsal documentation updates against default build gate
+type: test
+===
+Commands Executed
+- `zig build test`
+
+Observed Results
+- `zig build test`: passed.
