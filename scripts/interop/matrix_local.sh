@@ -71,8 +71,16 @@ S
 exit 7
 S
   chmod +x "$tmp/ok.sh" "$tmp/fail.sh"
+  cat <<'S' >"$tmp/nonexec.sh"
+#!/usr/bin/env bash
+exit 0
+S
 
   set +e
+  run_target "missing" "$tmp/missing.sh" >/dev/null
+  local code_direct_missing=$?
+  run_target "nonexec" "$tmp/nonexec.sh" >/dev/null
+  local code_direct_nonexec=$?
   run_matrix "$tmp/ok.sh" "$tmp/fail.sh" "$tmp/ok.sh" >/dev/null
   local code_fail=$?
   run_matrix "$tmp/ok.sh" "$tmp/missing.sh" "$tmp/ok.sh" >/dev/null
@@ -82,6 +90,16 @@ S
 
   if [[ "$code_fail" -ne 1 ]]; then
     echo "self-test failed: expected matrix failure exit code 1 for failing target"
+    return 1
+  fi
+
+  if [[ "$code_direct_missing" -ne 2 ]]; then
+    echo "self-test failed: expected run_target missing branch exit code 2"
+    return 1
+  fi
+
+  if [[ "$code_direct_nonexec" -ne 2 ]]; then
+    echo "self-test failed: expected run_target non-executable branch exit code 2"
     return 1
   fi
 

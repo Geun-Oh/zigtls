@@ -7406,3 +7406,63 @@ Commands Executed
 Observed Results
 - `bogo_summary.py --self-test`: `self-test: ok`.
 - `zig build test`: passed.
+===
+timestamp: 2026-02-15T17:22:00+09:00
+description: Plan direct run_target missing/non-executable branch assertions in interop self-test
+type: plan
+===
+Motivation
+- Matrix self-test currently verifies failure aggregation via `run_matrix`, but does not directly pin `run_target` return code semantics for missing/non-executable scripts.
+
+Scope
+- Extend `scripts/interop/matrix_local.sh` self-test to assert `run_target` returns exit code `2` for:
+  - missing script path
+  - non-executable file path
+- Keep existing `run_matrix` branch assertions unchanged.
+
+Design
+- Add a non-executable temp file in self_test.
+- Invoke `run_target` under `set +e` and capture exit codes.
+- Add explicit assertions/messages for both direct branch checks.
+
+Risks/Perf Impact
+- Script self-test-only expansion; no runtime harness behavior changes.
+
+Test Plan (commands)
+- `bash scripts/interop/matrix_local.sh --self-test`
+- `zig build test`
+
+Rollback
+- Remove direct `run_target` branch assertions from self-test.
+
+Commit Plan
+- `MINOR: interop: add direct run_target branch assertions`
+===
+timestamp: 2026-02-15T17:25:00+09:00
+description: Extend interop matrix self-test with direct run_target missing/non-executable assertions
+type: code change
+===
+Decisions + Rationale
+- Added direct `run_target` branch checks in self-test to pin return-code semantics for missing and non-executable scripts.
+- Kept matrix-level aggregation assertions to cover both branch-level and aggregate behavior.
+
+Files/Functions Touched
+- `scripts/interop/matrix_local.sh`
+  - `self_test`: added direct `run_target` checks and assertions for missing/non-executable return code `2`.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-INTOP-001` coverage wording to include direct `run_target` branch assertions.
+
+Risks/Perf Notes
+- Self-test/doc-only expansion; no runtime harness behavior changes.
+===
+timestamp: 2026-02-15T17:26:00+09:00
+description: Verify direct run_target branch self-test additions
+type: test
+===
+Commands Executed
+- `bash scripts/interop/matrix_local.sh --self-test`
+- `zig build test`
+
+Observed Results
+- `matrix_local.sh --self-test`: `self-test: ok`.
+- `zig build test`: passed.
