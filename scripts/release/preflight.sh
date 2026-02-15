@@ -188,6 +188,9 @@ run_cmd "bash scripts/benchmark/run_local_perf.sh --assert"
 run_cmd "bash scripts/security/run_timing_harness.sh --assert"
 
 if [[ "$STRICT_INTEROP" -eq 1 ]]; then
+  if [[ "$SYNC_EVIDENCE_DOCS" -eq 0 ]]; then
+    echo "[preflight] warning: --sync-evidence-docs is disabled; strict artifact checks may fail on stale evidence references." >&2
+  fi
   run_cmd "bash scripts/interop/matrix_local.sh --strict"
   run_cmd "bash scripts/interop/generate_evidence.sh"
   if [[ "$SYNC_EVIDENCE_DOCS" -eq 1 ]]; then
