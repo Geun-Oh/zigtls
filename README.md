@@ -143,7 +143,7 @@ Contributions are welcome.
 4. For behavior changes, include tests and update relevant docs.
 5. Use patch-style commit messages (`MINOR|MEDIUM|MAJOR`, optionally `BUG/`).
 
-Please also follow project agent/release instructions in `AGENTS.md` when preparing release-sensitive changes.
+For release-sensitive changes, follow `docs/release-runbook.md` and `docs/release-signoff.md`.
 
 ## License
 
