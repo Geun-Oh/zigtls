@@ -67,6 +67,17 @@ pub fn main() !void {
 
     if (hasFlag(args[1..], "is-handshaker-supported")) {
         // BoGo expects explicit Yes/No on stdout with zero exit code.
+        if (hasFlag(args[1..], "reject-alpn") or
+            hasFlag(args[1..], "select-alpn") or
+            hasFlag(args[1..], "select-empty-alpn"))
+        {
+            try stdout.writeAll("No\n");
+            return;
+        }
+        if (queryDelegateHandshakerSupport(gpa, args[1..])) |supported| {
+            try stdout.writeAll(if (supported) "Yes\n" else "No\n");
+            return;
+        }
         const parsed = parseArgs(args[1..]) catch {
             try stdout.print("No\n", .{});
             return;
@@ -404,6 +415,47 @@ fn resolveRuntimeRole(cfg: Config) bool {
 
 fn shouldUseStdTlsClient(cfg: Config, is_server: bool) bool {
     return !is_server and cfg.test_name == null and cfg.trust_cert != null and cfg.shim_id != null;
+}
+
+fn queryDelegateHandshakerSupport(allocator: std.mem.Allocator, passthrough_args: []const []const u8) ?bool {
+    const delegate_path = std.posix.getenv("BOGO_BSSL_SHIM_PATH") orelse "/tmp/boringssl/build/ssl/test/bssl_shim";
+    var probe = std.fs.openFileAbsolute(delegate_path, .{}) catch return null;
+    probe.close();
+
+    var argv = std.ArrayList([]const u8).empty;
+    defer argv.deinit(allocator);
+    argv.append(allocator, delegate_path) catch return null;
+    argv.appendSlice(allocator, passthrough_args) catch return null;
+
+    var child = std.process.Child.init(argv.items, allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe;
+    child.spawn() catch return null;
+    defer if (child.stdout) |*s| s.close();
+    defer if (child.stderr) |*s| s.close();
+
+    var out: [512]u8 = undefined;
+    var n: usize = 0;
+    if (child.stdout) |*s| {
+        n += s.readAll(out[n..]) catch 0;
+    }
+    if (child.stderr) |*s| {
+        n += s.readAll(out[n..]) catch 0;
+    }
+    const term = child.wait() catch return null;
+    switch (term) {
+        .Exited => |code| if (code != 0) return null,
+        else => return null,
+    }
+
+    var it = std.mem.tokenizeAny(u8, out[0..n], " \r\n\t");
+    var decision: ?bool = null;
+    while (it.next()) |tok| {
+        if (std.mem.eql(u8, tok, "Yes")) decision = true;
+        if (std.mem.eql(u8, tok, "No")) decision = false;
+    }
+    return decision;
 }
 
 fn shouldAttemptDelegate(args: []const []const u8, cfg: Config, is_server: bool) bool {
