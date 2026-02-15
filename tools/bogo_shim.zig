@@ -250,3 +250,12 @@ test "routing rejects unrelated test name even with valid version and cipher" {
     };
     try std.testing.expectEqual(RoutingDecision.unsupported, decideTestRouting(cfg));
 }
+
+test "routing rejects missing test name even with valid version and cipher" {
+    const cfg = Config{
+        .port = 443,
+        .expect_version = "TLS1.3",
+        .expect_cipher = "TLS_AES_128_GCM_SHA256",
+    };
+    try std.testing.expectEqual(RoutingDecision.unsupported, decideTestRouting(cfg));
+}

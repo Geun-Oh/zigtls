@@ -7172,3 +7172,58 @@ Commands Executed
 Observed Results
 - `bogo_shim.zig`: 8/8 tests passed.
 - `zig build test`: passed.
+===
+timestamp: 2026-02-15T16:20:00+09:00
+description: Plan BoGo shim routing regression for missing test-name branch
+type: plan
+===
+Motivation
+- BoGo shim routing logic requires test-name hints (`TLS13`/`Basic`) for pass decisions, but explicit regression for the missing test-name branch is absent.
+
+Scope
+- Add routing regression asserting `unsupported` when version/cipher are valid but `test_name` is unset.
+- Keep matrix wording unchanged (already references routing negative branches broadly).
+
+Design
+- Add focused `decideTestRouting` unit test with `expect_version` and `expect_cipher` set, `test_name = null`.
+
+Risks/Perf Impact
+- Test-only expansion; no runtime behavior changes.
+
+Test Plan (commands)
+- `zig test tools/bogo_shim.zig`
+- `zig build test`
+
+Rollback
+- Remove added missing-test-name routing regression.
+
+Commit Plan
+- `MINOR: bogo: add missing test-name routing regression`
+===
+timestamp: 2026-02-15T16:22:00+09:00
+description: Add BoGo shim routing regression for missing test-name branch
+type: code change
+===
+Decisions + Rationale
+- Added explicit routing regression for unset `test_name` with otherwise valid TLS1.3 version/cipher inputs.
+- Pinned current conservative routing policy to avoid accidental broadening of pass decisions.
+
+Files/Functions Touched
+- `tools/bogo_shim.zig`
+  - Added test: `routing rejects missing test name even with valid version and cipher`.
+
+Risks/Perf Notes
+- Test-only expansion; no runtime behavior changes.
+===
+timestamp: 2026-02-15T16:23:00+09:00
+description: Verify BoGo shim missing test-name routing regression addition
+type: test
+===
+Commands Executed
+- `zig fmt tools/bogo_shim.zig`
+- `zig test tools/bogo_shim.zig`
+- `zig build test`
+
+Observed Results
+- `bogo_shim.zig`: 9/9 tests passed.
+- `zig build test`: passed.
