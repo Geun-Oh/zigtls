@@ -122,6 +122,7 @@ configure_strict_env_defaults
 assert_strict_env
 
 if [[ "$MODE" == "all" || "$MODE" == "basic" ]]; then
+  run_cmd "bash scripts/release/check_write_ahead_log.sh"
   run_cmd "zig build test"
   run_cmd "zig test tools/bogo_shim.zig"
   run_cmd "python3 scripts/interop/bogo_summary.py --self-test"
