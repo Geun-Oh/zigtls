@@ -179,6 +179,34 @@ test "future this_update is rejected unless soft-fail policy allows" {
     try std.testing.expectEqual(ValidationResult.soft_fail, soft);
 }
 
+test "clock-skew boundaries are accepted for produced_at and this_update" {
+    const now: i64 = 1_700_000_000;
+
+    const produced_at_boundary = try checkStapled(.{
+        .status = .good,
+        .produced_at = now + max_clock_skew_sec,
+        .this_update = now,
+        .next_update = now + 3600,
+    }, now, false);
+    try std.testing.expectEqual(ValidationResult.accepted, produced_at_boundary);
+
+    const produced_before_this_update_boundary = try checkStapled(.{
+        .status = .good,
+        .produced_at = now - 1000,
+        .this_update = now - 1000 + max_clock_skew_sec,
+        .next_update = now + 3600,
+    }, now, false);
+    try std.testing.expectEqual(ValidationResult.accepted, produced_before_this_update_boundary);
+
+    const this_update_boundary = try checkStapled(.{
+        .status = .good,
+        .produced_at = now + 1,
+        .this_update = now + max_clock_skew_sec,
+        .next_update = now + max_clock_skew_sec + 100,
+    }, now, false);
+    try std.testing.expectEqual(ValidationResult.accepted, this_update_boundary);
+}
+
 test "invalid next_update window is rejected unless soft-fail policy allows" {
     const now: i64 = 1_700_000_000;
     try std.testing.expectError(error.InvalidTimeWindow, checkStapled(.{

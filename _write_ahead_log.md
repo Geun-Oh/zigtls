@@ -6547,3 +6547,64 @@ Observed Results
 - `ocsp.zig`: 10/10 tests passed.
 - `certificate_validation.zig`: 36/36 tests passed.
 - `zig build test`: passed.
+===
+timestamp: 2026-02-15T13:52:00+09:00
+description: Plan OCSP clock-skew boundary acceptance regression coverage
+type: plan
+===
+Motivation
+- OCSP tests cover over-boundary failures for produced_at/this_update timing, but exact clock-skew boundary acceptance cases are not explicitly pinned.
+
+Scope
+- Add OCSP regression tests for exact-boundary acceptance:
+  - `produced_at == now + max_clock_skew_sec`
+  - `produced_at + max_clock_skew_sec == this_update`
+  - `this_update == now + max_clock_skew_sec`
+- Update RFC matrix CERT-002 coverage wording to mention clock-skew boundary acceptance coverage.
+
+Design
+- Use valid `good` status responses with time fields set at exact boundary values.
+- Assert `ValidationResult.accepted` for each boundary case.
+
+Risks/Perf Impact
+- Test/doc-only expansion; no runtime behavior change.
+
+Test Plan (commands)
+- `zig test src/tls13/ocsp.zig`
+- `zig build test`
+
+Rollback
+- Remove OCSP boundary acceptance tests and matrix wording update.
+
+Commit Plan
+- `MINOR: cert: add ocsp clock-skew boundary acceptance tests`
+===
+timestamp: 2026-02-15T13:54:00+09:00
+description: Add OCSP produced_at/this_update clock-skew boundary acceptance regressions
+type: code change
+===
+Decisions + Rationale
+- Added explicit acceptance regressions for exact clock-skew boundary values to complement existing over-boundary rejection tests.
+- Pinned boundary semantics for produced_at and this_update timing checks to prevent off-by-one regressions.
+
+Files/Functions Touched
+- `src/tls13/ocsp.zig`
+  - Added test: `clock-skew boundaries are accepted for produced_at and this_update`.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-CERT-002` coverage wording to include produced_at/this_update clock-skew boundary branches.
+
+Risks/Perf Notes
+- Test/doc-only expansion; no runtime behavior changes.
+===
+timestamp: 2026-02-15T13:55:00+09:00
+description: Verify OCSP clock-skew boundary regression additions
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/ocsp.zig`
+- `zig test src/tls13/ocsp.zig`
+- `zig build test`
+
+Observed Results
+- `ocsp.zig`: 11/11 tests passed.
+- `zig build test`: passed.
