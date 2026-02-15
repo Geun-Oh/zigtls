@@ -3,14 +3,16 @@ set -euo pipefail
 
 DRY_RUN=0
 STRICT_INTEROP=0
+TASK_GATES=0
 
 usage() {
   cat <<USAGE
-usage: preflight.sh [--dry-run] [--strict-interop]
+usage: preflight.sh [--dry-run] [--strict-interop] [--task-gates]
 
 Options:
   --dry-run         Print commands without executing
   --strict-interop  Run strict interop matrix + evidence generation
+  --task-gates      Also run canonical _task.md gate sequence via verify_task_gates.sh
 USAGE
 }
 
@@ -84,6 +86,10 @@ while [[ $# -gt 0 ]]; do
       STRICT_INTEROP=1
       shift
       ;;
+    --task-gates)
+      TASK_GATES=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -139,6 +145,14 @@ if [[ "$STRICT_INTEROP" -eq 1 ]]; then
   run_cmd "bash scripts/interop/matrix_local.sh --strict"
   run_cmd "bash scripts/interop/generate_evidence.sh"
   run_cmd "bash scripts/release/check_production_artifacts.sh"
+fi
+
+if [[ "$TASK_GATES" -eq 1 ]]; then
+  if [[ "$STRICT_INTEROP" -eq 1 ]]; then
+    run_cmd "bash scripts/release/verify_task_gates.sh --strict-only"
+  else
+    run_cmd "bash scripts/release/verify_task_gates.sh --basic-only"
+  fi
 fi
 
 echo "[preflight] all checks passed"
