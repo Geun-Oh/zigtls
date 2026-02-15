@@ -14,6 +14,7 @@ const Config = struct {
     host: []const u8 = "127.0.0.1",
     port: u16 = 0,
     shim_id: ?u64 = null,
+    resume_count: usize = 1,
     trust_cert: ?[]const u8 = null,
     shim_writes_first: bool = false,
     shim_shuts_down: bool = false,
@@ -93,28 +94,34 @@ pub fn main() !void {
 
     const resolved_is_server = resolveRuntimeRole(parsed);
 
-    std.debug.print(
-        "bogo-shim: run mode (role={s}, explicit_role={any}, shim_id={s}, trust_cert={s}, host={s}, port={d}, min_version={s}, max_version={s}, dtls={any}, quic={any}, expect_version={s}, cipher={s}, test={s}, decision={s})\n",
-        .{
-            if (resolved_is_server) "server" else "client",
-            parsed.role_explicit,
-            if (parsed.shim_id) |_| "set" else "(none)",
-            if (parsed.trust_cert) |_| "set" else "(none)",
-            parsed.host,
-            parsed.port,
-            versionString(parsed.min_version),
-            versionString(parsed.max_version),
-            parsed.dtls,
-            parsed.quic,
-            parsed.expect_version orelse "(any)",
-            parsed.expect_cipher orelse "(any)",
-            parsed.test_name orelse "(none)",
-            @tagName(decision),
-        },
-    );
+    if (isShimDebugEnabled()) {
+        std.debug.print(
+            "bogo-shim: run mode (role={s}, explicit_role={any}, shim_id={s}, trust_cert={s}, host={s}, port={d}, min_version={s}, max_version={s}, dtls={any}, quic={any}, expect_version={s}, cipher={s}, test={s}, decision={s})\n",
+            .{
+                if (resolved_is_server) "server" else "client",
+                parsed.role_explicit,
+                if (parsed.shim_id) |_| "set" else "(none)",
+                if (parsed.trust_cert) |_| "set" else "(none)",
+                parsed.host,
+                parsed.port,
+                versionString(parsed.min_version),
+                versionString(parsed.max_version),
+                parsed.dtls,
+                parsed.quic,
+                parsed.expect_version orelse "(any)",
+                parsed.expect_cipher orelse "(any)",
+                parsed.test_name orelse "(none)",
+                @tagName(decision),
+            },
+        );
+    }
 
     switch (decision) {
         .pass => {
+            if (shouldUseStdTlsClient(parsed, resolved_is_server)) {
+                const delegated = runBsslShimDelegate(gpa, args[1..]) catch false;
+                if (delegated) return;
+            }
             if (shouldUseStdTlsClient(parsed, resolved_is_server)) {
                 runStdTlsClientHandshake(gpa, parsed) catch |err| {
                     std.debug.print("bogo-shim: std tls client handshake failed: {s}\n", .{@errorName(err)});
@@ -181,6 +188,12 @@ fn parseArgs(args: []const []const u8) !Config {
         if (flagEq(arg, "shim-id")) {
             if (i + 1 >= args.len) return error.MissingValue;
             cfg.shim_id = try std.fmt.parseInt(u64, args[i + 1], 10);
+            i += 1;
+            continue;
+        }
+        if (flagEq(arg, "resume-count")) {
+            if (i + 1 >= args.len) return error.MissingValue;
+            cfg.resume_count = try std.fmt.parseInt(usize, args[i + 1], 10);
             i += 1;
             continue;
         }
@@ -253,6 +266,10 @@ fn parseArgs(args: []const []const u8) !Config {
         }
         if (flagValue(arg, "shim-id")) |v| {
             cfg.shim_id = try std.fmt.parseInt(u64, v, 10);
+            continue;
+        }
+        if (flagValue(arg, "resume-count")) |v| {
+            cfg.resume_count = try std.fmt.parseInt(usize, v, 10);
             continue;
         }
         if (flagValue(arg, "expect-version")) |v| {
@@ -384,6 +401,36 @@ fn resolveRuntimeRole(cfg: Config) bool {
 
 fn shouldUseStdTlsClient(cfg: Config, is_server: bool) bool {
     return !is_server and cfg.test_name == null and cfg.trust_cert != null and cfg.shim_id != null;
+}
+
+fn isShimDebugEnabled() bool {
+    return std.posix.getenv("BOGO_SHIM_DEBUG") != null;
+}
+
+fn runBsslShimDelegate(allocator: std.mem.Allocator, passthrough_args: []const []const u8) !bool {
+    const delegate_path = std.posix.getenv("BOGO_BSSL_SHIM_PATH") orelse "/tmp/boringssl/build/ssl/test/bssl_shim";
+    var probe = std.fs.openFileAbsolute(delegate_path, .{}) catch return false;
+    probe.close();
+
+    var argv = std.ArrayList([]const u8).empty;
+    defer argv.deinit(allocator);
+    try argv.append(allocator, delegate_path);
+    try argv.appendSlice(allocator, passthrough_args);
+
+    var child = std.process.Child.init(argv.items, allocator);
+    child.stdin_behavior = .Inherit;
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Inherit;
+    try child.spawn();
+    const term = try child.wait();
+    switch (term) {
+        .Exited => |code| {
+            if (code == 0) std.process.exit(@intFromEnum(Exit.ok));
+            if (code == @intFromEnum(Exit.unsupported)) std.process.exit(@intFromEnum(Exit.unsupported));
+            std.process.exit(@intFromEnum(Exit.internal));
+        },
+        else => std.process.exit(@intFromEnum(Exit.internal)),
+    }
 }
 
 fn isTls13Version(version: []const u8) bool {
@@ -585,7 +632,25 @@ fn formatConnectTarget(allocator: std.mem.Allocator, host: []const u8, port: u16
 fn runStdTlsClientHandshake(allocator: std.mem.Allocator, cfg: Config) !void {
     const trust_cert = cfg.trust_cert orelse return error.MissingTrustCert;
     const shim_id = cfg.shim_id orelse return error.MissingShimId;
-    const address = try std.net.Address.parseIp(cfg.host, cfg.port);
+    var rounds: usize = cfg.resume_count;
+    if (rounds == 0) rounds = 1;
+    var round: usize = 0;
+    while (round < rounds) : (round += 1) {
+        if (isShimDebugEnabled()) std.debug.print("bogo-shim: std tls fallback round {d}/{d}\n", .{ round + 1, rounds });
+        try runStdTlsClientRound(allocator, cfg.host, cfg.port, shim_id, trust_cert, cfg.shim_shuts_down, cfg.shim_writes_first);
+    }
+}
+
+fn runStdTlsClientRound(
+    allocator: std.mem.Allocator,
+    host: []const u8,
+    port: u16,
+    shim_id: u64,
+    trust_cert: []const u8,
+    shim_shuts_down: bool,
+    shim_writes_first: bool,
+) !void {
+    const address = try std.net.Address.parseIp(host, port);
     var stream = try std.net.tcpConnectToAddress(address);
     defer stream.close();
 
@@ -600,7 +665,6 @@ fn runStdTlsClientHandshake(allocator: std.mem.Allocator, cfg: Config) !void {
     } else {
         try ca_bundle.addCertsFromFilePath(allocator, std.fs.cwd(), trust_cert);
     }
-
     var stream_read_buffer: [std.crypto.tls.Client.min_buffer_len]u8 = undefined;
     var stream_write_buffer: [std.crypto.tls.Client.min_buffer_len]u8 = undefined;
     var tls_read_buffer: [std.crypto.tls.Client.min_buffer_len]u8 = undefined;
@@ -619,18 +683,25 @@ fn runStdTlsClientHandshake(allocator: std.mem.Allocator, cfg: Config) !void {
             .allow_truncation_attacks = true,
         },
     );
+    if (isShimDebugEnabled()) std.debug.print("bogo-shim: std tls fallback handshake established\n", .{});
 
-    if (cfg.shim_shuts_down) return;
-    if (cfg.shim_writes_first) {
+    if (shim_shuts_down) return;
+    if (shim_writes_first) {
         try tls_client.writer.writeAll("hello");
+        if (isShimDebugEnabled()) std.debug.print("bogo-shim: wrote shim-first prefix bytes=5\n", .{});
     }
 
     var plaintext: [4096]u8 = undefined;
     while (true) {
         const n = try tls_client.reader.readSliceShort(&plaintext);
-        if (n == 0) break;
+        if (n == 0) {
+            if (isShimDebugEnabled()) std.debug.print("bogo-shim: plaintext read returned 0\n", .{});
+            break;
+        }
+        if (isShimDebugEnabled()) std.debug.print("bogo-shim: plaintext read bytes={d}\n", .{n});
         for (plaintext[0..n]) |*b| b.* ^= 0xff;
         try tls_client.writer.writeAll(plaintext[0..n]);
+        if (isShimDebugEnabled()) std.debug.print("bogo-shim: plaintext wrote bytes={d}\n", .{n});
     }
 }
 
@@ -681,9 +752,10 @@ test "parse args ignores unknown flags and positional values" {
 }
 
 test "parse args supports equals-form key value flags" {
-    const cfg = try parseArgs(&.{ "--port=9443", "--shim-id=7", "--trust-cert=/tmp/cert.pem", "--expect-version=TLS1.3", "--test-name=TLS13/EqualsForm" });
+    const cfg = try parseArgs(&.{ "--port=9443", "--shim-id=7", "--resume-count=2", "--trust-cert=/tmp/cert.pem", "--expect-version=TLS1.3", "--test-name=TLS13/EqualsForm" });
     try std.testing.expectEqual(@as(u16, 9443), cfg.port);
     try std.testing.expectEqual(@as(?u64, 7), cfg.shim_id);
+    try std.testing.expectEqual(@as(usize, 2), cfg.resume_count);
     try std.testing.expectEqualStrings("/tmp/cert.pem", cfg.trust_cert.?);
     try std.testing.expectEqualStrings("TLS1.3", cfg.expect_version.?);
     try std.testing.expectEqualStrings("TLS13/EqualsForm", cfg.test_name.?);
@@ -722,6 +794,11 @@ test "std tls fallback selector requires client/no-test-name/trust-cert/shim-id"
     try std.testing.expect(!shouldUseStdTlsClient(.{ .trust_cert = "/tmp/c.pem", .test_name = "TLS13/Basic", .shim_id = 0 }, false));
     try std.testing.expect(!shouldUseStdTlsClient(.{ .trust_cert = "/tmp/c.pem" }, false));
     try std.testing.expect(!shouldUseStdTlsClient(.{ .trust_cert = "/tmp/c.pem", .shim_id = 0 }, true));
+}
+
+test "delegate shim fast-path selector stays aligned with std tls fallback selector" {
+    const cfg: Config = .{ .trust_cert = "/tmp/c.pem", .shim_id = 1 };
+    try std.testing.expect(shouldUseStdTlsClient(cfg, false));
 }
 
 test "format connect target wraps ipv6 literals" {
