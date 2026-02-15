@@ -60,6 +60,13 @@ run_check() {
   local external_interop_ref=""
   local signoff_reliability_ref=""
 
+  local strict_zero_metrics=(
+    "critical_failure_count=0"
+    "expected_failure_name_count=0"
+    "in_scope_required_non_pass=0"
+    "in_scope_required_non_pass_raw=0"
+  )
+
   if [[ -f "$signoff_doc" ]]; then
     signoff_interop_ref="$(grep -Eo 'artifacts/interop/[0-9]{8}T[0-9]{6}Z/' "$signoff_doc" | head -n 1 || true)"
     signoff_reliability_ref="$(grep -Eo 'artifacts/reliability/[0-9]{8}T[0-9]{6}Z/report\.md' "$signoff_doc" | head -n 1 || true)"
@@ -94,6 +101,17 @@ run_check() {
     echo "referenced reliability report missing: $signoff_reliability_ref" >&2
     missing=1
   fi
+
+  for metric in "${strict_zero_metrics[@]}"; do
+    if [[ -f "$external_doc" ]] && ! grep -q "$metric" "$external_doc"; then
+      echo "missing strict metric '$metric' in docs/external-validation-2026-02-15.md" >&2
+      missing=1
+    fi
+    if [[ -f "$signoff_doc" ]] && ! grep -q "$metric" "$signoff_doc"; then
+      echo "missing strict metric '$metric' in docs/release-signoff.md" >&2
+      missing=1
+    fi
+  done
 
   local latest_interop_report=""
   latest_interop_report="$(find "$root/artifacts/interop" -mindepth 2 -maxdepth 2 -name report.md 2>/dev/null | LC_ALL=C sort | tail -n 1)"
@@ -174,6 +192,11 @@ self_test() {
 
 - Strict interop evidence bundle (`artifacts/interop/20260101T000000Z/`)
 - Reliability report (`artifacts/reliability/20260101T000000Z/report.md`)
+- BoGo strict metrics:
+  - `critical_failure_count=0`
+  - `expected_failure_name_count=0`
+  - `in_scope_required_non_pass=0`
+  - `in_scope_required_non_pass_raw=0`
 R
 
   cat > "$root/docs/external-validation-2026-02-15.md" <<'R'
@@ -181,6 +204,11 @@ R
 
 - interop evidence bundle:
   - `artifacts/interop/20260101T000000Z/`
+- BoGo strict metrics:
+  - `critical_failure_count=0`
+  - `expected_failure_name_count=0`
+  - `in_scope_required_non_pass=0`
+  - `in_scope_required_non_pass_raw=0`
 R
 
   : > "$root/scripts/interop/bogo_expected_failures_v1_prod.txt"
@@ -215,6 +243,11 @@ R
 
 - Strict interop evidence bundle (`artifacts/interop/20260102T000000Z/`)
 - Reliability report (`artifacts/reliability/20260101T000000Z/report.md`)
+- BoGo strict metrics:
+  - `critical_failure_count=0`
+  - `expected_failure_name_count=0`
+  - `in_scope_required_non_pass=0`
+  - `in_scope_required_non_pass_raw=0`
 R
 
   cat > "$root/docs/external-validation-2026-02-15.md" <<'R'
@@ -222,6 +255,11 @@ R
 
 - interop evidence bundle:
   - `artifacts/interop/20260101T000000Z/`
+- BoGo strict metrics:
+  - `critical_failure_count=0`
+  - `expected_failure_name_count=0`
+  - `in_scope_required_non_pass=0`
+  - `in_scope_required_non_pass_raw=0`
 R
   if run_check "$root" >/dev/null 2>&1; then
     echo "self-test failed: expected external interop mismatch failure" >&2
@@ -234,6 +272,11 @@ R
 
 - interop evidence bundle:
   - `artifacts/interop/20260102T000000Z/`
+- BoGo strict metrics:
+  - `critical_failure_count=0`
+  - `expected_failure_name_count=0`
+  - `in_scope_required_non_pass=0`
+  - `in_scope_required_non_pass_raw=0`
 R
 
   mkdir -p "$root/artifacts/reliability/20260102T000000Z"
@@ -254,9 +297,31 @@ R
 
 - Strict interop evidence bundle (`artifacts/interop/20260102T000000Z/`)
 - Reliability report (`artifacts/reliability/20260102T000000Z/report.md`)
+- BoGo strict metrics:
+  - `critical_failure_count=0`
+  - `expected_failure_name_count=0`
+  - `in_scope_required_non_pass=0`
+  - `in_scope_required_non_pass_raw=0`
 R
 
   run_check "$root" >/dev/null
+
+  cat > "$root/docs/external-validation-2026-02-15.md" <<'R'
+# External Validation
+
+- interop evidence bundle:
+  - `artifacts/interop/20260102T000000Z/`
+- BoGo strict metrics:
+  - `critical_failure_count=0`
+  - `expected_failure_name_count=0`
+  - `in_scope_required_non_pass=0`
+  - `in_scope_required_non_pass_raw=7`
+R
+  if run_check "$root" >/dev/null 2>&1; then
+    echo "self-test failed: expected stale strict metric failure" >&2
+    rm -rf "$tmp"
+    return 1
+  fi
 
   rm "$root/docs/release-signoff.md"
   if run_check "$root" >/dev/null 2>&1; then
