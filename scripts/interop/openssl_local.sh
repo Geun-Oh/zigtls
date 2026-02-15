@@ -33,8 +33,6 @@ pick_port() {
   return 1
 }
 
-PORT="$(pick_port)"
-
 CERT="$WORKDIR/cert.pem"
 KEY="$WORKDIR/key.pem"
 LOG="$WORKDIR/server.log"
@@ -43,8 +41,8 @@ openssl req -x509 -newkey rsa:2048 -nodes \
   -subj "/CN=localhost" \
   -keyout "$KEY" -out "$CERT" -days 1 >/dev/null 2>&1
 
-openssl s_server -tls1_3 -accept "$PORT" -cert "$CERT" -key "$KEY" -quiet >"$LOG" 2>&1 &
-SERVER_PID=$!
+PORT=0
+SERVER_PID=0
 
 wait_for_listener() {
   if ! command -v nc >/dev/null 2>&1; then
@@ -66,10 +64,32 @@ wait_for_listener() {
   return 1
 }
 
-if ! wait_for_listener; then
-  echo "openssl server did not become ready" >&2
+start_server_once() {
+  PORT="$(pick_port)"
+  openssl s_server -tls1_3 -accept "$PORT" -cert "$CERT" -key "$KEY" -quiet >"$LOG" 2>&1 &
+  SERVER_PID=$!
+  if wait_for_listener; then
+    return 0
+  fi
   kill "$SERVER_PID" >/dev/null 2>&1 || true
   wait "$SERVER_PID" 2>/dev/null || true
+  return 1
+}
+
+READY=0
+for _ in 1 2 3; do
+  if start_server_once; then
+    READY=1
+    break
+  fi
+  sleep 0.2
+done
+
+if [[ "$READY" -ne 1 ]]; then
+  echo "openssl server did not become ready" >&2
+  if [[ -f "$LOG" ]]; then
+    tail -n 40 "$LOG" >&2 || true
+  fi
   exit 1
 fi
 

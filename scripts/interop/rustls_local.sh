@@ -42,10 +42,12 @@ pick_port() {
   return 1
 }
 
-PORT="$(pick_port)"
+PORT=0
+SERVER_PID=0
 
 CERT="$WORKDIR/cert.pem"
 KEY="$WORKDIR/key.pem"
+LOG="$WORKDIR/server.log"
 
 if ! command -v openssl >/dev/null 2>&1; then
   echo "openssl required to generate temporary certs" >&2
@@ -64,13 +66,6 @@ server_uses_modern_cli=0
 if "$RUSTLS_SERVER" --help 2>/dev/null | grep -q -- "--certs"; then
   server_uses_modern_cli=1
 fi
-
-if [[ "$server_uses_modern_cli" -eq 1 ]]; then
-  "$RUSTLS_SERVER" --certs "$CERT" --key "$KEY" --port "$PORT" http >/dev/null 2>&1 &
-else
-  "$RUSTLS_SERVER" --cert "$CERT" --key "$KEY" --port "$PORT" >/dev/null 2>&1 &
-fi
-SERVER_PID=$!
 
 wait_for_listener() {
   if ! command -v nc >/dev/null 2>&1; then
@@ -92,10 +87,36 @@ wait_for_listener() {
   return 1
 }
 
-if ! wait_for_listener; then
-  echo "rustls server did not become ready" >&2
+start_server_once() {
+  PORT="$(pick_port)"
+  if [[ "$server_uses_modern_cli" -eq 1 ]]; then
+    "$RUSTLS_SERVER" --certs "$CERT" --key "$KEY" --port "$PORT" http >"$LOG" 2>&1 &
+  else
+    "$RUSTLS_SERVER" --cert "$CERT" --key "$KEY" --port "$PORT" >"$LOG" 2>&1 &
+  fi
+  SERVER_PID=$!
+  if wait_for_listener; then
+    return 0
+  fi
   kill "$SERVER_PID" >/dev/null 2>&1 || true
   wait "$SERVER_PID" 2>/dev/null || true
+  return 1
+}
+
+READY=0
+for _ in 1 2 3; do
+  if start_server_once; then
+    READY=1
+    break
+  fi
+  sleep 0.2
+done
+
+if [[ "$READY" -ne 1 ]]; then
+  echo "rustls server did not become ready" >&2
+  if [[ -f "$LOG" ]]; then
+    tail -n 40 "$LOG" >&2 || true
+  fi
   exit 1
 fi
 
