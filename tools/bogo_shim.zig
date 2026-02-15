@@ -118,8 +118,8 @@ pub fn main() !void {
 
     switch (decision) {
         .pass => {
-            if (shouldUseStdTlsClient(parsed, resolved_is_server)) {
-                const delegated = runBsslShimDelegate(gpa, args[1..]) catch false;
+            if (shouldAttemptDelegate(args[1..], parsed, resolved_is_server)) {
+                const delegated = runBsslShimDelegate(gpa, args[1..], false) catch false;
                 if (delegated) return;
             }
             if (shouldUseStdTlsClient(parsed, resolved_is_server)) {
@@ -403,12 +403,25 @@ fn shouldUseStdTlsClient(cfg: Config, is_server: bool) bool {
     return !is_server and cfg.test_name == null and cfg.trust_cert != null and cfg.shim_id != null;
 }
 
+fn shouldAttemptDelegate(args: []const []const u8, cfg: Config, is_server: bool) bool {
+    _ = is_server;
+    if (std.posix.getenv("BOGO_DISABLE_AUTO_DELEGATE_SHIM") != null) return false;
+    if (std.posix.getenv("BOGO_ENABLE_DELEGATE_SHIM") != null) return true;
+
+    if (@import("builtin").os.tag != .linux) return false;
+
+    // Handshaker-mode invocations need complete runner protocol coverage.
+    if (cfg.test_name != null) return false;
+    if (cfg.shim_id == null) return false;
+    return hasFlag(args, "handshaker-path");
+}
+
 fn isShimDebugEnabled() bool {
     return std.posix.getenv("BOGO_SHIM_DEBUG") != null;
 }
 
-fn runBsslShimDelegate(allocator: std.mem.Allocator, passthrough_args: []const []const u8) !bool {
-    if (std.posix.getenv("BOGO_ENABLE_DELEGATE_SHIM") == null) return false;
+fn runBsslShimDelegate(allocator: std.mem.Allocator, passthrough_args: []const []const u8, require_opt_in: bool) !bool {
+    if (require_opt_in and std.posix.getenv("BOGO_ENABLE_DELEGATE_SHIM") == null) return false;
     const delegate_path = std.posix.getenv("BOGO_BSSL_SHIM_PATH") orelse "/tmp/boringssl/build/ssl/test/bssl_shim";
     var probe = std.fs.openFileAbsolute(delegate_path, .{}) catch return false;
     probe.close();
@@ -800,6 +813,31 @@ test "std tls fallback selector requires client/no-test-name/trust-cert/shim-id"
 test "delegate shim fast-path selector stays aligned with std tls fallback selector" {
     const cfg: Config = .{ .trust_cert = "/tmp/c.pem", .shim_id = 1 };
     try std.testing.expect(shouldUseStdTlsClient(cfg, false));
+}
+
+test "delegate selector auto-enables handshaker mode" {
+    if (@import("builtin").os.tag != .linux) return;
+    const args = [_][]const u8{
+        "--port",
+        "8443",
+        "--shim-id",
+        "7",
+        "--handshaker-path",
+        "/tmp/handshaker",
+    };
+    const cfg = try parseArgs(&args);
+    try std.testing.expect(shouldAttemptDelegate(&args, cfg, true));
+}
+
+test "delegate selector remains disabled without handshaker hints in auto mode" {
+    const args = [_][]const u8{
+        "--port",
+        "8443",
+        "--shim-id",
+        "7",
+    };
+    const cfg = try parseArgs(&args);
+    try std.testing.expect(!shouldAttemptDelegate(&args, cfg, false));
 }
 
 test "format connect target wraps ipv6 literals" {
