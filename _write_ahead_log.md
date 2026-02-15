@@ -7285,3 +7285,64 @@ Commands Executed
 Observed Results
 - `certificate_validation.zig`: 43/43 tests passed.
 - `zig build test`: passed.
+===
+timestamp: 2026-02-15T16:56:00+09:00
+description: Plan BoGo shim parser regression coverage for invalid port values
+type: plan
+===
+Motivation
+- BoGo shim parser tests cover unknown flags and missing values, but do not explicitly pin invalid `--port` parsing errors.
+- Invalid numeric input/overflow should remain rejected deterministically.
+
+Scope
+- Add parser regressions for non-numeric and overflow `--port` values.
+- Keep behavior/runtime unchanged.
+
+Design
+- Extend `tools/bogo_shim.zig` tests using `parseArgs` directly.
+- Assert expected parseInt error classes:
+  - non-numeric -> `InvalidCharacter`
+  - overflow -> `Overflow`
+
+Risks/Perf Impact
+- Test-only expansion; no runtime behavior changes.
+
+Test Plan (commands)
+- `zig test tools/bogo_shim.zig`
+- `zig build test`
+
+Rollback
+- Remove added invalid-port parser tests.
+
+Commit Plan
+- `MINOR: bogo: add invalid port parser regressions`
+===
+timestamp: 2026-02-15T16:59:00+09:00
+description: Add BoGo shim parser regressions for invalid port value branches
+type: code change
+===
+Decisions + Rationale
+- Added explicit parser regressions for invalid `--port` values to pin parseInt error behavior.
+- Covered both non-numeric and overflow branches.
+
+Files/Functions Touched
+- `tools/bogo_shim.zig`
+  - Added tests:
+    - `parse args rejects non-numeric port value`
+    - `parse args rejects overflowing port value`
+
+Risks/Perf Notes
+- Test-only expansion; no runtime behavior changes.
+===
+timestamp: 2026-02-15T17:00:00+09:00
+description: Verify BoGo shim invalid-port parser regression additions
+type: test
+===
+Commands Executed
+- `zig fmt tools/bogo_shim.zig`
+- `zig test tools/bogo_shim.zig`
+- `zig build test`
+
+Observed Results
+- `bogo_shim.zig`: 11/11 tests passed.
+- `zig build test`: passed.

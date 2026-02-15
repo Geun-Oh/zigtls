@@ -194,6 +194,14 @@ test "parse args rejects missing option value" {
     try std.testing.expectError(error.MissingValue, parseArgs(&.{"--port"}));
 }
 
+test "parse args rejects non-numeric port value" {
+    try std.testing.expectError(error.InvalidCharacter, parseArgs(&.{ "--port", "abc" }));
+}
+
+test "parse args rejects overflowing port value" {
+    try std.testing.expectError(error.Overflow, parseArgs(&.{ "--port", "70000" }));
+}
+
 test "routing passes for tls13 basic case" {
     const cfg = Config{
         .port = 443,
