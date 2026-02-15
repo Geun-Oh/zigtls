@@ -22,7 +22,7 @@
       "KeyUpdate",
       "Resumption|SessionTicket|PSK",
       "Alert|close_notify",
-      "^Basic-",
+      "^TLS13-1RTT-",
       "ALPN(Client|Server)-.*-TLS-TLS13"
     ],
     "in_scope_optional": [
