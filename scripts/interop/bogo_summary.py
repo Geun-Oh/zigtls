@@ -83,6 +83,7 @@ def self_test() -> int:
             {"name": "TLS13/HRR", "result": "FAIL"},
             {"name": "TLS13/KeyUpdate", "result": "PASS"},
             {"name": "Record/Overflow", "result": "PASS"},
+            {"name": "NoDelimiterCase", "result": "PASS"},
         ]
     }
     path = "/tmp/zigtls-bogo-selftest.json"
@@ -90,12 +91,14 @@ def self_test() -> int:
         json.dump(sample, f)
 
     out = summarize(path)
-    assert out["total"] == 4
-    assert out["status"].get("pass") == 3
+    assert out["total"] == 5
+    assert out["status"].get("pass") == 4
     assert out["status"].get("fail") == 1
     assert out["categories"]["hrr"]["fail"] == 1
     assert out["categories"]["keyupdate"]["pass"] == 1
     assert out["categories"]["record"]["pass"] == 1
+    assert out["categories"]["misc"]["pass"] == 1
+    assert out["suites"]["misc"]["pass"] == 1
     assert out["critical_failure_count"] == 1
     assert out["critical_failures"][0] == "TLS13/HRR"
     assert evaluate_critical_gate(out, None) == 0

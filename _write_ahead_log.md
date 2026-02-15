@@ -7346,3 +7346,63 @@ Commands Executed
 Observed Results
 - `bogo_shim.zig`: 11/11 tests passed.
 - `zig build test`: passed.
+===
+timestamp: 2026-02-15T17:08:00+09:00
+description: Plan BoGo summary classifier fallback regression coverage for misc category/suite buckets
+type: plan
+===
+Motivation
+- BoGo summary self-test validates common categorized names, but fallback classification branches (`misc` category and slashless suite bucket) are not explicitly pinned.
+
+Scope
+- Extend `bogo_summary.py` self-test sample with a slashless/unmatched test entry.
+- Add assertions for:
+  - `categories["misc"]`
+  - `suites["misc"]`
+- Update RFC matrix BOGO-001 wording to mention classifier fallback branch coverage.
+
+Design
+- Add one synthetic test entry with name lacking `/` and not matching category patterns.
+- Preserve existing self-test expectations and extend totals accordingly.
+
+Risks/Perf Impact
+- Self-test/doc-only expansion; no runtime behavior change.
+
+Test Plan (commands)
+- `python3 scripts/interop/bogo_summary.py --self-test`
+- `zig build test`
+
+Rollback
+- Remove fallback branch self-test entry/assertions and matrix wording update.
+
+Commit Plan
+- `MINOR: bogo: add summary misc-classifier regression`
+===
+timestamp: 2026-02-15T17:10:00+09:00
+description: Add BoGo summary self-test regressions for misc classifier and suite fallback branches
+type: code change
+===
+Decisions + Rationale
+- Extended synthetic self-test sample with a slashless/unmatched test name to pin fallback classification behavior.
+- Added explicit assertions for both category fallback (`misc`) and suite bucket fallback (`misc`).
+
+Files/Functions Touched
+- `scripts/interop/bogo_summary.py`
+  - `self_test`: sample expanded with fallback case and assertions for `categories.misc` and `suites.misc`.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-BOGO-001` coverage wording to mention misc classifier/suite fallback branch coverage.
+
+Risks/Perf Notes
+- Self-test/doc-only expansion; no runtime behavior changes.
+===
+timestamp: 2026-02-15T17:11:00+09:00
+description: Verify BoGo summary fallback-branch self-test additions
+type: test
+===
+Commands Executed
+- `python3 scripts/interop/bogo_summary.py --self-test`
+- `zig build test`
+
+Observed Results
+- `bogo_summary.py --self-test`: `self-test: ok`.
+- `zig build test`: passed.
