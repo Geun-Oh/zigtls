@@ -169,10 +169,53 @@ description: warn
 body
 R
 
+  cat > "$tmp/invalid_timestamp.md" <<'R'
+===
+timestamp: 2026/02/16 00:00:00
+description: invalid timestamp
+type: test
+===
+body
+R
+
+  cat > "$tmp/invalid_type.md" <<'R'
+===
+timestamp: 2026-02-16T00:00:00+09:00
+description: invalid type
+type: tests
+===
+body
+R
+
+  cat > "$tmp/unterminated_header.md" <<'R'
+===
+timestamp: 2026-02-16T00:00:00+09:00
+description: missing terminator
+type: test
+R
+
   run_check "$tmp/valid.md" >/dev/null
 
   if run_check "$tmp/invalid_key.md" >/dev/null 2>&1; then
     echo "self-test failed: invalid key should fail" >&2
+    rm -rf "$tmp"
+    return 1
+  fi
+
+  if run_check "$tmp/invalid_timestamp.md" >/dev/null 2>&1; then
+    echo "self-test failed: invalid timestamp should fail" >&2
+    rm -rf "$tmp"
+    return 1
+  fi
+
+  if run_check "$tmp/invalid_type.md" >/dev/null 2>&1; then
+    echo "self-test failed: invalid type should fail" >&2
+    rm -rf "$tmp"
+    return 1
+  fi
+
+  if run_check "$tmp/unterminated_header.md" >/dev/null 2>&1; then
+    echo "self-test failed: unterminated header should fail" >&2
     rm -rf "$tmp"
     return 1
   fi
