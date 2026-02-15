@@ -2,14 +2,16 @@
 set -euo pipefail
 
 SELF_TEST=0
+STRICT_MODE=0
 INTEROP_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 usage() {
   cat <<USAGE
-usage: matrix_local.sh [--self-test]
+usage: matrix_local.sh [--self-test] [--strict]
 
 Options:
   --self-test    Run internal harness self-test
+  --strict       Enforce required external env bindings before running matrix
 USAGE
 }
 
@@ -56,6 +58,29 @@ run_matrix() {
 
   echo "[interop] summary: FAIL ($failures failures)"
   return 1
+}
+
+require_env() {
+  local name="$1"
+  if [[ -z "${!name:-}" ]]; then
+    echo "[interop][strict] missing required env: $name" >&2
+    return 1
+  fi
+  return 0
+}
+
+strict_preflight() {
+  local failed=0
+  require_env "RUSTLS_CLIENT" || failed=1
+  require_env "RUSTLS_SERVER" || failed=1
+  require_env "NSS_DIR" || failed=1
+  require_env "NSS_BIN_DIR" || failed=1
+  require_env "NSS_LIB_DIR" || failed=1
+  if [[ "$failed" -ne 0 ]]; then
+    echo "[interop][strict] preflight failed" >&2
+    return 1
+  fi
+  return 0
 }
 
 self_test() {
@@ -118,6 +143,10 @@ while [[ $# -gt 0 ]]; do
       SELF_TEST=1
       shift
       ;;
+    --strict)
+      STRICT_MODE=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -133,6 +162,10 @@ done
 if [[ "$SELF_TEST" -eq 1 ]]; then
   self_test
   exit 0
+fi
+
+if [[ "$STRICT_MODE" -eq 1 ]]; then
+  strict_preflight
 fi
 
 run_matrix \

@@ -8114,3 +8114,85 @@ Observed Results
 - profile summary output emitted expected classification metrics.
 - strict mode exits with code 4 on current baseline (`in_scope_required_non_pass=1336`), confirming gate enforcement path.
 - `zig build test`: passed.
+===
+timestamp: 2026-02-15T12:41:51+09:00
+description: Plan WS-C strict matrix mode implementation
+ type: plan
+===
+Motivation
+- _task.md requires `scripts/interop/matrix_local.sh --strict` as a production release gate command.
+- Current matrix script has no strict mode argument and no strict-mode preconditions.
+
+Scope
+- Add `--strict` mode in matrix_local.sh.
+- In strict mode, validate required environment bindings for rustls/NSS targets before execution.
+- Keep existing default behavior for backward compatibility.
+- Extend self-test where relevant.
+
+Risks/Perf Impact
+- Script-only change; no runtime TLS engine impact.
+
+Test Plan (commands)
+- `bash scripts/interop/matrix_local.sh --self-test`
+- `bash -n scripts/interop/matrix_local.sh`
+- `RUSTLS_CLIENT=... RUSTLS_SERVER=... NSS_DIR=... NSS_BIN_DIR=... NSS_LIB_DIR=... bash scripts/interop/matrix_local.sh --strict`
+- `zig build test`
+
+Rollback
+- Revert matrix strict mode additions.
+
+Commit Plan
+- `MINOR: interop: add strict mode to local matrix gate`
+===
+timestamp: 2026-02-15T12:42:02+09:00
+description: Supersede malformed WS-C strict matrix plan metadata entry
+type: plan
+===
+Decisions + Rationale
+- Previous WS-C plan append had malformed metadata key formatting for `type`.
+- This entry supersedes it as the authoritative plan without modifying earlier WAL content.
+
+Scope
+- Implement `--strict` in `scripts/interop/matrix_local.sh`.
+- In strict mode require rustls/NSS environment bindings before execution and fail fast when missing.
+- Preserve default non-strict behavior and self-test flow.
+
+Test Plan (commands)
+- `bash scripts/interop/matrix_local.sh --self-test`
+- `bash -n scripts/interop/matrix_local.sh`
+- `RUSTLS_CLIENT=... RUSTLS_SERVER=... NSS_DIR=... NSS_BIN_DIR=... NSS_LIB_DIR=... bash scripts/interop/matrix_local.sh --strict`
+- `zig build test`
+===
+timestamp: 2026-02-15T12:42:55+09:00
+description: Implement WS-C strict mode path for local interop matrix gate
+type: code change
+===
+Decisions + Rationale
+- Added explicit `--strict` mode to matrix runner to align with production release gate command from `_task.md`.
+- Strict mode now fails fast when required external env bindings for rustls/NSS are missing.
+
+Files/Functions Touched
+- Updated `scripts/interop/matrix_local.sh`
+  - Added `--strict` argument and help text.
+  - Added strict preflight env validation for `RUSTLS_CLIENT`, `RUSTLS_SERVER`, `NSS_DIR`, `NSS_BIN_DIR`, `NSS_LIB_DIR`.
+- Updated `docs/release-runbook.md`
+  - Added strict matrix execution example with required environment variables.
+
+Risks/Perf Notes
+- Script/docs-only change; no TLS runtime path impact.
+===
+timestamp: 2026-02-15T12:42:55+09:00
+description: Validate WS-C strict matrix implementation and regression gates
+type: test
+===
+Commands Executed
+- `bash -n scripts/interop/matrix_local.sh`
+- `bash scripts/interop/matrix_local.sh --self-test`
+- `RUSTLS_CLIENT=/tmp/rustls/target/release/tlsclient-mio RUSTLS_SERVER=/tmp/rustls/target/release/tlsserver-mio NSS_DIR=/opt/homebrew/opt/nss NSS_BIN_DIR=/opt/homebrew/opt/nss/bin NSS_LIB_DIR=/opt/homebrew/opt/nss/lib bash scripts/interop/matrix_local.sh --strict`
+- `zig build test`
+
+Observed Results
+- syntax check: passed.
+- matrix self-test: passed (`self-test: ok`).
+- strict matrix run: PASS (openssl/rustls/nss all PASS).
+- `zig build test`: passed.
