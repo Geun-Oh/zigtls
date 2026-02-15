@@ -15,6 +15,26 @@ cleanup() {
 }
 trap cleanup EXIT
 
+pick_port() {
+  local p
+  local i
+  for i in $(seq 1 50); do
+    p=$((20000 + (RANDOM % 20000)))
+    if ! command -v nc >/dev/null 2>&1; then
+      echo "$p"
+      return 0
+    fi
+    if ! nc -z 127.0.0.1 "$p" >/dev/null 2>&1; then
+      echo "$p"
+      return 0
+    fi
+  done
+  echo "failed to select free port" >&2
+  return 1
+}
+
+PORT="$(pick_port)"
+
 CERT="$WORKDIR/cert.pem"
 KEY="$WORKDIR/key.pem"
 LOG="$WORKDIR/server.log"
@@ -23,7 +43,7 @@ openssl req -x509 -newkey rsa:2048 -nodes \
   -subj "/CN=localhost" \
   -keyout "$KEY" -out "$CERT" -days 1 >/dev/null 2>&1
 
-openssl s_server -tls1_3 -accept 8443 -cert "$CERT" -key "$KEY" -quiet >"$LOG" 2>&1 &
+openssl s_server -tls1_3 -accept "$PORT" -cert "$CERT" -key "$KEY" -quiet >"$LOG" 2>&1 &
 SERVER_PID=$!
 
 wait_for_listener() {
@@ -37,7 +57,7 @@ wait_for_listener() {
     if ! kill -0 "$SERVER_PID" >/dev/null 2>&1; then
       return 1
     fi
-    if nc -z 127.0.0.1 8443 >/dev/null 2>&1; then
+    if nc -z 127.0.0.1 "$PORT" >/dev/null 2>&1; then
       return 0
     fi
     sleep 0.1
@@ -57,7 +77,7 @@ STATUS=1
 OUTPUT=""
 for _ in 1 2 3; do
   set +e
-  OUTPUT="$(echo "ping" | openssl s_client -connect 127.0.0.1:8443 -tls1_3 -servername localhost 2>/dev/null)"
+  OUTPUT="$(echo "ping" | openssl s_client -connect "127.0.0.1:${PORT}" -tls1_3 -servername localhost 2>/dev/null)"
   STATUS=$?
   set -e
   [[ "$STATUS" -eq 0 ]] && break

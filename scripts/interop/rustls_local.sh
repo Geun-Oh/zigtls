@@ -24,6 +24,26 @@ cleanup() {
 }
 trap cleanup EXIT
 
+pick_port() {
+  local p
+  local i
+  for i in $(seq 1 50); do
+    p=$((24000 + (RANDOM % 20000)))
+    if ! command -v nc >/dev/null 2>&1; then
+      echo "$p"
+      return 0
+    fi
+    if ! nc -z 127.0.0.1 "$p" >/dev/null 2>&1; then
+      echo "$p"
+      return 0
+    fi
+  done
+  echo "failed to select free port" >&2
+  return 1
+}
+
+PORT="$(pick_port)"
+
 CERT="$WORKDIR/cert.pem"
 KEY="$WORKDIR/key.pem"
 
@@ -46,9 +66,9 @@ if "$RUSTLS_SERVER" --help 2>/dev/null | grep -q -- "--certs"; then
 fi
 
 if [[ "$server_uses_modern_cli" -eq 1 ]]; then
-  "$RUSTLS_SERVER" --certs "$CERT" --key "$KEY" --port 8444 http >/dev/null 2>&1 &
+  "$RUSTLS_SERVER" --certs "$CERT" --key "$KEY" --port "$PORT" http >/dev/null 2>&1 &
 else
-  "$RUSTLS_SERVER" --cert "$CERT" --key "$KEY" --port 8444 >/dev/null 2>&1 &
+  "$RUSTLS_SERVER" --cert "$CERT" --key "$KEY" --port "$PORT" >/dev/null 2>&1 &
 fi
 SERVER_PID=$!
 
@@ -63,7 +83,7 @@ wait_for_listener() {
     if ! kill -0 "$SERVER_PID" >/dev/null 2>&1; then
       return 1
     fi
-    if nc -z 127.0.0.1 8444 >/dev/null 2>&1; then
+    if nc -z 127.0.0.1 "$PORT" >/dev/null 2>&1; then
       return 0
     fi
     sleep 0.1
@@ -88,10 +108,10 @@ STATUS=1
 for _ in 1 2 3; do
   set +e
   if [[ "$client_uses_modern_cli" -eq 1 ]]; then
-    "$RUSTLS_CLIENT" --http --cafile "$CERT" --port 8444 localhost >/dev/null 2>&1
+    "$RUSTLS_CLIENT" --http --cafile "$CERT" --port "$PORT" localhost >/dev/null 2>&1
     STATUS=$?
   else
-    "$RUSTLS_CLIENT" --cafile "$CERT" --hostname localhost --port 8444 127.0.0.1 >/dev/null 2>&1
+    "$RUSTLS_CLIENT" --cafile "$CERT" --hostname localhost --port "$PORT" 127.0.0.1 >/dev/null 2>&1
     STATUS=$?
   fi
   set -e
