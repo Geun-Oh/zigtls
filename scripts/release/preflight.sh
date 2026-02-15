@@ -4,15 +4,17 @@ set -euo pipefail
 DRY_RUN=0
 STRICT_INTEROP=0
 TASK_GATES=0
+SYNC_EVIDENCE_DOCS=0
 
 usage() {
   cat <<USAGE
-usage: preflight.sh [--dry-run] [--strict-interop] [--task-gates]
+usage: preflight.sh [--dry-run] [--strict-interop] [--task-gates] [--sync-evidence-docs]
 
 Options:
   --dry-run         Print commands without executing
   --strict-interop  Run strict interop matrix + evidence generation
   --task-gates      Also run canonical _task.md gate sequence via verify_task_gates.sh
+  --sync-evidence-docs  Sync docs evidence references to latest artifact outputs
 USAGE
 }
 
@@ -121,6 +123,10 @@ while [[ $# -gt 0 ]]; do
       TASK_GATES=1
       shift
       ;;
+    --sync-evidence-docs)
+      SYNC_EVIDENCE_DOCS=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -185,6 +191,10 @@ if [[ "$TASK_GATES" -eq 1 ]]; then
   else
     run_cmd "bash scripts/release/verify_task_gates.sh --basic-only"
   fi
+fi
+
+if [[ "$SYNC_EVIDENCE_DOCS" -eq 1 ]]; then
+  run_cmd "bash scripts/release/sync_latest_evidence_refs.sh"
 fi
 
 echo "[preflight] all checks passed"
