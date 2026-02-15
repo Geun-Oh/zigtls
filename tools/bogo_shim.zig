@@ -472,6 +472,10 @@ fn shouldAttemptDelegate(args: []const []const u8, cfg: Config, is_server: bool)
         return true;
     }
 
+    if (std_fallback_mode and hasFlag(args, "advertise-alpn") and std.posix.getenv("BOGO_DISABLE_AUTO_DELEGATE_CLIENT_ALPN") == null) {
+        return true;
+    }
+
     if (is_server and cfg.test_name == null and cfg.shim_id != null and !hasFlag(args, "handshaker-path") and std.posix.getenv("BOGO_DISABLE_AUTO_DELEGATE_SERVER") == null) {
         return true;
     }
@@ -921,6 +925,21 @@ test "delegate selector enables resume fallback auto-delegate for multi-round cl
         "2",
         "--trust-cert",
         "/tmp/cert.pem",
+    };
+    const cfg = try parseArgs(&args);
+    try std.testing.expect(shouldAttemptDelegate(&args, cfg, false));
+}
+
+test "delegate selector enables std-fallback client ALPN policy auto-delegate" {
+    const args = [_][]const u8{
+        "--port",
+        "8443",
+        "--shim-id",
+        "7",
+        "--trust-cert",
+        "/tmp/cert.pem",
+        "--advertise-alpn",
+        "\x03foo",
     };
     const cfg = try parseArgs(&args);
     try std.testing.expect(shouldAttemptDelegate(&args, cfg, false));

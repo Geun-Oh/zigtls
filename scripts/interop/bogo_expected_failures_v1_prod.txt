@@ -1,5 +1,3 @@
-ALPNClient-EmptyProtocolName-TLS-TLS13
-ALPNClient-RejectUnknown-TLS-TLS13
 Alert-Hints
 Alert-Split
 AlertAfterChangeCipherSpec
