@@ -53,6 +53,28 @@ run_check() {
     missing=1
   fi
 
+  local latest_interop_report=""
+  latest_interop_report="$(find "$root/artifacts/interop" -mindepth 2 -maxdepth 2 -name report.md 2>/dev/null | LC_ALL=C sort | tail -n 1)"
+  if [[ -n "$latest_interop_report" ]]; then
+    if ! grep -q "Matrix status: PASS" "$latest_interop_report"; then
+      echo "latest interop report is not PASS: $latest_interop_report" >&2
+      missing=1
+    fi
+  fi
+
+  local latest_reliability_report=""
+  latest_reliability_report="$(find "$root/artifacts/reliability" -mindepth 2 -maxdepth 2 -name report.md 2>/dev/null | LC_ALL=C sort | tail -n 1)"
+  if [[ -n "$latest_reliability_report" ]]; then
+    if ! grep -q "Profile: prod" "$latest_reliability_report"; then
+      echo "latest reliability report is not prod profile: $latest_reliability_report" >&2
+      missing=1
+    fi
+    if ! grep -q "Target soak duration (hours): 24" "$latest_reliability_report"; then
+      echo "latest reliability report target duration is not 24h: $latest_reliability_report" >&2
+      missing=1
+    fi
+  fi
+
   if [[ "$missing" -ne 0 ]]; then
     return 1
   fi
@@ -83,8 +105,17 @@ self_test() {
     echo "# stub" > "$root/docs/$doc"
   done
   : > "$root/scripts/interop/bogo_expected_failures_v1_prod.txt"
-  echo "ok" > "$root/artifacts/interop/20260101T000000Z/report.md"
-  echo "ok" > "$root/artifacts/reliability/20260101T000000Z/report.md"
+  cat > "$root/artifacts/interop/20260101T000000Z/report.md" <<'R'
+# Interop Evidence Bundle
+
+- Matrix status: PASS
+R
+  cat > "$root/artifacts/reliability/20260101T000000Z/report.md" <<'R'
+# Soak/Chaos Reliability Report
+
+- Profile: prod
+- Target soak duration (hours): 24
+R
 
   run_check "$root" >/dev/null
 
