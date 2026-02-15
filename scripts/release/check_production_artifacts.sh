@@ -198,6 +198,66 @@ R
 
   run_check "$root" >/dev/null
 
+  mkdir -p "$root/artifacts/interop/20260102T000000Z"
+  cat > "$root/artifacts/interop/20260102T000000Z/report.md" <<'R'
+# Interop Evidence Bundle
+
+- Matrix status: PASS
+R
+  if run_check "$root" >/dev/null 2>&1; then
+    echo "self-test failed: expected stale signoff interop reference failure" >&2
+    rm -rf "$tmp"
+    return 1
+  fi
+
+  cat > "$root/docs/release-signoff.md" <<'R'
+# Release Sign-off (zigtls)
+
+- Strict interop evidence bundle (`artifacts/interop/20260102T000000Z/`)
+- Reliability report (`artifacts/reliability/20260101T000000Z/report.md`)
+R
+
+  cat > "$root/docs/external-validation-2026-02-15.md" <<'R'
+# External Validation
+
+- interop evidence bundle:
+  - `artifacts/interop/20260101T000000Z/`
+R
+  if run_check "$root" >/dev/null 2>&1; then
+    echo "self-test failed: expected external interop mismatch failure" >&2
+    rm -rf "$tmp"
+    return 1
+  fi
+
+  cat > "$root/docs/external-validation-2026-02-15.md" <<'R'
+# External Validation
+
+- interop evidence bundle:
+  - `artifacts/interop/20260102T000000Z/`
+R
+
+  mkdir -p "$root/artifacts/reliability/20260102T000000Z"
+  cat > "$root/artifacts/reliability/20260102T000000Z/report.md" <<'R'
+# Soak/Chaos Reliability Report
+
+- Profile: prod
+- Target soak duration (hours): 24
+R
+  if run_check "$root" >/dev/null 2>&1; then
+    echo "self-test failed: expected stale signoff reliability reference failure" >&2
+    rm -rf "$tmp"
+    return 1
+  fi
+
+  cat > "$root/docs/release-signoff.md" <<'R'
+# Release Sign-off (zigtls)
+
+- Strict interop evidence bundle (`artifacts/interop/20260102T000000Z/`)
+- Reliability report (`artifacts/reliability/20260102T000000Z/report.md`)
+R
+
+  run_check "$root" >/dev/null
+
   rm "$root/docs/release-signoff.md"
   if run_check "$root" >/dev/null 2>&1; then
     echo "self-test failed: expected missing-doc failure" >&2
