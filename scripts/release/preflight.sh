@@ -127,6 +127,8 @@ run_cmd "bash scripts/release/check_api_surface.sh"
 run_cmd "bash -n scripts/release/check_dependency_baseline.sh"
 run_cmd "bash scripts/release/check_dependency_baseline.sh --self-test"
 run_cmd "bash scripts/release/check_dependency_baseline.sh"
+run_cmd "bash -n scripts/release/check_production_artifacts.sh"
+run_cmd "bash scripts/release/check_production_artifacts.sh --self-test"
 run_cmd "bash -n scripts/fuzz/replay_corpus.sh"
 run_cmd "bash scripts/fuzz/replay_corpus.sh --self-test"
 run_cmd "bash scripts/benchmark/run_local_perf.sh"
@@ -136,6 +138,7 @@ run_cmd "bash scripts/security/run_timing_harness.sh --assert"
 if [[ "$STRICT_INTEROP" -eq 1 ]]; then
   run_cmd "bash scripts/interop/matrix_local.sh --strict"
   run_cmd "bash scripts/interop/generate_evidence.sh"
+  run_cmd "bash scripts/release/check_production_artifacts.sh"
 fi
 
 echo "[preflight] all checks passed"
