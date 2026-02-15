@@ -1,17 +1,5 @@
 ALPNClient-EmptyProtocolName-TLS-TLS13
 ALPNClient-RejectUnknown-TLS-TLS13
-ALPNServer-Async-TLS-TLS13-Hints
-ALPNServer-Async-TLS-TLS13-Split
-ALPNServer-Decline-TLS-TLS13-Hints
-ALPNServer-Decline-TLS-TLS13-Split
-ALPNServer-EmptyProtocolName-TLS-TLS13
-ALPNServer-EmptyProtocolName-TLS-TLS13-Hints
-ALPNServer-EmptyProtocolName-TLS-TLS13-Split
-ALPNServer-Reject-TLS-TLS13-Hints
-ALPNServer-Reject-TLS-TLS13-Split
-ALPNServer-SelectEmpty-TLS-TLS13
-ALPNServer-SelectEmpty-TLS-TLS13-Hints
-ALPNServer-SelectEmpty-TLS-TLS13-Split
 Alert
 Alert-Hints
 Alert-Split
