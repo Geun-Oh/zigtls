@@ -58,9 +58,16 @@ pub fn main() !void {
     }
 
     if (hasFlag(args[1..], "is-handshaker-supported")) {
-        // Split-handshake handshaker path is not implemented in this shim.
         // BoGo expects explicit Yes/No on stdout with zero exit code.
-        try stdout.print("No\n", .{});
+        const parsed = parseArgs(args[1..]) catch {
+            try stdout.print("No\n", .{});
+            return;
+        };
+        if (isHandshakerSupported(parsed)) {
+            try stdout.writeAll("Yes\n");
+        } else {
+            try stdout.writeAll("No\n");
+        }
         return;
     }
 
@@ -283,6 +290,10 @@ fn decideTestRouting(cfg: Config) RoutingDecision {
     }
 
     return .unsupported;
+}
+
+fn isHandshakerSupported(cfg: Config) bool {
+    return decideTestRouting(cfg) == .pass;
 }
 
 fn isTls13Version(version: []const u8) bool {
@@ -631,6 +642,23 @@ test "routing rejects explicitly out-of-scope test name markers" {
         .test_name = "VersionNegotiation-Client2-TLS13-TLS12-TLS",
     };
     try std.testing.expectEqual(RoutingDecision.unsupported, decideTestRouting(cfg));
+}
+
+test "handshaker support follows routing decision for in-scope tls13 case" {
+    const cfg = Config{
+        .expect_version = "TLS1.3",
+        .expect_cipher = "TLS_AES_128_GCM_SHA256",
+        .test_name = "TLS13/BasicHandshake",
+    };
+    try std.testing.expect(isHandshakerSupported(cfg));
+}
+
+test "handshaker support rejects unsupported routing case" {
+    const cfg = Config{
+        .expect_version = "TLS1.2",
+        .test_name = "TLS13/BasicHandshake",
+    };
+    try std.testing.expect(!isHandshakerSupported(cfg));
 }
 
 test "configuredSuite maps expected cipher names" {
