@@ -41,7 +41,6 @@ pub const CertificateView = struct {
 pub const ValidationError = error{
     EmptyServerName,
     HostnameMismatch,
-    UnsupportedChainValidation,
     InvalidChain,
     ChainTooLong,
     LeafMustNotBeCa,
@@ -66,6 +65,11 @@ pub const PeerValidationResult = struct {
     ocsp_result: ocsp.ValidationResult,
 };
 
+pub const ChainRole = enum {
+    server,
+    client,
+};
+
 pub fn validateServerName(expected_server_name: []const u8, cert_dns_name: []const u8) ValidationError!void {
     if (expected_server_name.len == 0) return error.EmptyServerName;
 
@@ -74,8 +78,12 @@ pub fn validateServerName(expected_server_name: []const u8, cert_dns_name: []con
     }
 }
 
-pub fn validateChainPlaceholder(_: ValidationPolicy) ValidationError!void {
-    return error.UnsupportedChainValidation;
+pub fn validateChain(role: ChainRole, chain: []const CertificateView, policy: ValidationPolicy) ValidationError!void {
+    _ = policy;
+    return switch (role) {
+        .server => validateServerChain(chain),
+        .client => validateClientChain(chain),
+    };
 }
 
 pub fn validateServerChain(chain: []const CertificateView) ValidationError!void {
@@ -697,6 +705,32 @@ test "integrated peer validator default policy hard-fails unknown ocsp status" {
         },
         .now_sec = now,
     }));
+}
+
+test "role-aware validateChain dispatches to server checks" {
+    const chain = [_]CertificateView{
+        .{
+            .dns_name = "example.com",
+            .is_ca = false,
+            .key_usage = .{ .digital_signature = true },
+            .ext_key_usages = &.{.client_auth},
+        },
+    };
+
+    try std.testing.expectError(error.LeafMissingServerAuthEku, validateChain(.server, &chain, .{}));
+}
+
+test "role-aware validateChain dispatches to client checks" {
+    const chain = [_]CertificateView{
+        .{
+            .dns_name = "",
+            .is_ca = false,
+            .key_usage = .{ .digital_signature = true },
+            .ext_key_usages = &.{.server_auth},
+        },
+    };
+
+    try std.testing.expectError(error.LeafMissingClientAuthEku, validateChain(.client, &chain, .{}));
 }
 
 test "integrated peer validator default policy hard-fails missing ocsp next_update" {
