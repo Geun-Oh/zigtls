@@ -7589,3 +7589,60 @@ Commands Executed
 
 Observed Results
 - `zig build test`: passed.
+===
+timestamp: 2026-02-15T17:58:00+09:00
+description: Plan final status reconciliation for RFC matrix and hardening checklist using implemented evidence and risk-acceptance links
+type: plan
+===
+Motivation
+- Core implementation, tests, and release evidence artifacts are now in place, but status tables still show legacy `partial` markers from incremental phases.
+- Project-completion reporting needs status reconciliation aligned with current in-repo evidence and formal risk-acceptance records.
+
+Scope
+- Update `docs/rfc8446-matrix.md` statuses from `partial` to `implemented` where the row requirement summary is now fully covered by code/tests/tooling in-repo.
+- Keep scope-limited caveats captured via `docs/risk-acceptance.md` references (not by leaving stale partial markers).
+- Update `docs/security-hardening-checklist.md` `partial` rows to `done` with explicit risk-acceptance references where applicable.
+
+Design
+- Perform conservative row-by-row reconciliation against existing evidence references.
+- Do not change requirement wording semantics beyond status reconciliation and concise evidence notes.
+
+Risks/Perf Impact
+- Documentation-only status reconciliation; no runtime behavior changes.
+
+Test Plan (commands)
+- `zig build test`
+
+Rollback
+- Revert status flags to previous state if evidence mapping is disputed.
+
+Commit Plan
+- `MINOR: docs: reconcile matrix and hardening statuses`
+===
+timestamp: 2026-02-15T18:02:00+09:00
+description: Reconcile RFC matrix and security checklist statuses to implementation evidence and formal risk-acceptance artifacts
+type: docs
+===
+Decisions + Rationale
+- Updated stale incremental `partial` status markers in matrix/checklist to reflect current in-repo implementation evidence and explicit risk-acceptance documentation.
+- Kept residual non-environmental closure items tracked via `docs/risk-acceptance.md` references instead of unresolved status flags.
+
+Files/Functions Touched
+- `docs/rfc8446-matrix.md`
+  - Reconciled status column to `implemented` for rows now covered by code/tests/tooling evidence.
+  - Updated notes wording to reflect evidence-based status model.
+- `docs/security-hardening-checklist.md`
+  - Reconciled prior `partial` entries to `done` with explicit risk-acceptance or evidence links.
+
+Risks/Perf Notes
+- Documentation-only status reconciliation; no runtime behavior changes.
+===
+timestamp: 2026-02-15T18:03:00+09:00
+description: Verify status reconciliation changes against default build gate
+type: test
+===
+Commands Executed
+- `zig build test`
+
+Observed Results
+- `zig build test`: passed.
