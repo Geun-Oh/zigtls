@@ -9,12 +9,16 @@ set -euo pipefail
 #   BOGO_OUTPUT: output json file (default: bogo-results.json)
 #   BOGO_MAX_CRITICAL: maximum allowed critical failures in summary (default: 0)
 #   BOGO_ALLOW_UNIMPLEMENTED: pass -allow-unimplemented to runner (default: 1)
+#   BOGO_PROFILE: path to BoGo profile JSON for in/out-of-scope classification
+#   BOGO_STRICT: if 1, enforce strict in_scope_required gate (default: 0)
 
 : "${BORINGSSL_DIR:?BORINGSSL_DIR is required}"
 BOGO_FILTER="${BOGO_FILTER:-}"
 BOGO_OUTPUT="${BOGO_OUTPUT:-bogo-results.json}"
 BOGO_MAX_CRITICAL="${BOGO_MAX_CRITICAL:-0}"
 BOGO_ALLOW_UNIMPLEMENTED="${BOGO_ALLOW_UNIMPLEMENTED:-1}"
+BOGO_PROFILE="${BOGO_PROFILE:-}"
+BOGO_STRICT="${BOGO_STRICT:-0}"
 
 RUNNER="$BORINGSSL_DIR/ssl/test/runner"
 if [[ ! -d "$RUNNER" ]]; then
@@ -55,7 +59,14 @@ echo "Results: $RUNNER/$BOGO_OUTPUT"
 
 if [[ -f "$RUNNER/$BOGO_OUTPUT" ]]; then
   echo "BoGo summary:"
-  if ! python3 "$(dirname "$0")/bogo_summary.py" --max-critical "$BOGO_MAX_CRITICAL" "$RUNNER/$BOGO_OUTPUT"; then
+  SUMMARY_ARGS=(--max-critical "$BOGO_MAX_CRITICAL")
+  if [[ -n "$BOGO_PROFILE" ]]; then
+    SUMMARY_ARGS+=(--profile "$BOGO_PROFILE")
+  fi
+  if [[ "$BOGO_STRICT" == "1" ]]; then
+    SUMMARY_ARGS+=(--strict)
+  fi
+  if ! python3 "$(dirname "$0")/bogo_summary.py" "${SUMMARY_ARGS[@]}" "$RUNNER/$BOGO_OUTPUT"; then
     echo "warning: failed to summarize BoGo output" >&2
     exit 1
   fi

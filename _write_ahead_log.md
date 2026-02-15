@@ -7941,3 +7941,176 @@ Observed Results
 - `bogo_summary.py --self-test`: PASS.
 - `zig test tools/bogo_shim.zig`: PASS.
 - `zig build test`: PASS.
+===
+timestamp: 2026-02-15T12:36:27+09:00
+description: Plan full rewrite of _task.md to cover BoGo unimplemented areas and strict production-readiness closure
+type: plan
+===
+Motivation
+- Current repository can run BoGo in allow-unimplemented mode, but production-level completion requires explicit closure plan for skipped/unimplemented domains.
+- User requested  to include detailed implementation work so project is truly production-usable.
+
+Scope
+- Rewrite  with explicit workstreams for:
+  - BoGo unimplemented area closure (feature families, DTLS/TLS1.3 boundaries, strict-profile policy)
+  - Interop strict gates without allow-unimplemented fallback
+  - Security assurance depth (timing harness, policy parity)
+  - Operational readiness (SLOs, rollout, incident response, release gates)
+- Include phase-by-phase deliverables, acceptance criteria, test commands, and DoD.
+
+Design
+- Keep task document implementation-oriented with atomic milestones, measurable pass criteria, and CI/release integration requirements.
+- Separate "must for production" vs "optional/next" items to prevent ambiguity.
+
+Risks/Perf Impact
+- Documentation-only change; no runtime behavior impact.
+
+Test Plan (commands)
+- self-test: ok
+
+Rollback
+- Restore prior  revision.
+
+Commit Plan
+- Not committing in this step unless requested.
+===
+timestamp: 2026-02-15T12:36:39+09:00
+description: Supersede previous malformed plan entry and restate _task.md full rewrite plan
+type: plan
+===
+Decisions + Rationale
+- Previous plan append in this turn was partially corrupted by shell backtick expansion.
+- Per append-only WAL policy, this entry supersedes it as the authoritative plan.
+
+Motivation
+- Current repository can run BoGo in allow-unimplemented mode, but production-level completion requires explicit closure plan for skipped/unimplemented domains.
+- User requested `_task.md` to include detailed implementation work so project is truly production-usable.
+
+Scope
+- Rewrite `_task.md` with explicit workstreams for:
+  - BoGo unimplemented area closure (feature families, DTLS/TLS1.3 boundaries, strict-profile policy)
+  - Interop strict gates without allow-unimplemented fallback
+  - Security assurance depth (timing harness, policy parity)
+  - Operational readiness (SLOs, rollout, incident response, release gates)
+- Include phase-by-phase deliverables, acceptance criteria, test commands, and DoD.
+
+Design
+- Keep task document implementation-oriented with atomic milestones, measurable pass criteria, and CI/release integration requirements.
+- Separate "must for production" vs "optional/next" items to prevent ambiguity.
+
+Risks/Perf Impact
+- Documentation-only change; no runtime behavior impact.
+
+Test Plan (commands)
+- `zig build test`
+
+Rollback
+- Restore prior `_task.md` revision.
+
+Commit Plan
+- Not committing in this step unless requested.
+===
+timestamp: 2026-02-15T12:37:30+09:00
+description: Rewrite _task.md with strict production-completion plan focused on BoGo unimplemented closure
+type: docs
+===
+Decisions + Rationale
+- Replaced prior task spec with production-closure-oriented specification centered on strict profile validation.
+- Explicitly separated scope (`v1-prod`) from out-of-scope domains (TLS1.2/DTLS/QUIC/PAKE) to avoid ambiguous BoGo skip interpretation.
+- Added atomic workstreams for BoGo profile classification, strict gating, in-scope implementation closure, interop strict closure, timing harness, and performance regression assertions.
+
+Files/Functions Touched
+- Updated: `_task.md`
+
+Risks/Perf Notes
+- Documentation-only update; no runtime code path changes.
+===
+timestamp: 2026-02-15T12:37:30+09:00
+description: Validate repository test gate after _task.md rewrite
+type: test
+===
+Commands Executed
+- `zig build test`
+
+Observed Results
+- `zig build test`: passed (`self-test: ok`).
+===
+timestamp: 2026-02-15T12:38:48+09:00
+description: Plan implementation of WS-A BoGo strict profile foundation from _task.md
+type: plan
+===
+Motivation
+- User requested sequential completion of all tasks toward production deployability.
+- First blocking workstream is WS-A: BoGo strict profile classification, execution filtering, and summary gate semantics.
+
+Scope
+- Add BoGo profile artifact for v1-prod scope.
+- Extend bogo runner script to consume profile and enforce strict gate semantics.
+- Extend summary tooling to emit in-scope/out-of-scope metrics and strict pass/fail evaluation.
+- Add/adjust self-tests for new behavior.
+- Update docs references where needed.
+
+Design
+- Keep profile format deterministic (JSON) and script-friendly.
+- Implement strict gating in script layer first, without destabilizing TLS core runtime.
+- Preserve backward compatibility when profile is not provided.
+
+Risks/Perf Impact
+- Tooling-only change in interop scripts/docs.
+- No hot-path TLS runtime changes.
+
+Test Plan (commands)
+- `python3 scripts/interop/bogo_summary.py --self-test`
+- `bash -n scripts/interop/bogo_run.sh`
+- `zig build test`
+
+Rollback
+- Revert bogo profile/script/summary changes.
+
+Commit Plan
+- `MEDIUM: bogo: add v1-prod profile and strict gate pipeline`
+===
+timestamp: 2026-02-15T12:41:05+09:00
+description: Implement WS-A BoGo strict profile artifacts and strict-gate capable runner/summary tooling
+type: code change
+===
+Decisions + Rationale
+- Added explicit v1-prod BoGo profile artifacts to make in-scope/out-of-scope boundaries machine-evaluable.
+- Extended summary tooling to parse both legacy/new BoGo JSON schemas and compute profile-based strict metrics.
+- Extended runner wrapper to pass profile/strict options into summary and fail gate on strict violations.
+
+Files/Functions Touched
+- Added: `scripts/interop/bogo_profile_v1_prod.json`
+- Added: `docs/bogo-profile-v1-prod.md`
+- Updated: `scripts/interop/bogo_summary.py`
+  - Added `--profile` and `--strict` options.
+  - Added class-based aggregation (`classification`, `in_scope_required_total`, `in_scope_required_non_pass`, `out_of_scope_total`).
+  - Added strict gate evaluator and expanded self-tests.
+- Updated: `scripts/interop/bogo_run.sh`
+  - Added env options `BOGO_PROFILE`, `BOGO_STRICT`.
+  - Wired strict/profile arguments into summary invocation.
+- Updated: `docs/release-runbook.md`
+  - Added strict BoGo execution command and pass conditions.
+- Updated: `docs/release-signoff.md`
+  - Added BoGo profile artifacts to required attachments.
+
+Risks/Perf Notes
+- Interop tooling/documentation only; no TLS engine runtime-path change.
+===
+timestamp: 2026-02-15T12:41:05+09:00
+description: Validate WS-A tooling changes with self-tests and repository gate
+type: test
+===
+Commands Executed
+- `python3 scripts/interop/bogo_summary.py --self-test`
+- `bash -n scripts/interop/bogo_run.sh`
+- `python3 scripts/interop/bogo_summary.py --profile scripts/interop/bogo_profile_v1_prod.json --max-critical 0 /tmp/boringssl/ssl/test/runner/zigtls-bogo-results.json`
+- `python3 scripts/interop/bogo_summary.py --profile scripts/interop/bogo_profile_v1_prod.json --strict /tmp/boringssl/ssl/test/runner/zigtls-bogo-results.json` (expected strict failure on current baseline)
+- `zig build test`
+
+Observed Results
+- summary self-test: passed.
+- shell syntax check: passed.
+- profile summary output emitted expected classification metrics.
+- strict mode exits with code 4 on current baseline (`in_scope_required_non_pass=1336`), confirming gate enforcement path.
+- `zig build test`: passed.

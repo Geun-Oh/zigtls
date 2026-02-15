@@ -1,0 +1,35 @@
+{
+  "name": "v1-prod",
+  "version": 1,
+  "class_order": [
+    "out_of_scope",
+    "in_scope_required",
+    "in_scope_optional"
+  ],
+  "classes": {
+    "out_of_scope": [
+      "DTLS",
+      "\\bTLS1\\b|\\bTLS10\\b|\\bTLS11\\b|\\bTLS12\\b|TLS 1\\.2",
+      "\\bPAKE\\b",
+      "\\bQUIC\\b",
+      "\\bRenegotiation\\b",
+      "\\bCBC\\b|\\b3DES\\b",
+      "RSA_WITH_",
+      "\\bSPAKE\\b"
+    ],
+    "in_scope_required": [
+      "\\bTLS13\\b",
+      "HRR|HelloRetryRequest",
+      "KeyUpdate",
+      "Resumption|SessionTicket|PSK",
+      "Alert|close_notify",
+      "BasicHandshake|Basic"
+    ],
+    "in_scope_optional": [
+      "CertificateSelection",
+      "TrustAnchors",
+      "Certificate|OCSP|X509"
+    ]
+  },
+  "default_class": "out_of_scope"
+}
