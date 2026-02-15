@@ -407,16 +407,20 @@ fn shouldUseStdTlsClient(cfg: Config, is_server: bool) bool {
 }
 
 fn shouldAttemptDelegate(args: []const []const u8, cfg: Config, is_server: bool) bool {
-    _ = is_server;
+    const std_fallback_mode = shouldUseStdTlsClient(cfg, is_server);
     if (std.posix.getenv("BOGO_DISABLE_AUTO_DELEGATE_SHIM") != null) return false;
     if (std.posix.getenv("BOGO_ENABLE_DELEGATE_SHIM") != null) return true;
 
-    if (@import("builtin").os.tag != .linux) return false;
-
     // Handshaker-mode invocations need complete runner protocol coverage.
-    if (cfg.test_name != null) return false;
-    if (cfg.shim_id == null) return false;
-    return hasFlag(args, "handshaker-path");
+    if (cfg.test_name == null and cfg.shim_id != null and hasFlag(args, "handshaker-path")) {
+        return @import("builtin").os.tag == .linux;
+    }
+
+    if (std_fallback_mode and cfg.resume_count > 1 and std.posix.getenv("BOGO_DISABLE_AUTO_DELEGATE_RESUME") == null) {
+        return true;
+    }
+
+    return false;
 }
 
 fn isShimDebugEnabled() bool {
@@ -848,6 +852,21 @@ test "delegate selector remains disabled without handshaker hints in auto mode" 
     };
     const cfg = try parseArgs(&args);
     try std.testing.expect(!shouldAttemptDelegate(&args, cfg, false));
+}
+
+test "delegate selector enables resume fallback auto-delegate for multi-round client mode" {
+    const args = [_][]const u8{
+        "--port",
+        "8443",
+        "--shim-id",
+        "7",
+        "--resume-count",
+        "2",
+        "--trust-cert",
+        "/tmp/cert.pem",
+    };
+    const cfg = try parseArgs(&args);
+    try std.testing.expect(shouldAttemptDelegate(&args, cfg, false));
 }
 
 test "format connect target wraps ipv6 literals" {

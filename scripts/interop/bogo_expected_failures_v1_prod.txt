@@ -239,7 +239,6 @@ TLS-HintMismatch-HandshakerHelloRetryRequest
 TLS-HintMismatch-HandshakerHelloRetryRequest-Hints
 TLS-HintMismatch-ShimHelloRetryRequest
 TLS-HintMismatch-ShimHelloRetryRequest-Hints
-TLS13-1RTT-Client-TLS-Async
 TLS13-1RTT-Server-TLS-Async
 TLS13-1RTT-Server-TLS-Async-Hints
 TLS13-1RTT-Server-TLS-Async-ImplicitHandshake
