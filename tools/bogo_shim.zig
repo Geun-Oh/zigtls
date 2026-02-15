@@ -10,8 +10,10 @@ const Exit = enum(u8) {
 
 const Config = struct {
     is_server: bool = false,
+    role_explicit: bool = false,
     host: []const u8 = "127.0.0.1",
     port: u16 = 0,
+    shim_id: ?u32 = null,
     min_version: ?u16 = null,
     max_version: ?u16 = null,
     dtls: bool = false,
@@ -86,10 +88,14 @@ pub fn main() !void {
 
     const decision = decideTestRouting(parsed);
 
+    const resolved_is_server = resolveRuntimeRole(parsed);
+
     std.debug.print(
-        "bogo-shim: run mode (role={s}, host={s}, port={d}, min_version={s}, max_version={s}, dtls={any}, quic={any}, expect_version={s}, cipher={s}, test={s}, decision={s})\n",
+        "bogo-shim: run mode (role={s}, explicit_role={any}, shim_id={s}, host={s}, port={d}, min_version={s}, max_version={s}, dtls={any}, quic={any}, expect_version={s}, cipher={s}, test={s}, decision={s})\n",
         .{
-            if (parsed.is_server) "server" else "client",
+            if (resolved_is_server) "server" else "client",
+            parsed.role_explicit,
+            if (parsed.shim_id) |_| "set" else "(none)",
             parsed.host,
             parsed.port,
             versionString(parsed.min_version),
@@ -105,7 +111,7 @@ pub fn main() !void {
 
     switch (decision) {
         .pass => {
-            Relay.runExchange(gpa, parsed) catch |err| {
+            Relay.runExchange(gpa, parsed, resolved_is_server) catch |err| {
                 std.debug.print("bogo-shim: socket exchange failed: {s}\n", .{@errorName(err)});
                 std.process.exit(@intFromEnum(Exit.unsupported));
             };
@@ -140,10 +146,12 @@ fn parseArgs(args: []const []const u8) !Config {
         const arg = args[i];
         if (flagEq(arg, "server")) {
             cfg.is_server = true;
+            cfg.role_explicit = true;
             continue;
         }
         if (flagEq(arg, "client")) {
             cfg.is_server = false;
+            cfg.role_explicit = true;
             continue;
         }
 
@@ -156,6 +164,12 @@ fn parseArgs(args: []const []const u8) !Config {
         if (flagEq(arg, "port")) {
             if (i + 1 >= args.len) return error.MissingValue;
             cfg.port = try std.fmt.parseInt(u16, args[i + 1], 10);
+            i += 1;
+            continue;
+        }
+        if (flagEq(arg, "shim-id")) {
+            if (i + 1 >= args.len) return error.MissingValue;
+            cfg.shim_id = try std.fmt.parseInt(u32, args[i + 1], 10);
             i += 1;
             continue;
         }
@@ -210,6 +224,10 @@ fn parseArgs(args: []const []const u8) !Config {
         }
         if (flagValue(arg, "port")) |v| {
             cfg.port = try std.fmt.parseInt(u16, v, 10);
+            continue;
+        }
+        if (flagValue(arg, "shim-id")) |v| {
+            cfg.shim_id = try std.fmt.parseInt(u32, v, 10);
             continue;
         }
         if (flagValue(arg, "expect-version")) |v| {
@@ -325,6 +343,22 @@ fn isHandshakerSupported(cfg: Config) bool {
     return decideTestRouting(cfg) == .pass;
 }
 
+fn resolveRuntimeRole(cfg: Config) bool {
+    if (cfg.role_explicit) return cfg.is_server;
+
+    if (cfg.test_name) |name| {
+        if (std.mem.indexOf(u8, name, "-Client-") != null) return true;
+        if (std.mem.indexOf(u8, name, "-Server-") != null) return false;
+    }
+
+    if (cfg.shim_id) |id| {
+        return id == 0;
+    }
+
+    // Prefer passive/listen behavior when runner omits role flags.
+    return true;
+}
+
 fn isTls13Version(version: []const u8) bool {
     return std.mem.indexOf(u8, version, "1.3") != null;
 }
@@ -376,17 +410,17 @@ const Relay = if (has_zigtls) struct {
     const zigtls = @import("zigtls");
     const termination = zigtls.termination;
 
-    fn runExchange(allocator: std.mem.Allocator, cfg: Config) !void {
+    fn runExchange(allocator: std.mem.Allocator, cfg: Config, is_server: bool) !void {
         var conn = termination.Connection.init(allocator, .{
             .session = .{
-                .role = if (cfg.is_server) .server else .client,
+                .role = if (is_server) .server else .client,
                 .suite = configuredSuite(cfg.expect_cipher),
             },
         });
         defer conn.deinit();
         conn.accept(.{});
 
-        if (cfg.is_server) {
+        if (is_server) {
             try runServer(cfg, &conn);
         } else {
             try runClient(cfg, &conn);
@@ -471,8 +505,8 @@ const Relay = if (has_zigtls) struct {
         return .tls_aes_128_gcm_sha256;
     }
 } else struct {
-    fn runExchange(_: std.mem.Allocator, cfg: Config) !void {
-        if (cfg.is_server) {
+    fn runExchange(_: std.mem.Allocator, cfg: Config, is_server: bool) !void {
+        if (is_server) {
             try runServer(cfg);
         } else {
             try runClient(cfg);
@@ -561,8 +595,9 @@ test "parse args ignores unknown flags and positional values" {
 }
 
 test "parse args supports equals-form key value flags" {
-    const cfg = try parseArgs(&.{ "--port=9443", "--expect-version=TLS1.3", "--test-name=TLS13/EqualsForm" });
+    const cfg = try parseArgs(&.{ "--port=9443", "--shim-id=7", "--expect-version=TLS1.3", "--test-name=TLS13/EqualsForm" });
     try std.testing.expectEqual(@as(u16, 9443), cfg.port);
+    try std.testing.expectEqual(@as(?u32, 7), cfg.shim_id);
     try std.testing.expectEqualStrings("TLS1.3", cfg.expect_version.?);
     try std.testing.expectEqualStrings("TLS13/EqualsForm", cfg.test_name.?);
 }
@@ -577,6 +612,22 @@ test "parse args rejects non-numeric port value" {
 
 test "parse args rejects overflowing port value" {
     try std.testing.expectError(error.Overflow, parseArgs(&.{ "--port", "70000" }));
+}
+
+test "runtime role honors explicit flags before inference" {
+    try std.testing.expect(resolveRuntimeRole(.{ .is_server = true, .role_explicit = true }) == true);
+    try std.testing.expect(resolveRuntimeRole(.{ .is_server = false, .role_explicit = true }) == false);
+}
+
+test "runtime role infers from test name when available" {
+    try std.testing.expect(resolveRuntimeRole(.{ .test_name = "Basic-Client-NoTicket-TLS-Async" }) == true);
+    try std.testing.expect(resolveRuntimeRole(.{ .test_name = "Basic-Server-TLS-Async" }) == false);
+}
+
+test "runtime role infers from shim id and defaults to server" {
+    try std.testing.expect(resolveRuntimeRole(.{ .shim_id = 0 }) == true);
+    try std.testing.expect(resolveRuntimeRole(.{ .shim_id = 1 }) == false);
+    try std.testing.expect(resolveRuntimeRole(.{}) == true);
 }
 
 test "routing passes for tls13 basic case" {
