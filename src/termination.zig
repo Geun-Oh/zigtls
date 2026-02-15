@@ -1,4 +1,5 @@
 const std = @import("std");
+const cert_reload = @import("cert_reload.zig");
 const metrics = @import("metrics.zig");
 const rate_limit = @import("rate_limit.zig");
 const tls13 = @import("tls13.zig");
@@ -9,6 +10,9 @@ pub const Config = struct {
     callback_userdata: usize = 0,
     handshake_rate_limiter: ?*rate_limit.TokenBucket = null,
     now_ns: ?NowNsFn = null,
+    now_unix: ?NowUnixFn = null,
+    cert_store: ?*cert_reload.Store = null,
+    ticket_key_manager: ?*tls13.ticket_keys.Manager = null,
     on_log: ?LogCallback = null,
     log_userdata: usize = 0,
 };
@@ -32,6 +36,7 @@ pub const ClientHelloMetadata = struct {
 
 pub const ClientHelloCallback = *const fn (meta: ClientHelloMetadata, userdata: usize) void;
 pub const NowNsFn = *const fn () u64;
+pub const NowUnixFn = *const fn () i64;
 pub const LogCallback = *const fn (event: LogEvent, record: LogRecord, userdata: usize) void;
 
 pub const LogEvent = enum {
@@ -50,6 +55,11 @@ pub const LogRecord = struct {
     alert_description: ?tls13.alerts.AlertDescription = null,
 };
 
+pub const RuntimeBindings = struct {
+    cert_generation: ?u64 = null,
+    ticket_key_id: ?u32 = null,
+};
+
 pub const Connection = struct {
     allocator: std.mem.Allocator,
     config: Config,
@@ -62,6 +72,8 @@ pub const Connection = struct {
     handshake_finalized: bool = false,
     connection_id: u64 = 0,
     correlation_id: u64 = 0,
+    active_cert_generation: ?u64 = null,
+    active_ticket_key_id: ?u32 = null,
 
     pub fn init(allocator: std.mem.Allocator, config: Config) Connection {
         return .{
@@ -195,6 +207,13 @@ pub const Connection = struct {
         return self.telemetry;
     }
 
+    pub fn snapshot_runtime_bindings(self: Connection) RuntimeBindings {
+        return .{
+            .cert_generation = self.active_cert_generation,
+            .ticket_key_id = self.active_ticket_key_id,
+        };
+    }
+
     fn collectActions(self: *Connection, result: tls13.session.IngestResult) Error!void {
         var i: usize = 0;
         while (i < result.action_count) : (i += 1) {
@@ -279,6 +298,7 @@ pub const Connection = struct {
         const now = self.nowNs();
         self.telemetry.observeHandshakeFinished(true, now - started);
         self.handshake_finalized = true;
+        self.captureRuntimeBindings();
         self.emitLog(.handshake_succeeded, null);
     }
 
@@ -294,6 +314,23 @@ pub const Connection = struct {
     fn nowNs(self: Connection) u64 {
         if (self.config.now_ns) |f| return f();
         return @as(u64, @intCast(std.time.nanoTimestamp()));
+    }
+
+    fn nowUnix(self: Connection) i64 {
+        if (self.config.now_unix) |f| return f();
+        return std.time.timestamp();
+    }
+
+    fn captureRuntimeBindings(self: *Connection) void {
+        if (self.config.cert_store) |store| {
+            if (store.snapshot()) |snap| {
+                self.active_cert_generation = snap.generation;
+            }
+        }
+        if (self.config.ticket_key_manager) |manager| {
+            const key = manager.currentEncryptKey(self.nowUnix()) catch return;
+            self.active_ticket_key_id = key.key_id;
+        }
     }
 
     fn emitLog(self: *Connection, event: LogEvent, alert_description: ?tls13.alerts.AlertDescription) void {
@@ -374,6 +411,10 @@ fn onLog(event: LogEvent, record: LogRecord, userdata: usize) void {
         cap.seen_count += 1;
     }
     cap.last_record = record;
+}
+
+fn fixedNowUnix() i64 {
+    return 10;
 }
 
 fn buildClientHelloRecord(allocator: std.mem.Allocator) ![]u8 {
@@ -604,4 +645,49 @@ test "logging callback includes correlation id and lifecycle events" {
     try std.testing.expectEqual(LogEvent.accepted, log_cap.seen[0]);
     try std.testing.expectEqual(@as(u64, 10), log_cap.last_record.connection_id);
     try std.testing.expectEqual(@as(u64, 77), log_cap.last_record.correlation_id);
+}
+
+test "handshake success captures cert generation and ticket key id bindings" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "cert.pem", .data = "CERT-X" });
+    try tmp.dir.writeFile(.{ .sub_path = "key.pem", .data = "KEY-X" });
+    const cert_path = try tmp.dir.realpathAlloc(std.testing.allocator, "cert.pem");
+    defer std.testing.allocator.free(cert_path);
+    const key_path = try tmp.dir.realpathAlloc(std.testing.allocator, "key.pem");
+    defer std.testing.allocator.free(key_path);
+
+    var store = cert_reload.Store.init(std.testing.allocator);
+    defer store.deinit();
+    _ = try store.reloadFromFiles(cert_path, key_path);
+
+    var manager = tls13.ticket_keys.Manager.init();
+    try manager.rotate(.{
+        .key_id = 88,
+        .material = [_]u8{0xaa} ** 32,
+        .not_before_unix = 0,
+        .not_after_unix = 100,
+    });
+
+    var conn = Connection.init(std.testing.allocator, .{
+        .session = .{ .role = .server, .suite = .tls_aes_128_gcm_sha256 },
+        .cert_store = &store,
+        .ticket_key_manager = &manager,
+        .now_unix = fixedNowUnix,
+    });
+    defer conn.deinit();
+    conn.accept(.{ .connection_id = 1 });
+    conn.handshake_started_at_ns = conn.nowNs();
+
+    var res = tls13.session.IngestResult{
+        .consumed = 0,
+        .actions = undefined,
+        .action_count = 1,
+    };
+    res.actions[0] = .{ .state_changed = .connected };
+    try conn.collectActions(res);
+
+    const bindings = conn.snapshot_runtime_bindings();
+    try std.testing.expectEqual(@as(?u64, 1), bindings.cert_generation);
+    try std.testing.expectEqual(@as(?u32, 88), bindings.ticket_key_id);
 }
