@@ -254,11 +254,18 @@ pub fn build(b: *std.Build) void {
         "scripts/interop/bogo_run.sh",
         "scripts/interop/generate_evidence.sh",
         "scripts/security/run_timing_harness.sh",
+        "scripts/reliability/run_soak_chaos.sh",
     });
 
     const timing_harness_self_test = b.addSystemCommand(&.{
         "bash",
         "scripts/security/run_timing_harness.sh",
+        "--self-test",
+    });
+
+    const reliability_self_test = b.addSystemCommand(&.{
+        "bash",
+        "scripts/reliability/run_soak_chaos.sh",
         "--self-test",
     });
 
@@ -274,6 +281,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&interop_matrix_self_test.step);
     test_step.dependOn(&bogo_summary_self_test.step);
     test_step.dependOn(&timing_harness_self_test.step);
+    test_step.dependOn(&reliability_self_test.step);
     test_step.dependOn(&interop_shell_syntax_check.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
