@@ -186,6 +186,18 @@ pub fn build(b: *std.Build) void {
     });
     const run_bogo_shim_tests = b.addRunArtifact(bogo_shim_tests);
 
+    const interop_matrix_self_test = b.addSystemCommand(&.{
+        "bash",
+        "scripts/interop/matrix_local.sh",
+        "--self-test",
+    });
+
+    const bogo_summary_self_test = b.addSystemCommand(&.{
+        "python3",
+        "scripts/interop/bogo_summary.py",
+        "--self-test",
+    });
+
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
@@ -194,6 +206,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_corpus_replay_tests.step);
     test_step.dependOn(&run_bogo_shim_tests.step);
+    test_step.dependOn(&interop_matrix_self_test.step);
+    test_step.dependOn(&bogo_summary_self_test.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

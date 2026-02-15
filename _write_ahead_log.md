@@ -6732,3 +6732,73 @@ Commands Executed
 Observed Results
 - `bogo_shim.zig`: 6/6 tests passed.
 - `zig build test`: passed.
+===
+timestamp: 2026-02-15T14:34:00+09:00
+description: Plan interop script self-tests integration into build test gate
+type: plan
+===
+Motivation
+- Interop/BoGo script self-tests exist (`matrix_local.sh --self-test`, `bogo_summary.py --self-test`) but are not executed by default in `zig build test`.
+- INTOP/BOGO readiness requires deterministic script-level regression checks in the standard test gate.
+
+Scope
+- Add build graph system-test steps to run:
+  - `bash scripts/interop/matrix_local.sh --self-test`
+  - `python3 scripts/interop/bogo_summary.py --self-test`
+- Attach both steps to top-level `zig build test`.
+- Update RFC matrix INTOP-001 / BOGO-001 coverage wording.
+
+Design
+- Use `b.addSystemCommand` with explicit argv arrays and depend those steps into `test_step`.
+- Keep existing unit/self-tests unchanged; only gate wiring and docs updates.
+
+Risks/Perf Impact
+- Slight `zig build test` runtime increase due to two script self-tests.
+- Environment dependency on `bash` and `python3` in test gate.
+
+Test Plan (commands)
+- `bash scripts/interop/matrix_local.sh --self-test`
+- `python3 scripts/interop/bogo_summary.py --self-test`
+- `zig build test`
+
+Rollback
+- Remove script self-test build dependencies and doc wording updates.
+
+Commit Plan
+- `MINOR: interop: gate script self-tests in build test`
+===
+timestamp: 2026-02-15T14:37:00+09:00
+description: Gate interop and BoGo script self-tests in default build test flow
+type: code change
+===
+Decisions + Rationale
+- Wired script-level interoperability self-tests into `zig build test` to enforce deterministic regression coverage for INTOP/BOGO tooling in default gate.
+- Added explicit build-system command steps rather than ad-hoc CI-only scripts so local and CI verification paths remain aligned.
+
+Files/Functions Touched
+- `build.zig`
+  - Added system test steps:
+    - `bash scripts/interop/matrix_local.sh --self-test`
+    - `python3 scripts/interop/bogo_summary.py --self-test`
+  - Attached both steps to top-level `test_step` dependencies.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-INTOP-001` and `RFC8446-BOGO-001` coverage wording to reflect build-gated script self-tests.
+
+Risks/Perf Notes
+- Slight `zig build test` runtime increase from two additional script checks.
+- Test gate now depends on availability of `bash` and `python3` in environment.
+===
+timestamp: 2026-02-15T14:38:00+09:00
+description: Verify build-gated interop and bogo script self-tests
+type: test
+===
+Commands Executed
+- `zig fmt build.zig`
+- `bash scripts/interop/matrix_local.sh --self-test`
+- `python3 scripts/interop/bogo_summary.py --self-test`
+- `zig build test`
+
+Observed Results
+- `matrix_local.sh --self-test`: `self-test: ok`.
+- `bogo_summary.py --self-test`: `self-test: ok`.
+- `zig build test`: passed.
