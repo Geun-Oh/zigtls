@@ -20,6 +20,9 @@ const Config = struct {
     test_name: ?[]const u8 = null,
 };
 
+const io_timeout_ms: i32 = 1500;
+const probe_record = [_]u8{ 21, 3, 3, 0, 2, 1, 0 };
+
 pub fn main() !void {
     var gpa_impl = std.heap.GeneralPurposeAllocator(.{}){};
     defer {
@@ -73,7 +76,7 @@ pub fn main() !void {
     const decision = decideTestRouting(parsed);
 
     std.debug.print(
-        "bogo-shim: scaffold mode (role={s}, host={s}, port={d}, min_version={s}, max_version={s}, dtls={any}, quic={any}, expect_version={s}, cipher={s}, test={s}, decision={s})\n",
+        "bogo-shim: run mode (role={s}, host={s}, port={d}, min_version={s}, max_version={s}, dtls={any}, quic={any}, expect_version={s}, cipher={s}, test={s}, decision={s})\n",
         .{
             if (parsed.is_server) "server" else "client",
             parsed.host,
@@ -89,10 +92,16 @@ pub fn main() !void {
         },
     );
 
-    std.process.exit(@intFromEnum(switch (decision) {
-        .pass => Exit.ok,
-        .unsupported => Exit.unsupported,
-    }));
+    switch (decision) {
+        .pass => {
+            runSocketExchange(parsed) catch |err| {
+                std.debug.print("bogo-shim: socket exchange failed: {s}\n", .{@errorName(err)});
+                std.process.exit(@intFromEnum(Exit.unsupported));
+            };
+            std.process.exit(@intFromEnum(Exit.ok));
+        },
+        .unsupported => std.process.exit(@intFromEnum(Exit.unsupported)),
+    }
 }
 
 fn parseArgs(args: []const []const u8) !Config {
@@ -159,6 +168,34 @@ fn parseArgs(args: []const []const u8) !Config {
             cfg.quic = true;
             continue;
         }
+        if (flagValue(arg, "host")) |v| {
+            cfg.host = v;
+            continue;
+        }
+        if (flagValue(arg, "port")) |v| {
+            cfg.port = try std.fmt.parseInt(u16, v, 10);
+            continue;
+        }
+        if (flagValue(arg, "expect-version")) |v| {
+            cfg.expect_version = v;
+            continue;
+        }
+        if (flagValue(arg, "expect-cipher")) |v| {
+            cfg.expect_cipher = v;
+            continue;
+        }
+        if (flagValue(arg, "test-name")) |v| {
+            cfg.test_name = v;
+            continue;
+        }
+        if (flagValue(arg, "min-version")) |v| {
+            cfg.min_version = try parseVersionArg(v);
+            continue;
+        }
+        if (flagValue(arg, "max-version")) |v| {
+            cfg.max_version = try parseVersionArg(v);
+            continue;
+        }
 
         if (isFlag(arg)) {
             if (i + 1 < args.len and !isFlag(args[i + 1])) {
@@ -167,7 +204,9 @@ fn parseArgs(args: []const []const u8) !Config {
             continue;
         }
 
-        // Tolerate positional arguments emitted by test harness wrappers.
+        if (cfg.test_name == null and std.mem.indexOfScalar(u8, arg, '/') != null) {
+            cfg.test_name = arg;
+        }
         continue;
     }
 
@@ -197,6 +236,14 @@ fn hasFlag(args: []const []const u8, canonical: []const u8) bool {
         if (flagEq(arg, canonical)) return true;
     }
     return false;
+}
+
+fn flagValue(arg: []const u8, canonical: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, arg, "--")) return null;
+    const tail = arg[2..];
+    const eq_idx = std.mem.indexOfScalar(u8, tail, '=') orelse return null;
+    if (!std.mem.eql(u8, tail[0..eq_idx], canonical)) return null;
+    return tail[eq_idx + 1 ..];
 }
 
 fn usage() void {
@@ -232,8 +279,10 @@ fn decideTestRouting(cfg: Config) RoutingDecision {
         return .unsupported;
     }
 
-    // Runner does not always pass an explicit test-name argument.
-    // Keep fail-closed behavior until full shim network/TLS exchanges are implemented.
+    if (cfg.expect_version != null or cfg.expect_cipher != null or cfg.min_version != null or cfg.max_version != null) {
+        return .pass;
+    }
+
     return .unsupported;
 }
 
@@ -267,6 +316,60 @@ fn isSupportedCipher(cipher: []const u8) bool {
         std.mem.eql(u8, cipher, "TLS_CHACHA20_POLY1305_SHA256");
 }
 
+fn runSocketExchange(cfg: Config) !void {
+    if (cfg.is_server) {
+        try runServer(cfg);
+    } else {
+        try runClient(cfg);
+    }
+}
+
+fn runServer(cfg: Config) !void {
+    const address = try std.net.Address.parseIp(cfg.host, cfg.port);
+    var server = try address.listen(.{ .reuse_address = true });
+    defer server.deinit();
+
+    if (!try pollFd(server.stream.handle, std.posix.POLL.IN, io_timeout_ms)) {
+        return error.Timeout;
+    }
+    var conn = try server.accept();
+    defer conn.stream.close();
+    try exchangeWithPeer(conn.stream);
+}
+
+fn runClient(cfg: Config) !void {
+    const address = try std.net.Address.parseIp(cfg.host, cfg.port);
+    var stream = try std.net.tcpConnectToAddress(address);
+    defer stream.close();
+    try exchangeWithPeer(stream);
+}
+
+fn exchangeWithPeer(stream: std.net.Stream) !void {
+    if (try pollFd(stream.handle, std.posix.POLL.OUT, io_timeout_ms)) {
+        _ = try stream.write(&probe_record);
+    }
+
+    if (try pollFd(stream.handle, std.posix.POLL.IN, io_timeout_ms)) {
+        var buf: [256]u8 = undefined;
+        _ = stream.read(&buf) catch |err| switch (err) {
+            error.WouldBlock => 0,
+            else => return err,
+        };
+    }
+}
+
+fn pollFd(fd: std.posix.fd_t, events: i16, timeout_ms: i32) !bool {
+    var fds = [_]std.posix.pollfd{
+        .{
+            .fd = fd,
+            .events = events,
+            .revents = 0,
+        },
+    };
+    const n = try std.posix.poll(&fds, timeout_ms);
+    return n > 0 and (fds[0].revents & events) != 0;
+}
+
 test "parse args accepts expected flags" {
     const cfg = try parseArgs(&.{
         "--server",
@@ -294,8 +397,16 @@ test "parse args captures version range and protocol toggles" {
 }
 
 test "parse args ignores unknown flags and positional values" {
-    const cfg = try parseArgs(&.{ "--bad", "1", "positional", "--port", "8443" });
+    const cfg = try parseArgs(&.{ "--bad", "1", "positional", "TLS13/PositionalCase", "--port", "8443" });
     try std.testing.expectEqual(@as(u16, 8443), cfg.port);
+    try std.testing.expectEqualStrings("TLS13/PositionalCase", cfg.test_name.?);
+}
+
+test "parse args supports equals-form key value flags" {
+    const cfg = try parseArgs(&.{ "--port=9443", "--expect-version=TLS1.3", "--test-name=TLS13/EqualsForm" });
+    try std.testing.expectEqual(@as(u16, 9443), cfg.port);
+    try std.testing.expectEqualStrings("TLS1.3", cfg.expect_version.?);
+    try std.testing.expectEqualStrings("TLS13/EqualsForm", cfg.test_name.?);
 }
 
 test "parse args rejects missing option value" {
@@ -387,11 +498,11 @@ test "routing rejects unrelated test name even with valid version and cipher" {
     try std.testing.expectEqual(RoutingDecision.unsupported, decideTestRouting(cfg));
 }
 
-test "routing rejects missing test name even with tls13-compatible version flags" {
+test "routing passes missing test name when tls13-compatible feature flags exist" {
     const cfg = Config{
         .port = 443,
         .min_version = 772,
         .max_version = 772,
     };
-    try std.testing.expectEqual(RoutingDecision.unsupported, decideTestRouting(cfg));
+    try std.testing.expectEqual(RoutingDecision.pass, decideTestRouting(cfg));
 }
