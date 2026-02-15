@@ -8196,3 +8196,90 @@ Observed Results
 - matrix self-test: passed (`self-test: ok`).
 - strict matrix run: PASS (openssl/rustls/nss all PASS).
 - `zig build test`: passed.
+===
+timestamp: 2026-02-15T12:43:26+09:00
+description: Plan WS-E1 implementation of benchmark assertion mode
+ type: plan
+===
+Motivation
+- _task.md requires performance gate to support assertion mode for regression detection.
+- Current benchmark wrapper prints metrics but does not enforce pass/fail thresholds.
+
+Scope
+- Extend `scripts/benchmark/run_local_perf.sh` with `--assert` mode.
+- Parse perf probe output and enforce configurable min/max thresholds.
+- Keep defaults conservative and overrideable via env vars.
+- Update docs to include assertion command usage.
+
+Risks/Perf Impact
+- Benchmark script/docs change only; no runtime TLS engine behavior change.
+
+Test Plan (commands)
+- `bash scripts/benchmark/run_local_perf.sh`
+- `bash scripts/benchmark/run_local_perf.sh --assert`
+- `bash -n scripts/benchmark/run_local_perf.sh`
+- `zig build test`
+
+Rollback
+- Revert assertion mode additions.
+
+Commit Plan
+- `MINOR: perf: add assertion mode to local performance probe`
+===
+timestamp: 2026-02-15T12:43:33+09:00
+description: Supersede malformed WS-E1 plan metadata entry for performance assertion mode
+type: plan
+===
+Decisions + Rationale
+- Prior WS-E1 plan append had malformed metadata key formatting for `type`.
+- This entry supersedes it as the authoritative plan.
+
+Scope
+- Add `--assert` to `scripts/benchmark/run_local_perf.sh`.
+- Enforce configurable threshold checks for throughput/latency and basic output sanity.
+- Update release/perf docs for assertion invocation.
+
+Test Plan (commands)
+- `bash scripts/benchmark/run_local_perf.sh`
+- `bash scripts/benchmark/run_local_perf.sh --assert`
+- `bash -n scripts/benchmark/run_local_perf.sh`
+- `zig build test`
+===
+timestamp: 2026-02-15T12:44:42+09:00
+description: Implement WS-E1 assertion mode for local performance probe gate
+type: code change
+===
+Decisions + Rationale
+- Added `--assert` mode to benchmark wrapper so performance regressions can fail release gate automatically.
+- Thresholds are conservative defaults and configurable via environment variables for host-class calibration.
+
+Files/Functions Touched
+- Updated `scripts/benchmark/run_local_perf.sh`
+  - Added argument parser (`--assert`).
+  - Added suite throughput/latency threshold checks.
+  - Added memory-ceiling sanity checks.
+  - Added explicit pass/fail exit behavior for regression gating.
+- Updated `docs/performance-baseline.md`
+  - Added assert command and threshold override documentation.
+- Updated `docs/release-runbook.md`
+  - Added assert invocation in performance gate section.
+- Updated `scripts/release/preflight.sh`
+  - Added `run_local_perf.sh --assert` to preflight sequence.
+
+Risks/Perf Notes
+- Script/docs-only; no TLS runtime path changes.
+- Threshold defaults may require tuning per deployment class via env overrides.
+===
+timestamp: 2026-02-15T12:44:42+09:00
+description: Validate WS-E1 performance assertion mode and regression gates
+type: test
+===
+Commands Executed
+- `bash -n scripts/benchmark/run_local_perf.sh scripts/release/preflight.sh`
+- `bash scripts/benchmark/run_local_perf.sh --assert`
+- `zig build test`
+
+Observed Results
+- shell syntax checks: passed.
+- perf probe assertion mode: passed (`[perf][assert] PASSED`).
+- `zig build test`: passed.
