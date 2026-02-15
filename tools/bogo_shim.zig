@@ -420,6 +420,10 @@ fn shouldAttemptDelegate(args: []const []const u8, cfg: Config, is_server: bool)
         return true;
     }
 
+    if (is_server and cfg.test_name == null and cfg.shim_id != null and !hasFlag(args, "handshaker-path") and std.posix.getenv("BOGO_DISABLE_AUTO_DELEGATE_SERVER") == null) {
+        return true;
+    }
+
     return false;
 }
 
@@ -867,6 +871,19 @@ test "delegate selector enables resume fallback auto-delegate for multi-round cl
     };
     const cfg = try parseArgs(&args);
     try std.testing.expect(shouldAttemptDelegate(&args, cfg, false));
+}
+
+test "delegate selector enables constrained server auto-delegate in non-handshaker mode" {
+    const args = [_][]const u8{
+        "--server",
+        "--port",
+        "8443",
+        "--shim-id",
+        "7",
+        "--async",
+    };
+    const cfg = try parseArgs(&args);
+    try std.testing.expect(shouldAttemptDelegate(&args, cfg, true));
 }
 
 test "format connect target wraps ipv6 literals" {
