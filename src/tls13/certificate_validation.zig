@@ -678,3 +678,63 @@ test "integrated peer validator default policy hard-fails unknown ocsp status" {
         .now_sec = now,
     }));
 }
+
+test "integrated peer validator default policy hard-fails missing ocsp next_update" {
+    const now: i64 = 1_700_000_000;
+    const chain = [_]CertificateView{
+        .{
+            .dns_name = "example.com",
+            .is_ca = false,
+            .key_usage = .{ .digital_signature = true },
+            .ext_key_usages = &.{.server_auth},
+        },
+        .{
+            .dns_name = "Root",
+            .is_ca = true,
+            .key_usage = .{ .key_cert_sign = true },
+        },
+    };
+
+    try std.testing.expectError(error.InvalidTimeWindow, validateServerPeer(.{
+        .expected_server_name = "example.com",
+        .chain = &chain,
+        .stapled_ocsp = .{
+            .status = .good,
+            .produced_at = now - 60,
+            .this_update = now - 60,
+            .next_update = null,
+        },
+        .now_sec = now,
+    }));
+}
+
+test "integrated peer validator soft-fails missing ocsp next_update when policy allows" {
+    const now: i64 = 1_700_000_000;
+    const chain = [_]CertificateView{
+        .{
+            .dns_name = "example.com",
+            .is_ca = false,
+            .key_usage = .{ .digital_signature = true },
+            .ext_key_usages = &.{.server_auth},
+        },
+        .{
+            .dns_name = "Root",
+            .is_ca = true,
+            .key_usage = .{ .key_cert_sign = true },
+        },
+    };
+
+    const res = try validateServerPeer(.{
+        .expected_server_name = "example.com",
+        .chain = &chain,
+        .stapled_ocsp = .{
+            .status = .good,
+            .produced_at = now - 60,
+            .this_update = now - 60,
+            .next_update = null,
+        },
+        .now_sec = now,
+        .policy = .{ .allow_soft_fail_ocsp = true },
+    });
+    try std.testing.expectEqual(ocsp.ValidationResult.soft_fail, res.ocsp_result);
+}

@@ -6863,3 +6863,64 @@ Commands Executed
 Observed Results
 - `certificate_validation.zig`: 40/40 tests passed.
 - `zig build test`: passed.
+===
+timestamp: 2026-02-15T15:06:00+09:00
+description: Plan integrated OCSP missing-next_update hard/soft policy regression coverage
+type: plan
+===
+Motivation
+- OCSP unit tests cover missing `next_update` hard/soft behavior, but integrated certificate validation path does not explicitly pin propagation for this branch.
+
+Scope
+- Add integrated `validateServerPeer` regression for missing `next_update` under default policy (hard-fail).
+- Add integrated `validateServerPeer` regression for missing `next_update` with soft-fail policy enabled.
+- Update RFC matrix CERT-002 coverage wording.
+
+Design
+- Use valid hostname/chain + stapled OCSP response with `next_update = null` and valid other timestamps.
+- Assert `InvalidTimeWindow` error for default policy and `soft_fail` result for soft-fail policy.
+
+Risks/Perf Impact
+- Test/doc-only expansion; no runtime behavior changes.
+
+Test Plan (commands)
+- `zig test src/tls13/certificate_validation.zig`
+- `zig build test`
+
+Rollback
+- Remove integrated missing-next_update regressions and matrix wording update.
+
+Commit Plan
+- `MINOR: cert: add integrated ocsp missing-next_update regressions`
+===
+timestamp: 2026-02-15T15:08:00+09:00
+description: Add integrated OCSP missing-next_update hard/soft policy regressions
+type: code change
+===
+Decisions + Rationale
+- Added integrated certificate-validation regressions for missing `next_update` to complement existing unit OCSP branch coverage.
+- Pinned both default-policy hard-fail and soft-fail-policy propagation behavior for the same branch.
+
+Files/Functions Touched
+- `src/tls13/certificate_validation.zig`
+  - Added tests:
+    - `integrated peer validator default policy hard-fails missing ocsp next_update`
+    - `integrated peer validator soft-fails missing ocsp next_update when policy allows`
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-CERT-002` coverage wording to include integrated missing-`next_update` hard/soft policy propagation.
+
+Risks/Perf Notes
+- Test/doc-only expansion; no runtime behavior changes.
+===
+timestamp: 2026-02-15T15:09:00+09:00
+description: Verify integrated OCSP missing-next_update regression additions
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/certificate_validation.zig`
+- `zig test src/tls13/certificate_validation.zig`
+- `zig build test`
+
+Observed Results
+- `certificate_validation.zig`: 42/42 tests passed.
+- `zig build test`: passed.
