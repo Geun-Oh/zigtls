@@ -53,6 +53,19 @@ pub const EarlyDataConfig = struct {
     max_ticket_len: usize = 4096,
 };
 
+pub const InitError = error{
+    InvalidConfiguration,
+};
+
+pub fn validateConfig(config: Config) InitError!void {
+    if (config.early_data.enabled and config.early_data.replay_filter == null) {
+        return error.InvalidConfiguration;
+    }
+    if (config.enable_debug_keylog and config.keylog_callback == null) {
+        return error.InvalidConfiguration;
+    }
+}
+
 pub const Metrics = struct {
     handshake_messages: u64 = 0,
     alerts_received: u64 = 0,
@@ -191,15 +204,17 @@ pub const Engine = struct {
     metrics: Metrics = .{},
 
     pub fn init(allocator: std.mem.Allocator, config: Config) Engine {
-        if (config.early_data.enabled and config.early_data.replay_filter == null) {
-            @panic("0-RTT enabled but replay filter is not configured");
-        }
         return .{
             .allocator = allocator,
             .config = config,
             .machine = state.Machine.init(config.role),
             .transcript = Transcript.init(config.suite),
         };
+    }
+
+    pub fn initChecked(allocator: std.mem.Allocator, config: Config) InitError!Engine {
+        try validateConfig(config);
+        return init(allocator, config);
     }
 
     pub fn deinit(self: *Engine) void {
@@ -790,6 +805,30 @@ fn hasDowngradeMarker(random: [32]u8) bool {
     const tls11_marker = [_]u8{ 0x44, 0x4f, 0x57, 0x4e, 0x47, 0x52, 0x44, 0x00 }; // "DOWNGRD\x00"
     const tail = random[24..32];
     return std.mem.eql(u8, tail, &tls12_marker) or std.mem.eql(u8, tail, &tls11_marker);
+}
+
+test "validateConfig rejects early-data without replay filter" {
+    try std.testing.expectError(error.InvalidConfiguration, validateConfig(.{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+        .early_data = .{ .enabled = true },
+    }));
+}
+
+test "validateConfig rejects debug keylog without callback" {
+    try std.testing.expectError(error.InvalidConfiguration, validateConfig(.{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+        .enable_debug_keylog = true,
+    }));
+}
+
+test "initChecked returns explicit invalid configuration error" {
+    try std.testing.expectError(error.InvalidConfiguration, Engine.initChecked(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+        .early_data = .{ .enabled = true },
+    }));
 }
 
 test "zeroize latest secret clears secret bytes and resets option" {

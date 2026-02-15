@@ -344,9 +344,9 @@ pub const Connection = struct {
 };
 
 pub fn validateConfig(config: Config) Error!void {
-    if (config.session.early_data.enabled and config.session.early_data.replay_filter == null) {
+    tls13.session.validateConfig(config.session) catch {
         return error.InvalidConfiguration;
-    }
+    };
 }
 
 fn findExtension(extensions: []const tls13.messages.Extension, ext_type: u16) ?[]const u8 {
@@ -538,6 +538,16 @@ test "validate config rejects early-data without replay filter" {
             .role = .server,
             .suite = .tls_aes_128_gcm_sha256,
             .early_data = .{ .enabled = true },
+        },
+    }));
+}
+
+test "validate config rejects debug keylog without callback" {
+    try std.testing.expectError(error.InvalidConfiguration, validateConfig(.{
+        .session = .{
+            .role = .server,
+            .suite = .tls_aes_128_gcm_sha256,
+            .enable_debug_keylog = true,
         },
     }));
 }
