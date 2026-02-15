@@ -6666,3 +6666,69 @@ Commands Executed
 Observed Results
 - `certificate_validation.zig`: 38/38 tests passed.
 - `zig build test`: passed.
+===
+timestamp: 2026-02-15T14:18:00+09:00
+description: Plan BoGo shim regression and build-gate coverage expansion
+type: plan
+===
+Motivation
+- BoGo shim has unit tests but they are not included in `zig build test` gate.
+- Argument parser/routing negative branches can be further pinned to strengthen BOGO-001 readiness checks.
+
+Scope
+- Add BoGo shim tests for parser missing-value and unsupported-cipher routing branches.
+- Wire BoGo shim test artifact into `zig build test` top-level step.
+- Update RFC matrix BOGO-001 coverage wording to reflect added parser/routing branch tests and build-gate integration.
+
+Design
+- Add `bogo_shim_tests` via `b.addTest` in `build.zig`, run with `b.addRunArtifact`, and attach to `test_step`.
+- Extend `tools/bogo_shim.zig` test block with two additional regression cases.
+
+Risks/Perf Impact
+- Test-only/build-graph change; runtime behavior unchanged.
+- Slightly longer `zig build test` duration due to added shim test execution.
+
+Test Plan (commands)
+- `zig test tools/bogo_shim.zig`
+- `zig build test`
+
+Rollback
+- Remove added BoGo shim tests and build-step dependency.
+
+Commit Plan
+- `MINOR: bogo: include shim regressions in build test gate`
+===
+timestamp: 2026-02-15T14:22:00+09:00
+description: Expand BoGo shim branch regressions and include shim tests in build test gate
+type: code change
+===
+Decisions + Rationale
+- Added BoGo shim regression tests for parser missing-value and unsupported-cipher routing branches.
+- Wired BoGo shim test artifact into top-level `zig build test` to ensure shim regressions are covered by default CI-equivalent path.
+
+Files/Functions Touched
+- `tools/bogo_shim.zig`
+  - Added tests:
+    - `parse args rejects missing option value`
+    - `routing rejects unsupported cipher suite`
+- `build.zig`
+  - Added `bogo_shim_tests` test artifact and attached run step to `test_step`.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-BOGO-001` coverage wording for parser/routing negative branches and build-test shim gate.
+
+Risks/Perf Notes
+- Test/build-graph only; runtime shim behavior unchanged.
+- Slight increase in `zig build test` runtime due to additional shim test executable.
+===
+timestamp: 2026-02-15T14:23:00+09:00
+description: Verify BoGo shim regression and build-gate additions
+type: test
+===
+Commands Executed
+- `zig fmt tools/bogo_shim.zig build.zig`
+- `zig test tools/bogo_shim.zig`
+- `zig build test`
+
+Observed Results
+- `bogo_shim.zig`: 6/6 tests passed.
+- `zig build test`: passed.

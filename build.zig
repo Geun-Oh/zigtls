@@ -177,6 +177,15 @@ pub fn build(b: *std.Build) void {
     });
     const run_corpus_replay_tests = b.addRunArtifact(corpus_replay_tests);
 
+    const bogo_shim_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/bogo_shim.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_bogo_shim_tests = b.addRunArtifact(bogo_shim_tests);
+
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
@@ -184,6 +193,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_corpus_replay_tests.step);
+    test_step.dependOn(&run_bogo_shim_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

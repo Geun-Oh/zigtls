@@ -190,6 +190,10 @@ test "parse args rejects unknown flags" {
     try std.testing.expectError(error.UnknownFlag, parseArgs(&.{ "--bad", "1" }));
 }
 
+test "parse args rejects missing option value" {
+    try std.testing.expectError(error.MissingValue, parseArgs(&.{"--port"}));
+}
+
 test "routing passes for tls13 basic case" {
     const cfg = Config{
         .port = 443,
@@ -204,6 +208,16 @@ test "routing rejects non tls13 version" {
     const cfg = Config{
         .port = 443,
         .expect_version = "TLS1.2",
+        .test_name = "TLS13/BasicHandshake",
+    };
+    try std.testing.expectEqual(RoutingDecision.unsupported, decideTestRouting(cfg));
+}
+
+test "routing rejects unsupported cipher suite" {
+    const cfg = Config{
+        .port = 443,
+        .expect_version = "TLS1.3",
+        .expect_cipher = "TLS_FAKE_CIPHER",
         .test_name = "TLS13/BasicHandshake",
     };
     try std.testing.expectEqual(RoutingDecision.unsupported, decideTestRouting(cfg));
