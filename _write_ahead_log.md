@@ -6425,3 +6425,60 @@ Commands Executed
 Observed Results
 - `trust_store.zig`: 11/11 tests passed.
 - `zig build test`: passed.
+===
+timestamp: 2026-02-15T13:28:00+09:00
+description: Plan 0-RTT future-issued ticket skew boundary regression coverage
+type: plan
+===
+Motivation
+- Early-data freshness checks validate stale and boundary-age cases, but explicit regression for future-issued tickets (`issued_at > now`) is not pinned.
+
+Scope
+- Add server-role regression test for `beginEarlyDataWithTimes` rejecting future-issued ticket timestamps.
+- Update RFC matrix 0RTT-002 coverage wording to include clock-skew future-ticket rejection.
+
+Design
+- Reuse existing error contract (`EarlyDataTicketExpired`) from `beginEarlyDataWithTimes`.
+- Keep runtime behavior unchanged; add test/documentation only.
+
+Risks/Perf Impact
+- Test/doc-only expansion; no runtime impact.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Remove future-issued ticket regression test and matrix wording update.
+
+Commit Plan
+- `MINOR: tls13: add future-issued early-data ticket regression`
+===
+timestamp: 2026-02-15T13:30:00+09:00
+description: Add 0-RTT future-issued ticket freshness regression and matrix coverage note
+type: code change
+===
+Decisions + Rationale
+- Added explicit regression for clock-skew/future-issued ticket rejection in early-data freshness checks.
+- Reused existing contract (`EarlyDataTicketExpired`) to pin behavior without runtime changes.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - Added test: `early data ticket freshness window rejects future-issued ticket`.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-0RTT-002` requirement and coverage wording to include future-issued clock-skew rejection.
+
+Risks/Perf Notes
+- Test/doc-only expansion; no runtime impact.
+===
+timestamp: 2026-02-15T13:31:00+09:00
+description: Verify future-issued early-data ticket regression addition
+type: test
+===
+Commands Executed
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 127/127 tests passed.
+- `zig build test`: passed.

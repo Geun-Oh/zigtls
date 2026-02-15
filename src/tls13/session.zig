@@ -2489,6 +2489,24 @@ test "early data ticket freshness window accepts boundary age" {
     _ = try engine.ingestRecord(&rec);
 }
 
+test "early data ticket freshness window rejects future-issued ticket" {
+    var replay = try early_data.ReplayFilter.init(std.testing.allocator, 4096);
+    defer replay.deinit();
+
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+        .early_data = .{
+            .enabled = true,
+            .replay_filter = &replay,
+            .max_ticket_age_sec = 60,
+        },
+    });
+    defer engine.deinit();
+
+    try std.testing.expectError(error.EarlyDataTicketExpired, engine.beginEarlyDataWithTimes("ticket-future", true, 1_700_000_100, 1_700_000_000));
+}
+
 test "transport eof without close_notify is truncation" {
     var engine = Engine.init(std.testing.allocator, .{
         .role = .client,
