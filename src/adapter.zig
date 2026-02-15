@@ -20,22 +20,21 @@ pub const PumpResult = struct {
 };
 
 pub const EventLoopAdapter = struct {
-    allocator: std.mem.Allocator,
     conn: *termination.Connection,
     transport: Transport,
-    pending_write: ?[]u8 = null,
+    pending_write_buf: [65_540]u8 = undefined,
+    pending_write_len: usize = 0,
     pending_write_off: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator, conn: *termination.Connection, transport: Transport) EventLoopAdapter {
+        _ = allocator;
         return .{
-            .allocator = allocator,
             .conn = conn,
             .transport = transport,
         };
     }
 
-    pub fn deinit(self: *EventLoopAdapter) void {
-        self.clearPendingWrite();
+    pub fn deinit(_: *EventLoopAdapter) void {
     }
 
     pub fn pumpRead(self: *EventLoopAdapter, max_iters: usize) Error!PumpResult {
@@ -72,45 +71,37 @@ pub const EventLoopAdapter = struct {
         var out = PumpResult{};
         var i: usize = 0;
         while (i < max_iters) : (i += 1) {
-            if (self.pending_write == null) {
-                var frame_buf: [65_540]u8 = undefined;
-                const n = try self.conn.drain_tls_records(&frame_buf);
+            if (self.pending_write_len == 0) {
+                const n = try self.conn.drain_tls_records(&self.pending_write_buf);
                 if (n == 0) break;
-                const owned = try self.allocator.alloc(u8, n);
-                @memcpy(owned, frame_buf[0..n]);
-                self.pending_write = owned;
+                self.pending_write_len = n;
                 self.pending_write_off = 0;
             }
 
-            if (self.pending_write) |pending| {
-                const slice = pending[self.pending_write_off..];
-                const written = self.transport.write_fn(self.transport.userdata, slice) catch |err| {
-                    if (err == error.WouldBlock) {
-                        out.would_block = true;
-                        break;
-                    }
-                    return err;
-                };
-                if (written == 0) {
+            const slice = self.pending_write_buf[self.pending_write_off..self.pending_write_len];
+            const written = self.transport.write_fn(self.transport.userdata, slice) catch |err| {
+                if (err == error.WouldBlock) {
                     out.would_block = true;
                     break;
                 }
-                out.bytes_written += written;
-                self.pending_write_off += written;
-                if (self.pending_write_off >= pending.len) {
-                    self.clearPendingWrite();
-                }
+                return err;
+            };
+            if (written == 0) {
+                out.would_block = true;
+                break;
+            }
+            out.bytes_written += written;
+            self.pending_write_off += written;
+            if (self.pending_write_off >= self.pending_write_len) {
+                self.clearPendingWrite();
             }
         }
         return out;
     }
 
     fn clearPendingWrite(self: *EventLoopAdapter) void {
-        if (self.pending_write) |pending| {
-            self.allocator.free(pending);
-            self.pending_write = null;
-            self.pending_write_off = 0;
-        }
+        self.pending_write_len = 0;
+        self.pending_write_off = 0;
     }
 };
 
@@ -180,12 +171,12 @@ test "flushWrite handles partial writes with reentry safety" {
 
     const r1 = try adapter.flushWrite(1);
     try std.testing.expectEqual(@as(usize, 2), r1.bytes_written);
-    try std.testing.expect(adapter.pending_write != null);
+    try std.testing.expect(adapter.pending_write_len > 0);
 
     _ = try adapter.flushWrite(16);
     const expected = [_]u8{ 23, 3, 3, 0, 5, 'h', 'e', 'l', 'l', 'o' };
     try std.testing.expectEqualSlices(u8, &expected, mock.writes.items);
-    try std.testing.expect(adapter.pending_write == null);
+    try std.testing.expectEqual(@as(usize, 0), adapter.pending_write_len);
 }
 
 test "pumpRead consumes readable chunks then returns WouldBlock" {
