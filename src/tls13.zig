@@ -9,4 +9,5 @@ pub const ocsp = @import("tls13/ocsp.zig");
 pub const record = @import("tls13/record.zig");
 pub const session = @import("tls13/session.zig");
 pub const state = @import("tls13/state.zig");
+pub const ticket_keys = @import("tls13/ticket_keys.zig");
 pub const trust_store = @import("tls13/trust_store.zig");
