@@ -256,6 +256,7 @@ pub fn build(b: *std.Build) void {
         "scripts/security/run_timing_harness.sh",
         "scripts/reliability/run_soak_chaos.sh",
         "scripts/release/check_api_surface.sh",
+        "scripts/release/check_dependency_baseline.sh",
     });
 
     const timing_harness_self_test = b.addSystemCommand(&.{
@@ -281,6 +282,17 @@ pub fn build(b: *std.Build) void {
         "scripts/release/check_api_surface.sh",
     });
 
+    const dependency_baseline_self_test = b.addSystemCommand(&.{
+        "bash",
+        "scripts/release/check_dependency_baseline.sh",
+        "--self-test",
+    });
+
+    const dependency_baseline_check = b.addSystemCommand(&.{
+        "bash",
+        "scripts/release/check_dependency_baseline.sh",
+    });
+
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
@@ -296,6 +308,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&reliability_self_test.step);
     test_step.dependOn(&api_surface_self_test.step);
     test_step.dependOn(&api_surface_check.step);
+    test_step.dependOn(&dependency_baseline_self_test.step);
+    test_step.dependOn(&dependency_baseline_check.step);
     test_step.dependOn(&interop_shell_syntax_check.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
