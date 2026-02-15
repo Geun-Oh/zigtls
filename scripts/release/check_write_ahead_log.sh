@@ -4,10 +4,15 @@ set -euo pipefail
 SELF_TEST=0
 ROOT_OVERRIDE=""
 WAL_PATH=""
+SPACING_WARNING_BASELINE=""
+FAIL_ON_NEW_SPACING_WARNINGS=0
+DUMP_SPACING_WARNINGS_PATH=""
 
 usage() {
   cat <<USAGE
-usage: check_write_ahead_log.sh [--self-test] [--root <dir>] [--wal <path>]
+usage: check_write_ahead_log.sh [--self-test] [--root <dir>] [--wal <path>] \
+  [--spacing-warning-baseline <path>] [--fail-on-new-spacing-warnings] \
+  [--dump-spacing-warnings <path>]
 
 Validate _write_ahead_log.md metadata header format.
 USAGE
@@ -15,9 +20,17 @@ USAGE
 
 run_check() {
   local wal_file="$1"
+  local baseline_file="$2"
+  local fail_on_new_warnings="$3"
+  local dump_warnings_path="$4"
+
   [[ -f "$wal_file" ]] || { echo "missing WAL file: $wal_file" >&2; return 1; }
 
-  awk '
+  local spacing_tmp
+  spacing_tmp="$(mktemp)"
+  local rc=0
+
+  if ! awk -v spacing_out="$spacing_tmp" '
     BEGIN {
       allowed_type["plan"] = 1
       allowed_type["analysis"] = 1
@@ -65,7 +78,6 @@ run_check() {
           next
         }
 
-        # finalize header
         in_header = 0
         if (ts == "") report_error("entry " entry_index " missing timestamp")
         if (desc == "") report_error("entry " entry_index " missing description")
@@ -81,6 +93,7 @@ run_check() {
 
         if (spacing_error) {
           print "WAL format warning: metadata key spacing drift in entry " entry_index " timestamp=" ts > "/dev/stderr"
+          print entry_index "|" ts >> spacing_out
         }
 
         next
@@ -95,7 +108,6 @@ run_check() {
         }
 
         raw = $0
-        prefix = ""
         if (raw ~ /^[[:space:]]+/) {
           spacing_error = 1
           raw = substr(raw, RLENGTH + 1)
@@ -135,7 +147,49 @@ run_check() {
       }
       exit bad
     }
-  ' "$wal_file"
+  ' "$wal_file"; then
+    rc=1
+  fi
+
+  if [[ "$rc" -eq 0 ]]; then
+    if [[ -n "$dump_warnings_path" ]]; then
+      mkdir -p "$(dirname "$dump_warnings_path")"
+      sort -u "$spacing_tmp" > "$dump_warnings_path"
+    fi
+
+    if [[ "$fail_on_new_warnings" -eq 1 ]]; then
+      [[ -n "$baseline_file" ]] || {
+        echo "missing --spacing-warning-baseline for --fail-on-new-spacing-warnings" >&2
+        rm -f "$spacing_tmp"
+        return 2
+      }
+      [[ -f "$baseline_file" ]] || {
+        echo "missing spacing warning baseline file: $baseline_file" >&2
+        rm -f "$spacing_tmp"
+        return 1
+      }
+
+      local current_sorted baseline_sorted new_warnings
+      current_sorted="$(mktemp)"
+      baseline_sorted="$(mktemp)"
+      new_warnings="$(mktemp)"
+      sort -u "$spacing_tmp" > "$current_sorted"
+      sort -u "$baseline_file" > "$baseline_sorted"
+      comm -23 "$current_sorted" "$baseline_sorted" > "$new_warnings"
+
+      if [[ -s "$new_warnings" ]]; then
+        echo "WAL spacing warning baseline mismatch: new entries detected" >&2
+        cat "$new_warnings" >&2
+        rm -f "$spacing_tmp" "$current_sorted" "$baseline_sorted" "$new_warnings"
+        return 1
+      fi
+
+      rm -f "$current_sorted" "$baseline_sorted" "$new_warnings"
+    fi
+  fi
+
+  rm -f "$spacing_tmp"
+  return "$rc"
 }
 
 self_test() {
@@ -194,33 +248,53 @@ description: missing terminator
 type: test
 R
 
-  run_check "$tmp/valid.md" >/dev/null
+  cat > "$tmp/baseline.txt" <<'R'
+1|2026-02-16T00:00:00+09:00
+R
 
-  if run_check "$tmp/invalid_key.md" >/dev/null 2>&1; then
+  run_check "$tmp/valid.md" "" 0 "" >/dev/null
+
+  if run_check "$tmp/invalid_key.md" "" 0 "" >/dev/null 2>&1; then
     echo "self-test failed: invalid key should fail" >&2
     rm -rf "$tmp"
     return 1
   fi
 
-  if run_check "$tmp/invalid_timestamp.md" >/dev/null 2>&1; then
+  if run_check "$tmp/invalid_timestamp.md" "" 0 "" >/dev/null 2>&1; then
     echo "self-test failed: invalid timestamp should fail" >&2
     rm -rf "$tmp"
     return 1
   fi
 
-  if run_check "$tmp/invalid_type.md" >/dev/null 2>&1; then
+  if run_check "$tmp/invalid_type.md" "" 0 "" >/dev/null 2>&1; then
     echo "self-test failed: invalid type should fail" >&2
     rm -rf "$tmp"
     return 1
   fi
 
-  if run_check "$tmp/unterminated_header.md" >/dev/null 2>&1; then
+  if run_check "$tmp/unterminated_header.md" "" 0 "" >/dev/null 2>&1; then
     echo "self-test failed: unterminated header should fail" >&2
     rm -rf "$tmp"
     return 1
   fi
 
-  run_check "$tmp/warn_spacing.md" >/dev/null
+  run_check "$tmp/warn_spacing.md" "" 0 "$tmp/current_warnings.txt" >/dev/null
+
+  if ! grep -q '^1|2026-02-16T00:00:00+09:00$' "$tmp/current_warnings.txt"; then
+    echo "self-test failed: expected spacing warning dump entry" >&2
+    rm -rf "$tmp"
+    return 1
+  fi
+
+  run_check "$tmp/warn_spacing.md" "$tmp/baseline.txt" 1 "" >/dev/null
+
+  cat > "$tmp/empty_baseline.txt" <<'R'
+R
+  if run_check "$tmp/warn_spacing.md" "$tmp/empty_baseline.txt" 1 "" >/dev/null 2>&1; then
+    echo "self-test failed: new spacing warning should fail with empty baseline" >&2
+    rm -rf "$tmp"
+    return 1
+  fi
 
   rm -rf "$tmp"
   echo "self-test: ok"
@@ -240,6 +314,20 @@ while [[ $# -gt 0 ]]; do
     --wal)
       [[ $# -ge 2 ]] || { echo "missing value for --wal" >&2; exit 2; }
       WAL_PATH="$2"
+      shift 2
+      ;;
+    --spacing-warning-baseline)
+      [[ $# -ge 2 ]] || { echo "missing value for --spacing-warning-baseline" >&2; exit 2; }
+      SPACING_WARNING_BASELINE="$2"
+      shift 2
+      ;;
+    --fail-on-new-spacing-warnings)
+      FAIL_ON_NEW_SPACING_WARNINGS=1
+      shift
+      ;;
+    --dump-spacing-warnings)
+      [[ $# -ge 2 ]] || { echo "missing value for --dump-spacing-warnings" >&2; exit 2; }
+      DUMP_SPACING_WARNINGS_PATH="$2"
       shift 2
       ;;
     -h|--help)
@@ -269,4 +357,4 @@ else
   fi
 fi
 
-run_check "$TARGET"
+run_check "$TARGET" "$SPACING_WARNING_BASELINE" "$FAIL_ON_NEW_SPACING_WARNINGS" "$DUMP_SPACING_WARNINGS_PATH"

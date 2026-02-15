@@ -121,7 +121,7 @@ done
 configure_strict_env_defaults
 assert_strict_env
 
-run_cmd "bash scripts/release/check_write_ahead_log.sh"
+run_cmd "bash scripts/release/check_write_ahead_log.sh --fail-on-new-spacing-warnings --spacing-warning-baseline scripts/release/wal_spacing_warning_baseline.txt"
 run_cmd "bash scripts/release/check_task_closure_matrix.sh"
 
 if [[ "$MODE" == "all" || "$MODE" == "basic" ]]; then
