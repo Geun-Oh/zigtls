@@ -97,7 +97,10 @@ run_check() {
 
   local latest_interop_report=""
   latest_interop_report="$(find "$root/artifacts/interop" -mindepth 2 -maxdepth 2 -name report.md 2>/dev/null | LC_ALL=C sort | tail -n 1)"
+  local latest_interop_ref=""
   if [[ -n "$latest_interop_report" ]]; then
+    latest_interop_ref="${latest_interop_report#"$root/"}"
+    latest_interop_ref="${latest_interop_ref%/report.md}/"
     if ! grep -q "Matrix status: PASS" "$latest_interop_report"; then
       echo "latest interop report is not PASS: $latest_interop_report" >&2
       missing=1
@@ -106,7 +109,9 @@ run_check() {
 
   local latest_reliability_report=""
   latest_reliability_report="$(find "$root/artifacts/reliability" -mindepth 2 -maxdepth 2 -name report.md 2>/dev/null | LC_ALL=C sort | tail -n 1)"
+  local latest_reliability_ref=""
   if [[ -n "$latest_reliability_report" ]]; then
+    latest_reliability_ref="${latest_reliability_report#"$root/"}"
     if ! grep -q "Profile: prod" "$latest_reliability_report"; then
       echo "latest reliability report is not prod profile: $latest_reliability_report" >&2
       missing=1
@@ -115,6 +120,22 @@ run_check() {
       echo "latest reliability report target duration is not 24h: $latest_reliability_report" >&2
       missing=1
     fi
+  fi
+
+  if [[ -n "$latest_interop_ref" && -n "$signoff_interop_ref" && "$signoff_interop_ref" != "$latest_interop_ref" ]]; then
+    echo "signoff interop reference is stale (expected latest): $latest_interop_ref" >&2
+    echo "  found: $signoff_interop_ref" >&2
+    missing=1
+  fi
+  if [[ -n "$latest_interop_ref" && -n "$external_interop_ref" && "$external_interop_ref" != "$latest_interop_ref" ]]; then
+    echo "external validation interop reference is stale (expected latest): $latest_interop_ref" >&2
+    echo "  found: $external_interop_ref" >&2
+    missing=1
+  fi
+  if [[ -n "$latest_reliability_ref" && -n "$signoff_reliability_ref" && "$signoff_reliability_ref" != "$latest_reliability_ref" ]]; then
+    echo "signoff reliability reference is stale (expected latest): $latest_reliability_ref" >&2
+    echo "  found: $signoff_reliability_ref" >&2
+    missing=1
   fi
 
   if [[ "$missing" -ne 0 ]]; then
