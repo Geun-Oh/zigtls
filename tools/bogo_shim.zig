@@ -274,13 +274,10 @@ fn decideTestRouting(cfg: Config) RoutingDecision {
     }
 
     if (cfg.test_name) |name| {
+        if (isExplicitlyOutOfScopeTest(name)) return .unsupported;
         if (std.mem.indexOf(u8, name, "TLS13") != null) return .pass;
         if (std.mem.indexOf(u8, name, "Basic") != null) return .pass;
         return .unsupported;
-    }
-
-    if (cfg.expect_version != null or cfg.expect_cipher != null or cfg.min_version != null or cfg.max_version != null) {
-        return .pass;
     }
 
     return .unsupported;
@@ -314,6 +311,23 @@ fn isSupportedCipher(cipher: []const u8) bool {
     return std.mem.eql(u8, cipher, "TLS_AES_128_GCM_SHA256") or
         std.mem.eql(u8, cipher, "TLS_AES_256_GCM_SHA384") or
         std.mem.eql(u8, cipher, "TLS_CHACHA20_POLY1305_SHA256");
+}
+
+fn isExplicitlyOutOfScopeTest(name: []const u8) bool {
+    const markers = [_][]const u8{
+        "DTLS",
+        "QUIC",
+        "TLS1-",
+        "TLS11",
+        "TLS12",
+        "PAKE",
+        "TrustAnchors",
+        "CertificateSelection",
+    };
+    for (markers) |m| {
+        if (std.mem.indexOf(u8, name, m) != null) return true;
+    }
+    return false;
 }
 
 fn runSocketExchange(cfg: Config) !void {
@@ -498,11 +512,21 @@ test "routing rejects unrelated test name even with valid version and cipher" {
     try std.testing.expectEqual(RoutingDecision.unsupported, decideTestRouting(cfg));
 }
 
-test "routing passes missing test name when tls13-compatible feature flags exist" {
+test "routing rejects missing test name even with tls13-compatible version flags" {
     const cfg = Config{
         .port = 443,
         .min_version = 772,
         .max_version = 772,
     };
-    try std.testing.expectEqual(RoutingDecision.pass, decideTestRouting(cfg));
+    try std.testing.expectEqual(RoutingDecision.unsupported, decideTestRouting(cfg));
+}
+
+test "routing rejects explicitly out-of-scope test name markers" {
+    const cfg = Config{
+        .port = 443,
+        .expect_version = "TLS1.3",
+        .expect_cipher = "TLS_AES_128_GCM_SHA256",
+        .test_name = "VersionNegotiation-Client2-TLS13-TLS12-TLS",
+    };
+    try std.testing.expectEqual(RoutingDecision.unsupported, decideTestRouting(cfg));
 }
