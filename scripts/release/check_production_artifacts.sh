@@ -29,6 +29,7 @@ run_check() {
     "docs/rollout-canary-gate.md"
     "docs/api-compatibility-policy.md"
     "docs/external-validation-2026-02-15.md"
+    "docs/task-closure-matrix.md"
   )
 
   for rel in "${required_docs[@]}"; do
@@ -100,6 +101,7 @@ self_test() {
     "rollout-canary-gate.md"
     "api-compatibility-policy.md"
     "external-validation-2026-02-15.md"
+    "task-closure-matrix.md"
   )
   for doc in "${required_docs[@]}"; do
     echo "# stub" > "$root/docs/$doc"
