@@ -265,6 +265,12 @@ pub fn build(b: *std.Build) void {
         "--self-test",
     });
 
+    const timing_harness_assert = b.addSystemCommand(&.{
+        "bash",
+        "scripts/security/run_timing_harness.sh",
+        "--assert",
+    });
+
     const reliability_self_test = b.addSystemCommand(&.{
         "bash",
         "scripts/reliability/run_soak_chaos.sh",
@@ -305,6 +311,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&interop_matrix_self_test.step);
     test_step.dependOn(&bogo_summary_self_test.step);
     test_step.dependOn(&timing_harness_self_test.step);
+    test_step.dependOn(&timing_harness_assert.step);
     test_step.dependOn(&reliability_self_test.step);
     test_step.dependOn(&api_surface_self_test.step);
     test_step.dependOn(&api_surface_check.step);
