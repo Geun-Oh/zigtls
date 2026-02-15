@@ -350,13 +350,7 @@ fn resolveRuntimeRole(cfg: Config) bool {
         if (std.mem.indexOf(u8, name, "-Client-") != null) return true;
         if (std.mem.indexOf(u8, name, "-Server-") != null) return false;
     }
-
-    if (cfg.shim_id) |id| {
-        return id == 0;
-    }
-
-    // Prefer passive/listen behavior when runner omits role flags.
-    return true;
+    return cfg.is_server;
 }
 
 fn isTls13Version(version: []const u8) bool {
@@ -624,10 +618,10 @@ test "runtime role infers from test name when available" {
     try std.testing.expect(resolveRuntimeRole(.{ .test_name = "Basic-Server-TLS-Async" }) == false);
 }
 
-test "runtime role infers from shim id and defaults to server" {
-    try std.testing.expect(resolveRuntimeRole(.{ .shim_id = 0 }) == true);
+test "runtime role defaults to client when role hints are absent" {
+    try std.testing.expect(resolveRuntimeRole(.{ .shim_id = 0 }) == false);
     try std.testing.expect(resolveRuntimeRole(.{ .shim_id = 1 }) == false);
-    try std.testing.expect(resolveRuntimeRole(.{}) == true);
+    try std.testing.expect(resolveRuntimeRole(.{}) == false);
 }
 
 test "routing passes for tls13 basic case" {
