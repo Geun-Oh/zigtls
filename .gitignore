@@ -1,4 +1,6 @@
 .zig-cache/
+.zig-global-cache/
 zig-out/
+artifacts/
 __pycache__/
 _*.md
