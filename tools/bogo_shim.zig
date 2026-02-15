@@ -1,4 +1,5 @@
 const std = @import("std");
+const has_zigtls = @hasDecl(@import("root"), "zigtls");
 
 const Exit = enum(u8) {
     ok = 0,
@@ -22,6 +23,7 @@ const Config = struct {
 
 const io_timeout_ms: i32 = 1500;
 const probe_record = [_]u8{ 21, 3, 3, 0, 2, 1, 0 };
+const max_exchange_rounds: usize = 64;
 
 pub fn main() !void {
     var gpa_impl = std.heap.GeneralPurposeAllocator(.{}){};
@@ -94,7 +96,7 @@ pub fn main() !void {
 
     switch (decision) {
         .pass => {
-            runSocketExchange(parsed) catch |err| {
+            Relay.runExchange(gpa, parsed) catch |err| {
                 std.debug.print("bogo-shim: socket exchange failed: {s}\n", .{@errorName(err)});
                 std.process.exit(@intFromEnum(Exit.unsupported));
             };
@@ -330,47 +332,147 @@ fn isExplicitlyOutOfScopeTest(name: []const u8) bool {
     return false;
 }
 
-fn runSocketExchange(cfg: Config) !void {
-    if (cfg.is_server) {
-        try runServer(cfg);
-    } else {
-        try runClient(cfg);
-    }
-}
+const Relay = if (has_zigtls) struct {
+    const zigtls = @import("zigtls");
+    const termination = zigtls.termination;
 
-fn runServer(cfg: Config) !void {
-    const address = try std.net.Address.parseIp(cfg.host, cfg.port);
-    var server = try address.listen(.{ .reuse_address = true });
-    defer server.deinit();
+    fn runExchange(allocator: std.mem.Allocator, cfg: Config) !void {
+        var conn = termination.Connection.init(allocator, .{
+            .session = .{
+                .role = if (cfg.is_server) .server else .client,
+                .suite = configuredSuite(cfg.expect_cipher),
+            },
+        });
+        defer conn.deinit();
+        conn.accept(.{});
 
-    if (!try pollFd(server.stream.handle, std.posix.POLL.IN, io_timeout_ms)) {
-        return error.Timeout;
-    }
-    var conn = try server.accept();
-    defer conn.stream.close();
-    try exchangeWithPeer(conn.stream);
-}
-
-fn runClient(cfg: Config) !void {
-    const address = try std.net.Address.parseIp(cfg.host, cfg.port);
-    var stream = try std.net.tcpConnectToAddress(address);
-    defer stream.close();
-    try exchangeWithPeer(stream);
-}
-
-fn exchangeWithPeer(stream: std.net.Stream) !void {
-    if (try pollFd(stream.handle, std.posix.POLL.OUT, io_timeout_ms)) {
-        _ = try stream.write(&probe_record);
+        if (cfg.is_server) {
+            try runServer(cfg, &conn);
+        } else {
+            try runClient(cfg, &conn);
+        }
     }
 
-    if (try pollFd(stream.handle, std.posix.POLL.IN, io_timeout_ms)) {
-        var buf: [256]u8 = undefined;
-        _ = stream.read(&buf) catch |err| switch (err) {
-            error.WouldBlock => 0,
-            else => return err,
-        };
+    fn runServer(cfg: Config, conn: *termination.Connection) !void {
+        const address = try std.net.Address.parseIp(cfg.host, cfg.port);
+        var server = try address.listen(.{ .reuse_address = true });
+        defer server.deinit();
+
+        if (!try pollFd(server.stream.handle, std.posix.POLL.IN, io_timeout_ms)) {
+            return error.Timeout;
+        }
+        var accepted = try server.accept();
+        defer accepted.stream.close();
+        try exchangeWithPeer(accepted.stream, conn);
     }
-}
+
+    fn runClient(cfg: Config, conn: *termination.Connection) !void {
+        const address = try std.net.Address.parseIp(cfg.host, cfg.port);
+        var stream = try std.net.tcpConnectToAddress(address);
+        defer stream.close();
+        try exchangeWithPeer(stream, conn);
+    }
+
+    fn exchangeWithPeer(stream: std.net.Stream, conn: *termination.Connection) !void {
+        var round: usize = 0;
+        while (round < max_exchange_rounds) : (round += 1) {
+            var progressed = false;
+
+            if (try pollFd(stream.handle, std.posix.POLL.IN, io_timeout_ms)) {
+                var read_buf: [16 * 1024]u8 = undefined;
+                const n = stream.read(&read_buf) catch |err| switch (err) {
+                    error.WouldBlock => 0,
+                    else => return err,
+                };
+                if (n == 0) {
+                    _ = conn.on_transport_eof() catch {};
+                    break;
+                }
+                progressed = true;
+                const out = try conn.ingest_tls_bytes_with_alert(read_buf[0..n]);
+                switch (out) {
+                    .ok => {},
+                    .fatal => return error.PeerFatalAlert,
+                }
+            }
+
+            var frame_buf: [65_540]u8 = undefined;
+            while (true) {
+                const n = conn.drain_tls_records(&frame_buf) catch |err| switch (err) {
+                    error.OutputBufferTooSmall => unreachable,
+                    else => return err,
+                };
+                if (n == 0) break;
+                progressed = true;
+                try writeAllPolling(stream, frame_buf[0..n]);
+            }
+
+            if (!progressed) break;
+        }
+    }
+
+    fn writeAllPolling(stream: std.net.Stream, bytes: []const u8) !void {
+        var written: usize = 0;
+        while (written < bytes.len) {
+            if (!try pollFd(stream.handle, std.posix.POLL.OUT, io_timeout_ms)) return error.Timeout;
+            const n = stream.write(bytes[written..]) catch |err| switch (err) {
+                error.WouldBlock => 0,
+                else => return err,
+            };
+            if (n == 0) return error.Timeout;
+            written += n;
+        }
+    }
+
+    fn configuredSuite(expect_cipher: ?[]const u8) zigtls.tls13.keyschedule.CipherSuite {
+        const cipher = expect_cipher orelse return .tls_aes_128_gcm_sha256;
+        if (std.mem.eql(u8, cipher, "TLS_AES_256_GCM_SHA384")) return .tls_aes_256_gcm_sha384;
+        if (std.mem.eql(u8, cipher, "TLS_CHACHA20_POLY1305_SHA256")) return .tls_chacha20_poly1305_sha256;
+        return .tls_aes_128_gcm_sha256;
+    }
+} else struct {
+    fn runExchange(_: std.mem.Allocator, cfg: Config) !void {
+        if (cfg.is_server) {
+            try runServer(cfg);
+        } else {
+            try runClient(cfg);
+        }
+    }
+
+    fn runServer(cfg: Config) !void {
+        const address = try std.net.Address.parseIp(cfg.host, cfg.port);
+        var server = try address.listen(.{ .reuse_address = true });
+        defer server.deinit();
+
+        if (!try pollFd(server.stream.handle, std.posix.POLL.IN, io_timeout_ms)) {
+            return error.Timeout;
+        }
+        var accepted = try server.accept();
+        defer accepted.stream.close();
+        try exchangeWithPeer(accepted.stream);
+    }
+
+    fn runClient(cfg: Config) !void {
+        const address = try std.net.Address.parseIp(cfg.host, cfg.port);
+        var stream = try std.net.tcpConnectToAddress(address);
+        defer stream.close();
+        try exchangeWithPeer(stream);
+    }
+
+    fn exchangeWithPeer(stream: std.net.Stream) !void {
+        if (try pollFd(stream.handle, std.posix.POLL.OUT, io_timeout_ms)) {
+            _ = try stream.write(&probe_record);
+        }
+
+        if (try pollFd(stream.handle, std.posix.POLL.IN, io_timeout_ms)) {
+            var buf: [256]u8 = undefined;
+            _ = stream.read(&buf) catch |err| switch (err) {
+                error.WouldBlock => 0,
+                else => return err,
+            };
+        }
+    }
+};
 
 fn pollFd(fd: std.posix.fd_t, events: i16, timeout_ms: i32) !bool {
     var fds = [_]std.posix.pollfd{
@@ -529,4 +631,20 @@ test "routing rejects explicitly out-of-scope test name markers" {
         .test_name = "VersionNegotiation-Client2-TLS13-TLS12-TLS",
     };
     try std.testing.expectEqual(RoutingDecision.unsupported, decideTestRouting(cfg));
+}
+
+test "configuredSuite maps expected cipher names" {
+    if (!has_zigtls) return;
+    try std.testing.expectEqual(
+        Relay.zigtls.tls13.keyschedule.CipherSuite.tls_aes_128_gcm_sha256,
+        Relay.configuredSuite(null),
+    );
+    try std.testing.expectEqual(
+        Relay.zigtls.tls13.keyschedule.CipherSuite.tls_aes_256_gcm_sha384,
+        Relay.configuredSuite("TLS_AES_256_GCM_SHA384"),
+    );
+    try std.testing.expectEqual(
+        Relay.zigtls.tls13.keyschedule.CipherSuite.tls_chacha20_poly1305_sha256,
+        Relay.configuredSuite("TLS_CHACHA20_POLY1305_SHA256"),
+    );
 }

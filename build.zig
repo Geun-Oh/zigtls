@@ -95,6 +95,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("tools/bogo_shim.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zigtls", .module = mod },
+            },
         }),
     });
     b.installArtifact(bogo_shim);
@@ -233,6 +236,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("tools/bogo_shim.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zigtls", .module = mod },
+            },
         }),
     });
     const run_bogo_shim_tests = b.addRunArtifact(bogo_shim_tests);
