@@ -182,18 +182,25 @@ run_cmd "bash scripts/security/run_timing_harness.sh --assert"
 if [[ "$STRICT_INTEROP" -eq 1 ]]; then
   run_cmd "bash scripts/interop/matrix_local.sh --strict"
   run_cmd "bash scripts/interop/generate_evidence.sh"
+  if [[ "$SYNC_EVIDENCE_DOCS" -eq 1 ]]; then
+    run_cmd "bash scripts/release/sync_latest_evidence_refs.sh"
+  fi
   run_cmd "bash scripts/release/check_production_artifacts.sh"
 fi
 
 if [[ "$TASK_GATES" -eq 1 ]]; then
   if [[ "$STRICT_INTEROP" -eq 1 ]]; then
-    run_cmd "bash scripts/release/verify_task_gates.sh --strict-only"
+    if [[ "$SYNC_EVIDENCE_DOCS" -eq 1 ]]; then
+      run_cmd "bash scripts/release/verify_task_gates.sh --strict-only --sync-evidence-docs"
+    else
+      run_cmd "bash scripts/release/verify_task_gates.sh --strict-only"
+    fi
   else
     run_cmd "bash scripts/release/verify_task_gates.sh --basic-only"
   fi
 fi
 
-if [[ "$SYNC_EVIDENCE_DOCS" -eq 1 ]]; then
+if [[ "$SYNC_EVIDENCE_DOCS" -eq 1 && "$STRICT_INTEROP" -eq 0 ]]; then
   run_cmd "bash scripts/release/sync_latest_evidence_refs.sh"
 fi
 

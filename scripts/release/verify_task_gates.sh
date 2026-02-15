@@ -3,10 +3,11 @@ set -euo pipefail
 
 MODE="all"
 DRY_RUN=0
+SYNC_EVIDENCE_DOCS=0
 
 usage() {
   cat <<USAGE
-usage: verify_task_gates.sh [--basic-only|--strict-only] [--dry-run]
+usage: verify_task_gates.sh [--basic-only|--strict-only] [--dry-run] [--sync-evidence-docs]
 
 Run _task.md section 5 gate commands in deterministic order.
 
@@ -14,6 +15,7 @@ Options:
   --basic-only   Run section 5.1 basic gates only
   --strict-only  Run section 5.2 strict gates only
   --dry-run      Print commands without executing
+  --sync-evidence-docs  Sync evidence docs before strict artifact gate
 USAGE
 }
 
@@ -100,6 +102,10 @@ while [[ $# -gt 0 ]]; do
       DRY_RUN=1
       shift
       ;;
+    --sync-evidence-docs)
+      SYNC_EVIDENCE_DOCS=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -132,6 +138,9 @@ if [[ "$MODE" == "all" || "$MODE" == "strict" ]]; then
   run_cmd "BOGO_PROFILE=scripts/interop/bogo_profile_v1_prod.json BOGO_STRICT=1 BOGO_ALLOW_UNIMPLEMENTED=0 BOGO_MAX_CRITICAL=0 BORINGSSL_DIR=${BORINGSSL_DIR} bash scripts/interop/bogo_run.sh"
   run_cmd "bash scripts/fuzz/replay_corpus.sh --skip-baseline"
   run_cmd "bash scripts/reliability/run_soak_chaos.sh --profile prod"
+  if [[ "$SYNC_EVIDENCE_DOCS" -eq 1 ]]; then
+    run_cmd "bash scripts/release/sync_latest_evidence_refs.sh"
+  fi
   run_cmd "bash scripts/release/check_production_artifacts.sh"
 fi
 
