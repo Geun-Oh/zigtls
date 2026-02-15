@@ -273,6 +273,17 @@ pub fn build(b: *std.Build) void {
         "--self-test",
     });
 
+    const bogo_expected_failures_inventory_self_test = b.addSystemCommand(&.{
+        "bash",
+        "scripts/interop/check_expected_failures_inventory.sh",
+        "--self-test",
+    });
+
+    const bogo_expected_failures_inventory_check = b.addSystemCommand(&.{
+        "bash",
+        "scripts/interop/check_expected_failures_inventory.sh",
+    });
+
     const interop_shell_syntax_check = b.addSystemCommand(&.{
         "bash",
         "-n",
@@ -352,6 +363,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&interop_matrix_self_test.step);
     test_step.dependOn(&bogo_summary_self_test.step);
     test_step.dependOn(&bogo_expected_failures_sync_self_test.step);
+    test_step.dependOn(&bogo_expected_failures_inventory_self_test.step);
+    test_step.dependOn(&bogo_expected_failures_inventory_check.step);
     test_step.dependOn(&timing_harness_self_test.step);
     test_step.dependOn(&timing_harness_assert.step);
     test_step.dependOn(&reliability_self_test.step);

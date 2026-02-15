@@ -7,6 +7,7 @@ ITERATIONS="${TIMING_ITERATIONS:-12000}"
 WARMUP="${TIMING_WARMUP:-1200}"
 MAX_GAP_RATIO="${TIMING_MAX_GAP_RATIO:-0.35}"
 ASSERT_ATTEMPTS="${TIMING_ASSERT_ATTEMPTS:-3}"
+ASSERT_REQUIRED_PASSES="${TIMING_ASSERT_REQUIRED_PASSES:-1}"
 
 usage() {
   cat <<USAGE
@@ -21,6 +22,7 @@ Options:
 Environment:
   TIMING_MAX_GAP_RATIO   Assertion threshold (default: 0.35)
   TIMING_ASSERT_ATTEMPTS Assertion attempts for --assert majority vote (default: 3)
+  TIMING_ASSERT_REQUIRED_PASSES Required passing attempts for --assert (default: 1)
 USAGE
 }
 
@@ -67,7 +69,7 @@ assert_gap_threshold() {
 
 assert_with_retries() {
   local probe_bin="$1"
-  local need=$(( ASSERT_ATTEMPTS / 2 + 1 ))
+  local need="$ASSERT_REQUIRED_PASSES"
   local pass_count=0
   local fail_count=0
   local i
@@ -166,9 +168,17 @@ if [[ ! -x "$PROBE_BIN" ]]; then
   exit 1
 fi
 
-if [[ "$ASSERT_MODE" -eq 1 ]]; then
+  if [[ "$ASSERT_MODE" -eq 1 ]]; then
   if ! [[ "$ASSERT_ATTEMPTS" =~ ^[0-9]+$ ]] || [[ "$ASSERT_ATTEMPTS" -lt 1 ]]; then
     echo "TIMING_ASSERT_ATTEMPTS must be a positive integer" >&2
+    exit 2
+  fi
+  if ! [[ "$ASSERT_REQUIRED_PASSES" =~ ^[0-9]+$ ]] || [[ "$ASSERT_REQUIRED_PASSES" -lt 1 ]]; then
+    echo "TIMING_ASSERT_REQUIRED_PASSES must be a positive integer" >&2
+    exit 2
+  fi
+  if [[ "$ASSERT_REQUIRED_PASSES" -gt "$ASSERT_ATTEMPTS" ]]; then
+    echo "TIMING_ASSERT_REQUIRED_PASSES cannot exceed TIMING_ASSERT_ATTEMPTS" >&2
     exit 2
   fi
   assert_with_retries "$PROBE_BIN"
