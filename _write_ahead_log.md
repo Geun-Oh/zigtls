@@ -6987,3 +6987,68 @@ Commands Executed
 Observed Results
 - `bash -n` syntax checks: passed.
 - `zig build test`: passed.
+===
+timestamp: 2026-02-15T15:34:00+09:00
+description: Plan BoGo summary critical gate self-test coverage expansion
+type: plan
+===
+Motivation
+- `bogo_summary.py` self-test validates categorization and counts, but does not explicitly exercise max-critical gate semantics.
+- BOGO-001 requires deterministic critical-failure gate behavior, so self-test should pin both pass/fail threshold branches.
+
+Scope
+- Refactor `bogo_summary.py` to isolate max-critical gate decision logic.
+- Extend `--self-test` path to verify gate outcomes for threshold pass/fail cases.
+- Update RFC matrix BOGO-001 coverage wording.
+
+Design
+- Add helper function for evaluating `critical_failure_count` against optional threshold.
+- Reuse existing synthetic self-test data; assert helper returns expected status codes for:
+  - no threshold
+  - threshold equal/above count (pass)
+  - threshold below count (fail)
+
+Risks/Perf Impact
+- Script test/doc-only change; runtime behavior unchanged for normal summary usage.
+
+Test Plan (commands)
+- `python3 scripts/interop/bogo_summary.py --self-test`
+- `zig build test`
+
+Rollback
+- Remove helper and additional self-test assertions.
+
+Commit Plan
+- `MINOR: bogo: self-test critical gate threshold branches`
+===
+timestamp: 2026-02-15T15:37:00+09:00
+description: Add BoGo summary self-test coverage for critical-threshold gate branches
+type: code change
+===
+Decisions + Rationale
+- Refactored critical-threshold decision into helper to make gate behavior directly testable.
+- Expanded self-test assertions to pin threshold branch outcomes (`None`, equal threshold pass, below threshold fail).
+
+Files/Functions Touched
+- `scripts/interop/bogo_summary.py`
+  - Added helper: `evaluate_critical_gate(summary, max_critical)`.
+  - `self_test`: added critical-threshold gate branch assertions.
+  - `main`: now uses helper for gate decision and exit code.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-BOGO-001` coverage wording to include self-tested critical-threshold gate branches.
+
+Risks/Perf Notes
+- Script refactor with behavior parity for existing CLI semantics.
+- No protocol/runtime impact.
+===
+timestamp: 2026-02-15T15:38:00+09:00
+description: Verify BoGo summary critical-threshold self-test additions
+type: test
+===
+Commands Executed
+- `python3 scripts/interop/bogo_summary.py --self-test`
+- `zig build test`
+
+Observed Results
+- `bogo_summary.py --self-test`: `self-test: ok`.
+- `zig build test`: passed.

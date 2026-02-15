@@ -68,6 +68,14 @@ def summarize(path: str) -> dict:
     }
 
 
+def evaluate_critical_gate(summary: dict, max_critical: int | None) -> int:
+    if max_critical is None:
+        return 0
+    if summary["critical_failure_count"] > max_critical:
+        return 3
+    return 0
+
+
 def self_test() -> int:
     sample = {
         "tests": [
@@ -90,6 +98,9 @@ def self_test() -> int:
     assert out["categories"]["record"]["pass"] == 1
     assert out["critical_failure_count"] == 1
     assert out["critical_failures"][0] == "TLS13/HRR"
+    assert evaluate_critical_gate(out, None) == 0
+    assert evaluate_critical_gate(out, 1) == 0
+    assert evaluate_critical_gate(out, 0) == 3
     return 0
 
 
@@ -114,12 +125,13 @@ def main() -> int:
         return 1
 
     print(json.dumps(out, indent=2, sort_keys=True))
-    if args.max_critical is not None and out["critical_failure_count"] > args.max_critical:
+    gate_code = evaluate_critical_gate(out, args.max_critical)
+    if gate_code != 0:
         print(
             f"critical failure gate exceeded: {out['critical_failure_count']} > {args.max_critical}",
             file=sys.stderr,
         )
-        return 3
+        return gate_code
     return 0
 
 
