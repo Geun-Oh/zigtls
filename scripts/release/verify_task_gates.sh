@@ -123,6 +123,7 @@ if [[ "$MODE" == "all" || "$MODE" == "basic" ]]; then
   run_cmd "bash scripts/fuzz/replay_corpus.sh --self-test"
   run_cmd "bash scripts/benchmark/run_local_perf.sh --assert"
   run_cmd "bash scripts/security/run_timing_harness.sh --assert"
+  run_cmd "bash scripts/release/check_production_artifacts.sh"
 fi
 
 if [[ "$MODE" == "all" || "$MODE" == "strict" ]]; then
@@ -131,6 +132,7 @@ if [[ "$MODE" == "all" || "$MODE" == "strict" ]]; then
   run_cmd "BOGO_PROFILE=scripts/interop/bogo_profile_v1_prod.json BOGO_STRICT=1 BOGO_ALLOW_UNIMPLEMENTED=0 BOGO_MAX_CRITICAL=0 BORINGSSL_DIR=${BORINGSSL_DIR} bash scripts/interop/bogo_run.sh"
   run_cmd "bash scripts/fuzz/replay_corpus.sh --skip-baseline"
   run_cmd "bash scripts/reliability/run_soak_chaos.sh --profile prod"
+  run_cmd "bash scripts/release/check_production_artifacts.sh"
 fi
 
 echo "[task-gates] completed mode=${MODE}"
