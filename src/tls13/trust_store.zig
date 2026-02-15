@@ -126,6 +126,16 @@ test "strategy propagates fallback file errors deterministically" {
     }));
 }
 
+test "strategy propagates fallback dir errors deterministically" {
+    var store = TrustStore.initEmpty();
+    defer store.deinit(std.testing.allocator);
+
+    try std.testing.expectError(error.FileNotFound, store.loadWithStrategy(std.testing.allocator, .{
+        .prefer_system = false,
+        .fallback_pem_dir_absolute = "/__zigtls_missing_ca_dir__",
+    }));
+}
+
 test "pem file loader rejects relative path" {
     var store = TrustStore.initEmpty();
     defer store.deinit(std.testing.allocator);
@@ -169,6 +179,22 @@ test "strategy can ignore system load errors and continue fallback path" {
     const result = try store.loadWithStrategyInternal(std.testing.allocator, .{
         .prefer_system = true,
         .fail_on_system_error = false,
+    }, Hooks.failSystemLoad);
+    try std.testing.expectEqual(LoadResult.none, result);
+}
+
+test "strategy bypasses system loader when prefer_system is false" {
+    var store = TrustStore.initEmpty();
+    defer store.deinit(std.testing.allocator);
+
+    const Hooks = struct {
+        fn failSystemLoad(_: *TrustStore, _: std.mem.Allocator) !void {
+            return error.AccessDenied;
+        }
+    };
+
+    const result = try store.loadWithStrategyInternal(std.testing.allocator, .{
+        .prefer_system = false,
     }, Hooks.failSystemLoad);
     try std.testing.expectEqual(LoadResult.none, result);
 }

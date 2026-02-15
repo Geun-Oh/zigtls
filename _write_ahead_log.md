@@ -6361,3 +6361,67 @@ Commands Executed
 Observed Results
 - `session.zig`: 126/126 tests passed.
 - `zig build test`: passed.
+===
+timestamp: 2026-02-15T13:12:00+09:00
+description: Plan trust-store strategy branch regression coverage for system bypass and fallback dir errors
+type: plan
+===
+Motivation
+- Trust-store strategy tests cover strict-system error behavior and fallback file path handling, but do not explicitly pin two branches:
+  - `prefer_system=false` must bypass system loader entirely.
+  - fallback PEM directory load errors should propagate deterministically like file fallback errors.
+
+Scope
+- Add regression test to assert system loader is not invoked when `prefer_system=false`.
+- Add regression test to assert fallback PEM dir load errors are propagated deterministically.
+- Update RFC matrix TRUST-001 test-coverage wording.
+
+Design
+- Use `loadWithStrategyInternal` with a hook that fails if called to verify bypass branch.
+- Configure missing absolute fallback dir path to assert `FileNotFound` propagation.
+
+Risks/Perf Impact
+- Test/doc-only expansion; no runtime logic changes.
+
+Test Plan (commands)
+- `zig test src/tls13/trust_store.zig`
+- `zig build test`
+
+Rollback
+- Remove added trust-store branch regression tests and matrix wording update.
+
+Commit Plan
+- `MINOR: trust: add strategy branch regression tests`
+===
+timestamp: 2026-02-15T13:16:00+09:00
+description: Add trust-store strategy branch regressions for fallback dir errors and prefer_system bypass
+type: code change
+===
+Decisions + Rationale
+- Expanded trust-store strategy regression coverage to pin branch behavior that was previously implied but untested.
+- Added deterministic fallback-dir error propagation test to mirror existing fallback-file determinism checks.
+- Added explicit `prefer_system=false` bypass test to ensure system loader is never invoked in that mode.
+
+Files/Functions Touched
+- `src/tls13/trust_store.zig`
+  - Added tests:
+    - `strategy propagates fallback dir errors deterministically`
+    - `strategy bypasses system loader when prefer_system is false`
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-TRUST-001` coverage wording to include fallback-dir error determinism and prefer_system bypass branch.
+
+Risks/Perf Notes
+- Test/doc-only expansion; no runtime behavior changes.
+===
+timestamp: 2026-02-15T13:17:00+09:00
+description: Verify trust-store branch regression additions
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/trust_store.zig`
+- `zig test src/tls13/trust_store.zig`
+- `zig build test`
+
+Observed Results
+- `trust_store.zig`: 11/11 tests passed.
+- `zig build test`: passed.
