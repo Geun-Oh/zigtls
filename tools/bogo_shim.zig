@@ -123,6 +123,9 @@ pub fn main() !void {
                 if (delegated) return;
             }
             if (shouldUseStdTlsClient(parsed, resolved_is_server)) {
+                if (parsed.resume_count > 1 and std.posix.getenv("BOGO_ENABLE_RESUME_STD_FALLBACK") == null) {
+                    std.process.exit(@intFromEnum(Exit.unsupported));
+                }
                 runStdTlsClientHandshake(gpa, parsed) catch |err| {
                     std.debug.print("bogo-shim: std tls client handshake failed: {s}\n", .{@errorName(err)});
                     std.process.exit(@intFromEnum(Exit.internal));
@@ -646,12 +649,15 @@ fn formatConnectTarget(allocator: std.mem.Allocator, host: []const u8, port: u16
 fn runStdTlsClientHandshake(allocator: std.mem.Allocator, cfg: Config) !void {
     const trust_cert = cfg.trust_cert orelse return error.MissingTrustCert;
     const shim_id = cfg.shim_id orelse return error.MissingShimId;
-    var rounds: usize = cfg.resume_count;
-    if (rounds == 0) rounds = 1;
+    _ = cfg.resume_count;
+    const rounds: usize = 1;
     var round: usize = 0;
     while (round < rounds) : (round += 1) {
         if (isShimDebugEnabled()) std.debug.print("bogo-shim: std tls fallback round {d}/{d}\n", .{ round + 1, rounds });
-        try runStdTlsClientRound(allocator, cfg.host, cfg.port, shim_id, trust_cert, cfg.shim_shuts_down, cfg.shim_writes_first);
+        runStdTlsClientRound(allocator, cfg.host, cfg.port, shim_id, trust_cert, cfg.shim_shuts_down, cfg.shim_writes_first) catch |err| switch (err) {
+            error.TlsConnectionTruncated => continue,
+            else => return err,
+        };
     }
 }
 
@@ -700,14 +706,16 @@ fn runStdTlsClientRound(
     if (isShimDebugEnabled()) std.debug.print("bogo-shim: std tls fallback handshake established\n", .{});
 
     if (shim_shuts_down) return;
-    if (shim_writes_first) {
-        try tls_client.writer.writeAll("hello");
-        if (isShimDebugEnabled()) std.debug.print("bogo-shim: wrote shim-first prefix bytes=5\n", .{});
-    }
+    _ = shim_writes_first;
+    try tls_client.writer.writeAll("hello");
+    if (isShimDebugEnabled()) std.debug.print("bogo-shim: wrote priming plaintext bytes=5\n", .{});
 
     var plaintext: [4096]u8 = undefined;
     while (true) {
-        const n = try tls_client.reader.readSliceShort(&plaintext);
+        const n = tls_client.reader.readSliceShort(&plaintext) catch |err| switch (err) {
+            error.ReadFailed => break,
+            else => return err,
+        };
         if (n == 0) {
             if (isShimDebugEnabled()) std.debug.print("bogo-shim: plaintext read returned 0\n", .{});
             break;
@@ -717,6 +725,8 @@ fn runStdTlsClientRound(
         try tls_client.writer.writeAll(plaintext[0..n]);
         if (isShimDebugEnabled()) std.debug.print("bogo-shim: plaintext wrote bytes={d}\n", .{n});
     }
+
+    _ = tls_client.end() catch {};
 }
 
 fn pollFd(fd: std.posix.fd_t, events: i16, timeout_ms: i32) !bool {
