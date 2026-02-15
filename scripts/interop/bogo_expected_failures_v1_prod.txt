@@ -76,7 +76,6 @@ EmptyPSKHint-Server-TLS-Async-ImplicitHandshake-Hints
 EmptyPSKHint-Server-TLS-Async-PackHandshake-Hints
 EmptyPSKHint-Server-TLS-Async-PackHandshake-Split
 EmptyPSKHint-Server-TLS-Async-Split
-EmptyPSKHint-Server-TLS-Async-SplitHandshakeRecords
 EmptyPSKHint-Server-TLS-Async-SplitHandshakeRecords-Hints
 EmptyPSKHint-Server-TLS-Async-SplitHandshakeRecords-Split
 EmptyPSKHint-Server-TLS-Sync-Hints
@@ -84,7 +83,6 @@ EmptyPSKHint-Server-TLS-Sync-ImplicitHandshake-Hints
 EmptyPSKHint-Server-TLS-Sync-PackHandshake-Hints
 EmptyPSKHint-Server-TLS-Sync-PackHandshake-Split
 EmptyPSKHint-Server-TLS-Sync-Split
-EmptyPSKHint-Server-TLS-Sync-SplitHandshakeRecords
 EmptyPSKHint-Server-TLS-Sync-SplitHandshakeRecords-Hints
 EmptyPSKHint-Server-TLS-Sync-SplitHandshakeRecords-Split
 ExtraPSKIdentity-TLS13-Hints
@@ -156,7 +154,6 @@ SessionTicketsDisabled-Server-TLS-Async-ImplicitHandshake-Hints
 SessionTicketsDisabled-Server-TLS-Async-PackHandshake-Hints
 SessionTicketsDisabled-Server-TLS-Async-PackHandshake-Split
 SessionTicketsDisabled-Server-TLS-Async-Split
-SessionTicketsDisabled-Server-TLS-Async-SplitHandshakeRecords
 SessionTicketsDisabled-Server-TLS-Async-SplitHandshakeRecords-Hints
 SessionTicketsDisabled-Server-TLS-Async-SplitHandshakeRecords-Split
 SessionTicketsDisabled-Server-TLS-Sync-Hints
@@ -164,7 +161,6 @@ SessionTicketsDisabled-Server-TLS-Sync-ImplicitHandshake-Hints
 SessionTicketsDisabled-Server-TLS-Sync-PackHandshake-Hints
 SessionTicketsDisabled-Server-TLS-Sync-PackHandshake-Split
 SessionTicketsDisabled-Server-TLS-Sync-Split
-SessionTicketsDisabled-Server-TLS-Sync-SplitHandshakeRecords
 SessionTicketsDisabled-Server-TLS-Sync-SplitHandshakeRecords-Hints
 SessionTicketsDisabled-Server-TLS-Sync-SplitHandshakeRecords-Split
 SkipEarlyData-HRR-FatalAlert-TLS13
@@ -230,7 +226,6 @@ TLS13-HelloRetryRequest-Server-TLS-Async-ImplicitHandshake-Hints
 TLS13-HelloRetryRequest-Server-TLS-Async-PackHandshake-Hints
 TLS13-HelloRetryRequest-Server-TLS-Async-PackHandshake-Split
 TLS13-HelloRetryRequest-Server-TLS-Async-Split
-TLS13-HelloRetryRequest-Server-TLS-Async-SplitHandshakeRecords
 TLS13-HelloRetryRequest-Server-TLS-Async-SplitHandshakeRecords-Hints
 TLS13-HelloRetryRequest-Server-TLS-Async-SplitHandshakeRecords-Split
 TLS13-HelloRetryRequest-Server-TLS-Sync-Hints
@@ -238,7 +233,6 @@ TLS13-HelloRetryRequest-Server-TLS-Sync-ImplicitHandshake-Hints
 TLS13-HelloRetryRequest-Server-TLS-Sync-PackHandshake-Hints
 TLS13-HelloRetryRequest-Server-TLS-Sync-PackHandshake-Split
 TLS13-HelloRetryRequest-Server-TLS-Sync-Split
-TLS13-HelloRetryRequest-Server-TLS-Sync-SplitHandshakeRecords
 TLS13-HelloRetryRequest-Server-TLS-Sync-SplitHandshakeRecords-Hints
 TLS13-HelloRetryRequest-Server-TLS-Sync-SplitHandshakeRecords-Split
 TLS13-SendBadKEModeSessionTicket-Server-Hints
