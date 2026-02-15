@@ -141,6 +141,19 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(timing_probe);
     const install_timing_probe = b.addInstallArtifact(timing_probe, .{});
 
+    const lb_event_loop_sample = b.addExecutable(.{
+        .name = "lb-event-loop-sample",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/lb_event_loop_sample.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zigtls", .module = mod },
+            },
+        }),
+    });
+    b.installArtifact(lb_event_loop_sample);
+
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).
     // This will evaluate the `run` step rather than the default step.
@@ -178,6 +191,10 @@ pub fn build(b: *std.Build) void {
 
     const timing_probe_step = b.step("timing-probe", "Build local timing probe executable");
     timing_probe_step.dependOn(&install_timing_probe.step);
+
+    const lb_event_loop_sample_run = b.addRunArtifact(lb_event_loop_sample);
+    const lb_event_loop_sample_step = b.step("lb-example", "Run event-loop adapter LB integration sample");
+    lb_event_loop_sample_step.dependOn(&lb_event_loop_sample_run.step);
 
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
@@ -318,6 +335,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&dependency_baseline_self_test.step);
     test_step.dependOn(&dependency_baseline_check.step);
     test_step.dependOn(&interop_shell_syntax_check.step);
+    test_step.dependOn(&lb_event_loop_sample_run.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
