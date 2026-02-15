@@ -229,6 +229,17 @@ def evaluate_strict_gate(summary: dict, strict: bool) -> int:
     return 0
 
 
+def evaluate_raw_non_pass_gate(summary: dict, max_raw_non_pass: int | None) -> int:
+    if max_raw_non_pass is None:
+        return 0
+    raw = summary.get("in_scope_required_non_pass_raw")
+    if raw is None:
+        return 7
+    if raw > max_raw_non_pass:
+        return 8
+    return 0
+
+
 def self_test() -> int:
     sample = {
         "tests": [
@@ -276,6 +287,8 @@ def self_test() -> int:
     assert evaluate_critical_gate(out, 0) == 3
     assert evaluate_critical_gate(out, 1) == 0
     assert evaluate_strict_gate(out, True) == 0
+    assert evaluate_raw_non_pass_gate(out, 0) == 8
+    assert evaluate_raw_non_pass_gate(out, 1) == 0
 
     sample_v3 = {
         "tests": {
@@ -292,6 +305,7 @@ def self_test() -> int:
     assert out_v3["in_scope_required_total"] == 2
     assert out_v3["in_scope_required_non_pass"] == 0
     assert evaluate_strict_gate(out_v3, True) == 0
+    assert evaluate_raw_non_pass_gate(out_v3, 0) == 0
 
     return 0
 
@@ -303,6 +317,12 @@ def main() -> int:
     p.add_argument("--max-critical", type=int, default=None, help="Fail if critical_failure_count exceeds this value")
     p.add_argument("--profile", default=None, help="Profile json path for in/out-of-scope classification")
     p.add_argument("--strict", action="store_true", help="Enforce strict in_scope_required gate")
+    p.add_argument(
+        "--max-raw-non-pass",
+        type=int,
+        default=None,
+        help="Fail if in_scope_required_non_pass_raw exceeds this value",
+    )
     args = p.parse_args()
 
     if args.self_test:
@@ -341,6 +361,18 @@ def main() -> int:
             file=sys.stderr,
         )
         return strict_code
+
+    raw_code = evaluate_raw_non_pass_gate(out, args.max_raw_non_pass)
+    if raw_code == 7:
+        print("--max-raw-non-pass requires profile classification output", file=sys.stderr)
+        return raw_code
+    if raw_code == 8:
+        print(
+            "raw non-pass gate failed: "
+            f"in_scope_required_non_pass_raw={out['in_scope_required_non_pass_raw']} > {args.max_raw_non_pass}",
+            file=sys.stderr,
+        )
+        return raw_code
 
     return 0
 

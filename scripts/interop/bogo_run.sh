@@ -9,6 +9,7 @@ set -euo pipefail
 #   BOGO_TEST_FILTER: semicolon-separated BoGo case patterns for runner -test
 #   BOGO_OUTPUT: output json file (default: bogo-results.json)
 #   BOGO_MAX_CRITICAL: maximum allowed critical failures in summary (default: 0)
+#   BOGO_MAX_RAW_NON_PASS: maximum allowed in_scope_required_non_pass_raw in summary (default: unset)
 #   BOGO_ALLOW_UNIMPLEMENTED: pass -allow-unimplemented to runner (default: 1)
 #   BOGO_PROFILE: path to BoGo profile JSON for in/out-of-scope classification
 #   BOGO_STRICT: if 1, enforce strict in_scope_required gate (default: 0)
@@ -18,6 +19,7 @@ BOGO_FILTER="${BOGO_FILTER:-}"
 BOGO_TEST_FILTER="${BOGO_TEST_FILTER:-}"
 BOGO_OUTPUT="${BOGO_OUTPUT:-bogo-results.json}"
 BOGO_MAX_CRITICAL="${BOGO_MAX_CRITICAL:-0}"
+BOGO_MAX_RAW_NON_PASS="${BOGO_MAX_RAW_NON_PASS:-}"
 BOGO_ALLOW_UNIMPLEMENTED="${BOGO_ALLOW_UNIMPLEMENTED:-1}"
 BOGO_PROFILE="${BOGO_PROFILE:-}"
 BOGO_STRICT="${BOGO_STRICT:-0}"
@@ -66,6 +68,9 @@ SUMMARY_STATUS=0
 if [[ -f "$RUNNER/$BOGO_OUTPUT" ]]; then
   echo "BoGo summary:"
   SUMMARY_ARGS=(--max-critical "$BOGO_MAX_CRITICAL")
+  if [[ -n "$BOGO_MAX_RAW_NON_PASS" ]]; then
+    SUMMARY_ARGS+=(--max-raw-non-pass "$BOGO_MAX_RAW_NON_PASS")
+  fi
   if [[ -n "$BOGO_PROFILE" ]]; then
     SUMMARY_ARGS+=(--profile "$BOGO_PROFILE")
   fi
