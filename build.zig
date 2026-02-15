@@ -255,6 +255,7 @@ pub fn build(b: *std.Build) void {
         "scripts/interop/generate_evidence.sh",
         "scripts/security/run_timing_harness.sh",
         "scripts/reliability/run_soak_chaos.sh",
+        "scripts/release/check_api_surface.sh",
     });
 
     const timing_harness_self_test = b.addSystemCommand(&.{
@@ -267,6 +268,17 @@ pub fn build(b: *std.Build) void {
         "bash",
         "scripts/reliability/run_soak_chaos.sh",
         "--self-test",
+    });
+
+    const api_surface_self_test = b.addSystemCommand(&.{
+        "bash",
+        "scripts/release/check_api_surface.sh",
+        "--self-test",
+    });
+
+    const api_surface_check = b.addSystemCommand(&.{
+        "bash",
+        "scripts/release/check_api_surface.sh",
     });
 
     // A top level step for running all tests. dependOn can be called multiple
@@ -282,6 +294,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&bogo_summary_self_test.step);
     test_step.dependOn(&timing_harness_self_test.step);
     test_step.dependOn(&reliability_self_test.step);
+    test_step.dependOn(&api_surface_self_test.step);
+    test_step.dependOn(&api_surface_check.step);
     test_step.dependOn(&interop_shell_syntax_check.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
