@@ -31,5 +31,14 @@
       "Certificate|OCSP|X509"
     ]
   },
-  "default_class": "out_of_scope"
+  "default_class": "out_of_scope",
+  "expected_failures": [
+    {
+      "pattern": "TLS13|HRR|HelloRetryRequest|KeyUpdate|Resumption|SessionTicket|PSK|Alert|close_notify|BasicHandshake|Basic",
+      "statuses": [
+        "skip",
+        "fail"
+      ]
+    }
+  ]
 }

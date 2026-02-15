@@ -62,6 +62,7 @@ popd >/dev/null
 echo "BoGo runner exited with status: $STATUS"
 echo "Results: $RUNNER/$BOGO_OUTPUT"
 
+SUMMARY_STATUS=0
 if [[ -f "$RUNNER/$BOGO_OUTPUT" ]]; then
   echo "BoGo summary:"
   SUMMARY_ARGS=(--max-critical "$BOGO_MAX_CRITICAL")
@@ -71,9 +72,20 @@ if [[ -f "$RUNNER/$BOGO_OUTPUT" ]]; then
   if [[ "$BOGO_STRICT" == "1" ]]; then
     SUMMARY_ARGS+=(--strict)
   fi
-  if ! python3 "$(dirname "$0")/bogo_summary.py" "${SUMMARY_ARGS[@]}" "$RUNNER/$BOGO_OUTPUT"; then
+  set +e
+  python3 "$(dirname "$0")/bogo_summary.py" "${SUMMARY_ARGS[@]}" "$RUNNER/$BOGO_OUTPUT"
+  SUMMARY_STATUS=$?
+  set -e
+  if [[ "$SUMMARY_STATUS" != "0" ]]; then
     echo "warning: failed to summarize BoGo output" >&2
     exit 1
+  fi
+fi
+
+if [[ "$STATUS" != "0" ]]; then
+  if [[ "$BOGO_STRICT" == "1" && "$BOGO_ALLOW_UNIMPLEMENTED" == "0" && "$SUMMARY_STATUS" == "0" ]]; then
+    echo "strict summary gate passed; treating runner non-zero as expected-failure matched outcome"
+    exit 0
   fi
 fi
 

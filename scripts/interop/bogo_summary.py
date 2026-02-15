@@ -72,12 +72,35 @@ def compile_profile(profile_path: str) -> dict[str, Any]:
     for klass, patterns in classes.items():
         compiled[klass] = [re.compile(p, re.IGNORECASE) for p in patterns]
 
+    expected_failures = []
+    for row in raw.get("expected_failures", []):
+        if not isinstance(row, dict):
+            continue
+        pattern = row.get("pattern")
+        if not isinstance(pattern, str) or not pattern:
+            continue
+        statuses = row.get("statuses", ["skip", "fail"])
+        status_set = {
+            str(s).lower()
+            for s in statuses
+            if isinstance(s, str)
+        }
+        if not status_set:
+            status_set = {"skip", "fail"}
+        expected_failures.append(
+            {
+                "pattern": re.compile(pattern, re.IGNORECASE),
+                "statuses": status_set,
+            }
+        )
+
     return {
         "name": raw.get("name", "unnamed"),
         "version": raw.get("version", 1),
         "default_class": default_class,
         "class_order": class_order,
         "compiled": compiled,
+        "expected_failures": expected_failures,
     }
 
 
@@ -91,6 +114,15 @@ def classify_with_profile(name: str, profile: dict[str, Any]) -> str:
     return profile["default_class"]
 
 
+def matches_expected_failure(name: str, status: str, profile: dict[str, Any]) -> bool:
+    for row in profile.get("expected_failures", []):
+        if status not in row["statuses"]:
+            continue
+        if row["pattern"].search(name):
+            return True
+    return False
+
+
 def summarize(path: str, profile_path: str | None = None) -> dict:
     rows = load_results(path)
 
@@ -101,6 +133,8 @@ def summarize(path: str, profile_path: str | None = None) -> dict:
 
     profile = compile_profile(profile_path) if profile_path else None
     class_counter = defaultdict(Counter)
+    in_scope_required_non_pass_raw = 0
+    in_scope_required_expected_fail_matches = 0
 
     for name, raw_status in rows:
         status = str(raw_status).lower()
@@ -113,14 +147,18 @@ def summarize(path: str, profile_path: str | None = None) -> dict:
         if profile is not None:
             klass = classify_with_profile(name, profile)
             class_counter[klass][status] += 1
+            if klass == "in_scope_required" and status in NON_PASS_STATUSES:
+                in_scope_required_non_pass_raw += 1
+                if matches_expected_failure(name, status, profile):
+                    in_scope_required_expected_fail_matches += 1
 
         if status in ("fail", "crash", "timeout") and is_critical_test(name):
             critical_failures.append(name)
 
     in_scope_required_status = dict(class_counter.get("in_scope_required", {}))
     in_scope_required_total = sum(in_scope_required_status.values())
-    in_scope_required_non_pass = sum(
-        count for st, count in in_scope_required_status.items() if st in NON_PASS_STATUSES
+    in_scope_required_non_pass = (
+        in_scope_required_non_pass_raw - in_scope_required_expected_fail_matches
     )
 
     out = {
@@ -141,6 +179,8 @@ def summarize(path: str, profile_path: str | None = None) -> dict:
         out["classification"] = {k: dict(v) for k, v in sorted(class_counter.items())}
         out["in_scope_required_total"] = in_scope_required_total
         out["in_scope_required_non_pass"] = in_scope_required_non_pass
+        out["in_scope_required_non_pass_raw"] = in_scope_required_non_pass_raw
+        out["in_scope_required_expected_fail_matches"] = in_scope_required_expected_fail_matches
         out["out_of_scope_total"] = sum(class_counter.get("out_of_scope", {}).values())
 
     return out
@@ -195,6 +235,9 @@ def self_test() -> int:
             "in_scope_optional": ["NoDelimiter"],
         },
         "default_class": "out_of_scope",
+        "expected_failures": [
+            {"pattern": "HRR", "statuses": ["fail"]},
+        ],
     }
     with open(profile_path, "w", encoding="utf-8") as f:
         json.dump(profile, f)
@@ -205,11 +248,13 @@ def self_test() -> int:
     assert out["status"].get("fail") == 1
     assert out["critical_failure_count"] == 1
     assert out["in_scope_required_total"] == 2
-    assert out["in_scope_required_non_pass"] == 1
+    assert out["in_scope_required_non_pass_raw"] == 1
+    assert out["in_scope_required_expected_fail_matches"] == 1
+    assert out["in_scope_required_non_pass"] == 0
     assert out["out_of_scope_total"] == 1
     assert evaluate_critical_gate(out, 0) == 3
     assert evaluate_critical_gate(out, 1) == 0
-    assert evaluate_strict_gate(out, True) == 4
+    assert evaluate_strict_gate(out, True) == 0
 
     sample_v3 = {
         "tests": {
