@@ -14,7 +14,6 @@ pub const ConnectionContext = struct {
 pub const Error = error{
     NotAccepted,
     OutputBufferTooSmall,
-    UnsupportedOperation,
     InvalidConfiguration,
 } || tls13.session.EngineError || std.mem.Allocator.Error;
 
@@ -25,18 +24,12 @@ pub const ClientHelloMetadata = struct {
 
 pub const ClientHelloCallback = *const fn (meta: ClientHelloMetadata, userdata: usize) void;
 
-const PendingRecord = struct {
-    buf: [16]u8 = undefined,
-    len: usize = 0,
-};
-
 pub const Connection = struct {
     allocator: std.mem.Allocator,
     config: Config,
     engine: tls13.session.Engine,
     accepted: bool = false,
-    pending_records: [4]PendingRecord = [_]PendingRecord{.{}} ** 4,
-    pending_record_count: usize = 0,
+    pending_records: std.ArrayList([]u8),
     pending_plaintext: std.ArrayList(u8),
 
     pub fn init(allocator: std.mem.Allocator, config: Config) Connection {
@@ -44,6 +37,7 @@ pub const Connection = struct {
             .allocator = allocator,
             .config = config,
             .engine = tls13.session.Engine.init(allocator, config.session),
+            .pending_records = .empty,
             .pending_plaintext = .empty,
         };
     }
@@ -55,6 +49,8 @@ pub const Connection = struct {
 
     pub fn deinit(self: *Connection) void {
         self.engine.deinit();
+        for (self.pending_records.items) |frame| self.allocator.free(frame);
+        self.pending_records.deinit(self.allocator);
         self.pending_plaintext.deinit(self.allocator);
     }
 
@@ -84,13 +80,14 @@ pub const Connection = struct {
     }
 
     pub fn drain_tls_records(self: *Connection, out: []u8) Error!usize {
-        if (self.pending_record_count == 0) return 0;
+        if (self.pending_records.items.len == 0) return 0;
 
-        const first = self.pending_records[0];
+        const first = self.pending_records.items[0];
         if (out.len < first.len) return error.OutputBufferTooSmall;
 
-        @memcpy(out[0..first.len], first.buf[0..first.len]);
-        self.shiftPendingRecordsLeft();
+        @memcpy(out[0..first.len], first);
+        self.allocator.free(first);
+        _ = self.pending_records.orderedRemove(0);
         return first.len;
     }
 
@@ -107,8 +104,28 @@ pub const Connection = struct {
         return n;
     }
 
-    pub fn write_plaintext(_: *Connection, _: []const u8) Error!usize {
-        return error.UnsupportedOperation;
+    pub fn write_plaintext(self: *Connection, plaintext: []const u8) Error!usize {
+        if (!self.accepted) return error.NotAccepted;
+        if (plaintext.len == 0) return 0;
+
+        var written: usize = 0;
+        const max_payload = std.math.maxInt(u16);
+
+        while (written < plaintext.len) {
+            const remaining = plaintext.len - written;
+            const chunk_len = @min(remaining, max_payload);
+            const frame = try self.allocator.alloc(u8, 5 + chunk_len);
+            errdefer self.allocator.free(frame);
+
+            frame[0] = @intFromEnum(tls13.record.ContentType.application_data);
+            std.mem.writeInt(u16, frame[1..3], tls13.record.tls_legacy_record_version, .big);
+            std.mem.writeInt(u16, frame[3..5], @as(u16, @intCast(chunk_len)), .big);
+            @memcpy(frame[5..], plaintext[written .. written + chunk_len]);
+            try self.pending_records.append(self.allocator, frame);
+            written += chunk_len;
+        }
+
+        return written;
     }
 
     pub fn shutdown(self: *Connection) Error!void {
@@ -172,21 +189,10 @@ pub const Connection = struct {
     }
 
     fn pushPendingRecord(self: *Connection, bytes: []const u8) Error!void {
-        if (bytes.len > self.pending_records[0].buf.len) return error.OutputBufferTooSmall;
-        if (self.pending_record_count >= self.pending_records.len) return error.OutputBufferTooSmall;
-
-        self.pending_records[self.pending_record_count].len = bytes.len;
-        @memcpy(self.pending_records[self.pending_record_count].buf[0..bytes.len], bytes);
-        self.pending_record_count += 1;
-    }
-
-    fn shiftPendingRecordsLeft(self: *Connection) void {
-        if (self.pending_record_count == 0) return;
-        var i: usize = 1;
-        while (i < self.pending_record_count) : (i += 1) {
-            self.pending_records[i - 1] = self.pending_records[i];
-        }
-        self.pending_record_count -= 1;
+        const frame = try self.allocator.alloc(u8, bytes.len);
+        errdefer self.allocator.free(frame);
+        @memcpy(frame, bytes);
+        try self.pending_records.append(self.allocator, frame);
     }
 };
 
@@ -302,12 +308,28 @@ test "shutdown enqueues close_notify record and can be drained" {
     try std.testing.expectEqual(@as(u8, 0), out[6]);
 }
 
-test "write plaintext is explicit unsupported operation" {
+test "write plaintext enqueues application data record" {
     var conn = Connection.init(std.testing.allocator, .{ .session = .{ .role = .client, .suite = .tls_aes_128_gcm_sha256 } });
     defer conn.deinit();
     conn.accept(.{});
 
-    try std.testing.expectError(error.UnsupportedOperation, conn.write_plaintext("ping"));
+    const written = try conn.write_plaintext("ping");
+    try std.testing.expectEqual(@as(usize, 4), written);
+
+    var out: [32]u8 = undefined;
+    const n = try conn.drain_tls_records(&out);
+    try std.testing.expectEqual(@as(usize, 9), n);
+    try std.testing.expectEqual(@as(u8, 23), out[0]);
+    try std.testing.expectEqual(@as(u16, tls13.record.tls_legacy_record_version), std.mem.readInt(u16, out[1..3], .big));
+    try std.testing.expectEqual(@as(u16, 4), std.mem.readInt(u16, out[3..5], .big));
+    try std.testing.expectEqualStrings("ping", out[5..9]);
+}
+
+test "write plaintext requires accept before use" {
+    var conn = Connection.init(std.testing.allocator, .{ .session = .{ .role = .client, .suite = .tls_aes_128_gcm_sha256 } });
+    defer conn.deinit();
+
+    try std.testing.expectError(error.NotAccepted, conn.write_plaintext("ping"));
 }
 
 test "ingest with alert intent maps invalid record to fatal outcome" {
