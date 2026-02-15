@@ -19,11 +19,17 @@ jobs:
       - name: Zig Build Test
         run: zig build test
 
+      - name: Build Performance Probe
+        run: zig build perf-probe
+
       - name: Shell Script Lint
         run: bash -n scripts/interop/*.sh
 
       - name: Fuzz Replay Script Lint
         run: bash -n scripts/fuzz/replay_corpus.sh
+
+      - name: Benchmark Script Lint
+        run: bash -n scripts/benchmark/run_local_perf.sh
 
       - name: Python Syntax Check
         run: python3 -m py_compile scripts/interop/bogo_summary.py

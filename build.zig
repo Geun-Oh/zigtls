@@ -113,6 +113,20 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(corpus_replay);
     const install_corpus_replay = b.addInstallArtifact(corpus_replay, .{});
 
+    const perf_probe = b.addExecutable(.{
+        .name = "perf-probe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/perf_probe.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zigtls", .module = mod },
+            },
+        }),
+    });
+    b.installArtifact(perf_probe);
+    const install_perf_probe = b.addInstallArtifact(perf_probe, .{});
+
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).
     // This will evaluate the `run` step rather than the default step.
@@ -144,6 +158,9 @@ pub fn build(b: *std.Build) void {
 
     const replay_step = b.step("corpus-replay", "Build corpus replay executable");
     replay_step.dependOn(&install_corpus_replay.step);
+
+    const perf_probe_step = b.step("perf-probe", "Build local performance probe executable");
+    perf_probe_step.dependOn(&install_perf_probe.step);
 
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to

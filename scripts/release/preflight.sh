@@ -57,5 +57,6 @@ run_cmd "bash -n scripts/interop/matrix_local.sh"
 run_cmd "bash scripts/interop/matrix_local.sh --self-test"
 run_cmd "bash -n scripts/fuzz/replay_corpus.sh"
 run_cmd "bash scripts/fuzz/replay_corpus.sh --self-test"
+run_cmd "bash scripts/benchmark/run_local_perf.sh"
 
 echo "[preflight] all checks passed"

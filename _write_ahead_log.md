@@ -7646,3 +7646,161 @@ Commands Executed
 
 Observed Results
 - `zig build test`: passed.
+===
+timestamp: 2026-02-15T11:50:10+09:00
+description: Plan closure of remaining _task performance-measurement requirements with reproducible in-repo benchmark tooling
+type: plan
+===
+Motivation
+- Current repository gates cover correctness, security hardening, and interop/fuzz self-tests, but  also requires explicit and continuously runnable performance measurement for latency/throughput/memory.
+- Existing release docs request performance recording, yet no single in-repo benchmark command currently emits these metrics deterministically.
+
+Scope
+- Add a local benchmark executable under  that reports:
+  - Handshake-phase micro-latency (key-schedule derivation path)
+  - Cipher-suite throughput for mandatory TLS 1.3 suites
+  - Per-connection memory ceiling via existing session API
+- Add an automation-friendly shell wrapper in .
+- Wire benchmark tool into  as a dedicated top-level step.
+- Update release docs to include exact benchmark command and expected output fields.
+
+Design
+- Reuse existing  and  APIs to avoid external dependencies.
+- Use  + fixed-size looped workloads for deterministic local measurements.
+- Keep benchmark read-only and side-effect free.
+
+Risks/Perf Impact
+- Adds benchmark-only code path; no runtime TLS engine behavior changes.
+- Measurement values are environment-dependent; docs will classify them as baseline evidence, not hard pass/fail thresholds.
+
+Test Plan (commands)
+- self-test: ok
+- 
+- 
+
+Rollback
+- Remove benchmark tool/script/build step/doc references if measurement approach is rejected.
+
+Commit Plan
+- 
+===
+timestamp: 2026-02-15T11:50:25+09:00
+description: Correct previous WAL plan entry corrupted by shell backtick expansion and restate performance-closure plan
+type: plan
+===
+Decisions + Rationale
+- Previous plan entry at `2026-02-15T11:50:10+09:00` was partially corrupted due to unescaped backticks in shell heredoc command.
+- Per WAL append-only policy, prior entry remains unchanged; this entry supersedes it as the authoritative plan.
+
+Motivation
+- `_task.md` requires explicit, repeatable performance measurement for latency/throughput/memory.
+- Current repository lacks a single deterministic in-repo command that emits all required performance indicators.
+
+Scope
+- Add local benchmark executable under `tools/` that reports:
+  - Handshake-phase micro-latency (key-schedule derivation path)
+  - Throughput for mandatory TLS 1.3 cipher suites
+  - Per-connection memory ceiling from existing session API
+- Add wrapper script under `scripts/benchmark/`.
+- Wire benchmark step in `build.zig`.
+- Update release docs (`docs/release-runbook.md`, `docs/release-signoff.md`) to include benchmark gate command/evidence.
+
+Design
+- Reuse `src/tls13/keyschedule.zig` and `src/tls13/session.zig` APIs.
+- Use `std.time.Timer` with fixed-size deterministic loops.
+- Keep benchmark path side-effect free and optional.
+
+Risks/Perf Impact
+- No production TLS behavior changes; benchmark-only additions.
+- Numeric results remain environment-dependent and are treated as evidence snapshots.
+
+Test Plan (commands)
+- `zig build test`
+- `zig build perf-probe`
+- `bash scripts/benchmark/run_local_perf.sh`
+
+Rollback
+- Remove benchmark tool/script/build/doc updates if not accepted.
+
+Commit Plan
+- `MINOR: perf: add reproducible local performance probe and release gate wiring`
+===
+timestamp: 2026-02-15T11:54:57+09:00
+description: Implement hybrid KEX policy gating and reproducible local performance probe tooling
+ type: code change
+===
+Decisions + Rationale
+- Added named-group policy controls in TLS session config to provide explicit post-quantum/hybrid integration plumbing with default fail-closed behavior.
+- Kept hybrid KEX disabled by default and policy-gated (`allow_hybrid_kex`) to satisfy readiness requirement without silently widening accepted groups.
+- Added deterministic local performance probe executable to close `_task.md` performance measurement requirements with a single in-repo command.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - Added `GroupPolicy` and named-group constants (including provisional `named_group_x25519_mlkem768`).
+  - Extended ClientHello/ServerHello/HRR group validation paths to enforce allowed-group and hybrid-gate policy.
+  - Added regression tests for hybrid-disabled rejection and hybrid-enabled acceptance on both client/server paths.
+- `tools/perf_probe.zig`
+  - Added benchmark executable reporting key-schedule micro-latency, mandatory-suite AEAD throughput, and per-connection memory ceiling.
+- `build.zig`
+  - Added `perf-probe` executable + top-level build step.
+- `scripts/benchmark/run_local_perf.sh`
+  - Added local wrapper command for performance probe execution.
+- `scripts/release/preflight.sh`
+  - Added benchmark script execution to release preflight flow.
+- `docs/performance-baseline.md`
+  - Added baseline artifact template and output-field definitions.
+- `docs/release-runbook.md`
+  - Added explicit performance probe command under performance gate.
+- `docs/release-signoff.md`
+  - Added performance gate evidence + required attachment reference.
+- `.github/workflows/ci.yml`
+  - Added `zig build perf-probe` and benchmark script syntax lint steps.
+
+Risks/Perf Notes
+- Hybrid group constant is intentionally policy-gated and documented as provisional integration path.
+- Benchmark values are host-dependent; output is used as reproducible snapshot evidence, not fixed pass/fail threshold.
+===
+timestamp: 2026-02-15T11:55:20+09:00
+description: Supersede prior malformed metadata entry and restate code-change log for hybrid KEX gating and performance probe
+type: code change
+===
+Decisions + Rationale
+- This entry supersedes the immediately previous append where metadata key formatting for `type` was malformed.
+- Code-change content remains identical in intent; this is the authoritative log entry.
+
+Summary
+- Implemented hybrid KEX policy gating in `src/tls13/session.zig` with default fail-closed posture.
+- Added `tools/perf_probe.zig` plus build/script/doc/CI wiring for reproducible local performance evidence.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+- `tools/perf_probe.zig`
+- `build.zig`
+- `scripts/benchmark/run_local_perf.sh`
+- `scripts/release/preflight.sh`
+- `docs/performance-baseline.md`
+- `docs/release-runbook.md`
+- `docs/release-signoff.md`
+- `.github/workflows/ci.yml`
+
+Risks/Perf Notes
+- No behavioral change to default TLS operation beyond stricter named-group policy enforcement.
+- Bench tooling is non-invasive and optional at runtime.
+===
+timestamp: 2026-02-15T11:55:45+09:00
+description: Validate hybrid KEX gating and performance probe integration
+type: test
+===
+Commands Executed
+- `zig test src/tls13/session.zig`
+- `zig build perf-probe`
+- `bash scripts/benchmark/run_local_perf.sh`
+- `zig build test`
+- `bash scripts/release/preflight.sh --dry-run`
+
+Observed Results
+- `zig test src/tls13/session.zig`: passed (131/131).
+- `zig build perf-probe`: passed.
+- `run_local_perf.sh`: executed and emitted suite-wise latency/throughput + memory ceiling metrics.
+- `zig build test`: passed.
+- `preflight --dry-run`: passed and includes benchmark command in sequence.

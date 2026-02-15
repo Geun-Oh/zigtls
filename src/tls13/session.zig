@@ -17,12 +17,27 @@ pub const default_signature_algorithms = [_]u16{
     0x0807, // ed25519
 };
 
+pub const named_group_x25519: u16 = 0x001d;
+// Provisional X25519MLKEM768 NamedGroup codepoint integration path.
+// Keep policy-gated because draft/final allocation can evolve.
+pub const named_group_x25519_mlkem768: u16 = 0x11ec;
+pub const default_named_groups = [_]u16{
+    named_group_x25519,
+};
+
+pub const GroupPolicy = struct {
+    allowed_named_groups: []const u16 = &default_named_groups,
+    allow_hybrid_kex: bool = false,
+    hybrid_named_groups: []const u16 = &.{named_group_x25519_mlkem768},
+};
+
 pub const KeyLogCallback = *const fn (label: []const u8, secret: []const u8, userdata: usize) void;
 
 pub const Config = struct {
     role: state.Role,
     suite: keyschedule.CipherSuite,
     early_data: EarlyDataConfig = .{},
+    group_policy: GroupPolicy = .{},
     allowed_signature_algorithms: []const u16 = &default_signature_algorithms,
     enable_debug_keylog: bool = false,
     keylog_callback: ?KeyLogCallback = null,
@@ -607,10 +622,10 @@ pub const Engine = struct {
         const server_name = findExtensionData(extensions, ext_server_name) orelse return error.MissingRequiredClientHelloExtension;
         try validateClientHelloServerNameExtension(server_name);
         const supported_groups = findExtensionData(extensions, ext_supported_groups) orelse return error.MissingRequiredClientHelloExtension;
-        try validateClientHelloSupportedGroupsExtension(supported_groups);
+        try validateClientHelloSupportedGroupsExtension(supported_groups, self.config.group_policy);
         const key_share = findExtensionData(extensions, ext_key_share) orelse return error.MissingRequiredClientHelloExtension;
         try validateClientHelloKeyShareExtension(key_share);
-        try validateClientHelloKeyShareGroupsSubset(key_share, supported_groups);
+        try validateClientHelloKeyShareGroupsSubset(key_share, supported_groups, self.config.group_policy);
         const alpn = findExtensionData(extensions, ext_alpn) orelse return error.MissingRequiredClientHelloExtension;
         try validateClientHelloAlpnExtension(alpn);
         if (!isStrictTls13LegacyCompressionVector(compression_methods)) return error.InvalidCompressionMethod;
@@ -618,24 +633,22 @@ pub const Engine = struct {
     }
 
     fn requireServerHelloExtensions(self: Engine, extensions: []const messages.Extension) EngineError!void {
-        _ = self;
         try requireAllowedExtensions(extensions, &.{ ext_supported_versions, ext_key_share, ext_pre_shared_key }, error.UnexpectedServerHelloExtension);
         const supported_versions = findExtensionData(extensions, ext_supported_versions) orelse return error.MissingRequiredServerHelloExtension;
         if (!serverHelloSupportedVersionIsTls13(supported_versions)) return error.InvalidSupportedVersionExtension;
         const key_share = findExtensionData(extensions, ext_key_share) orelse return error.MissingRequiredServerHelloExtension;
-        try validateServerHelloKeyShareExtension(key_share);
+        try validateServerHelloKeyShareExtension(key_share, self.config.group_policy);
         if (findExtensionData(extensions, ext_pre_shared_key)) |pre_shared_key| {
             try validateServerHelloPreSharedKeyExtension(pre_shared_key);
         }
     }
 
     fn requireHrrExtensions(self: Engine, extensions: []const messages.Extension) EngineError!void {
-        _ = self;
         try requireAllowedExtensions(extensions, &.{ ext_supported_versions, ext_key_share, ext_cookie }, error.UnexpectedHrrExtension);
         const supported_versions = findExtensionData(extensions, ext_supported_versions) orelse return error.MissingRequiredHrrExtension;
         if (!serverHelloSupportedVersionIsTls13(supported_versions)) return error.InvalidSupportedVersionExtension;
         const key_share = findExtensionData(extensions, ext_key_share) orelse return error.MissingRequiredHrrExtension;
-        try validateHrrKeyShareExtension(key_share);
+        try validateHrrKeyShareExtension(key_share, self.config.group_policy);
         if (findExtensionData(extensions, ext_cookie)) |cookie| {
             try validateHrrCookieExtension(cookie);
         }
@@ -1003,12 +1016,17 @@ fn validateClientHelloAlpnExtension(data: []const u8) EngineError!void {
     if (i != end) return error.InvalidAlpnExtension;
 }
 
-fn validateClientHelloSupportedGroupsExtension(data: []const u8) EngineError!void {
+fn validateClientHelloSupportedGroupsExtension(data: []const u8, policy: GroupPolicy) EngineError!void {
     if (data.len < 2) return error.InvalidSupportedGroupsExtension;
     const list_len = readU16(data[0..2]);
     if (list_len == 0) return error.InvalidSupportedGroupsExtension;
     if (list_len % 2 != 0) return error.InvalidSupportedGroupsExtension;
     if (list_len + 2 != data.len) return error.InvalidSupportedGroupsExtension;
+    var i: usize = 2;
+    while (i < data.len) : (i += 2) {
+        const group = @as(u16, @intCast(readU16(data[i .. i + 2])));
+        if (!groupAllowedByPolicy(policy, group)) return error.InvalidSupportedGroupsExtension;
+    }
 }
 
 fn validateClientHelloKeyShareExtension(data: []const u8) EngineError!void {
@@ -1030,10 +1048,11 @@ fn validateClientHelloKeyShareExtension(data: []const u8) EngineError!void {
     if (i != end) return error.InvalidKeyShareExtension;
 }
 
-fn validateServerHelloKeyShareExtension(data: []const u8) EngineError!void {
+fn validateServerHelloKeyShareExtension(data: []const u8, policy: GroupPolicy) EngineError!void {
     if (data.len < 4) return error.InvalidKeyShareExtension;
-    const group = readU16(data[0..2]);
+    const group = @as(u16, @intCast(readU16(data[0..2])));
     if (group == 0) return error.InvalidKeyShareExtension;
+    if (!groupAllowedByPolicy(policy, group)) return error.InvalidKeyShareExtension;
     const key_len = readU16(data[2..4]);
     if (key_len + 4 != data.len) return error.InvalidKeyShareExtension;
 }
@@ -1042,10 +1061,11 @@ fn validateServerHelloPreSharedKeyExtension(data: []const u8) EngineError!void {
     if (data.len != 2) return error.InvalidPreSharedKeyExtension;
 }
 
-fn validateHrrKeyShareExtension(data: []const u8) EngineError!void {
+fn validateHrrKeyShareExtension(data: []const u8, policy: GroupPolicy) EngineError!void {
     if (data.len != 2) return error.InvalidKeyShareExtension;
-    const selected_group = readU16(data[0..2]);
+    const selected_group = @as(u16, @intCast(readU16(data[0..2])));
     if (selected_group == 0) return error.InvalidKeyShareExtension;
+    if (!groupAllowedByPolicy(policy, selected_group)) return error.InvalidKeyShareExtension;
 }
 
 fn validateHrrCookieExtension(data: []const u8) EngineError!void {
@@ -1055,21 +1075,39 @@ fn validateHrrCookieExtension(data: []const u8) EngineError!void {
     if (cookie_len + 2 != data.len) return error.InvalidCookieExtension;
 }
 
-fn validateClientHelloKeyShareGroupsSubset(key_share_data: []const u8, supported_groups_data: []const u8) EngineError!void {
+fn validateClientHelloKeyShareGroupsSubset(
+    key_share_data: []const u8,
+    supported_groups_data: []const u8,
+    policy: GroupPolicy,
+) EngineError!void {
     var i: usize = 2;
     const end = key_share_data.len;
     while (i < end) {
-        const group = readU16(key_share_data[i .. i + 2]);
+        const group = @as(u16, @intCast(readU16(key_share_data[i .. i + 2])));
+        if (!groupAllowedByPolicy(policy, group)) return error.InvalidKeyShareExtension;
         if (!supportedGroupsContain(supported_groups_data, group)) return error.InvalidKeyShareExtension;
         const key_len = readU16(key_share_data[i + 2 .. i + 4]);
         i += 4 + key_len;
     }
 }
 
-fn supportedGroupsContain(data: []const u8, wanted: usize) bool {
+fn groupAllowedByPolicy(policy: GroupPolicy, group: u16) bool {
+    if (!containsNamedGroup(policy.allowed_named_groups, group)) return false;
+    if (containsNamedGroup(policy.hybrid_named_groups, group) and !policy.allow_hybrid_kex) return false;
+    return true;
+}
+
+fn containsNamedGroup(groups: []const u16, wanted: u16) bool {
+    for (groups) |group| {
+        if (group == wanted) return true;
+    }
+    return false;
+}
+
+fn supportedGroupsContain(data: []const u8, wanted: u16) bool {
     var i: usize = 2;
     while (i < data.len) : (i += 2) {
-        if (readU16(data[i .. i + 2]) == wanted) return true;
+        if (@as(u16, @intCast(readU16(data[i .. i + 2]))) == wanted) return true;
     }
     return false;
 }
@@ -1312,6 +1350,13 @@ fn serverHelloRecordWithInvalidKeySharePayload() [63]u8 {
     return frame;
 }
 
+fn serverHelloRecordWithHybridKeyShare() [63]u8 {
+    var frame = serverHelloRecord();
+    frame[59] = @as(u8, @intCast((named_group_x25519_mlkem768 >> 8) & 0xff));
+    frame[60] = @as(u8, @intCast(named_group_x25519_mlkem768 & 0xff));
+    return frame;
+}
+
 fn serverHelloRecordWithInvalidPreSharedKeyPayload() [68]u8 {
     var frame: [68]u8 = undefined;
     const base = serverHelloRecord();
@@ -1414,6 +1459,15 @@ fn clientHelloRecordWithInvalidKeySharePayload() [101]u8 {
 fn clientHelloRecordWithKeyShareGroupOutsideSupportedGroups() [101]u8 {
     var frame = clientHelloRecord();
     frame[88] = 0x17; // key_share group low byte = secp256r1 (supported_groups only has x25519)
+    return frame;
+}
+
+fn clientHelloRecordWithHybridGroup() [101]u8 {
+    var frame = clientHelloRecord();
+    frame[79] = @as(u8, @intCast((named_group_x25519_mlkem768 >> 8) & 0xff));
+    frame[80] = @as(u8, @intCast(named_group_x25519_mlkem768 & 0xff));
+    frame[87] = @as(u8, @intCast((named_group_x25519_mlkem768 >> 8) & 0xff));
+    frame[88] = @as(u8, @intCast(named_group_x25519_mlkem768 & 0xff));
     return frame;
 }
 
@@ -2594,6 +2648,34 @@ test "client rejects server hello with invalid key_share payload" {
     try std.testing.expectError(error.InvalidKeyShareExtension, engine.ingestRecord(&rec));
 }
 
+test "client rejects server hello hybrid key_share when hybrid kex is disabled" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const rec = serverHelloRecordWithHybridKeyShare();
+    try std.testing.expectError(error.InvalidKeyShareExtension, engine.ingestRecord(&rec));
+}
+
+test "client accepts server hello hybrid key_share when hybrid kex is enabled" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+        .group_policy = .{
+            .allowed_named_groups = &.{named_group_x25519_mlkem768},
+            .allow_hybrid_kex = true,
+            .hybrid_named_groups = &.{named_group_x25519_mlkem768},
+        },
+    });
+    defer engine.deinit();
+
+    const rec = serverHelloRecordWithHybridKeyShare();
+    _ = try engine.ingestRecord(&rec);
+    try std.testing.expectEqual(state.ConnectionState.wait_encrypted_extensions, engine.machine.state);
+}
+
 test "client rejects server hello with invalid pre_shared_key payload" {
     var engine = Engine.init(std.testing.allocator, .{
         .role = .client,
@@ -2715,6 +2797,34 @@ test "server rejects client hello with invalid supported_groups payload" {
 
     const rec = clientHelloRecordWithInvalidSupportedGroupsPayload();
     try std.testing.expectError(error.InvalidSupportedGroupsExtension, engine.ingestRecord(&rec));
+}
+
+test "server rejects client hello hybrid group when hybrid kex is disabled" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const rec = clientHelloRecordWithHybridGroup();
+    try std.testing.expectError(error.InvalidSupportedGroupsExtension, engine.ingestRecord(&rec));
+}
+
+test "server accepts client hello hybrid group when hybrid kex is enabled" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+        .group_policy = .{
+            .allowed_named_groups = &.{named_group_x25519_mlkem768},
+            .allow_hybrid_kex = true,
+            .hybrid_named_groups = &.{named_group_x25519_mlkem768},
+        },
+    });
+    defer engine.deinit();
+
+    const rec = clientHelloRecordWithHybridGroup();
+    _ = try engine.ingestRecord(&rec);
+    try std.testing.expectEqual(state.ConnectionState.wait_client_certificate_or_finished, engine.machine.state);
 }
 
 test "server rejects client hello with invalid key_share payload" {
