@@ -135,6 +135,9 @@ if [[ "$MODE" == "all" || "$MODE" == "basic" ]]; then
 fi
 
 if [[ "$MODE" == "all" || "$MODE" == "strict" ]]; then
+  if [[ "$SYNC_EVIDENCE_DOCS" -eq 0 ]]; then
+    echo "[task-gates] warning: --sync-evidence-docs is disabled; final artifact check may fail if strict run generates newer evidence artifacts." >&2
+  fi
   run_cmd "bash scripts/interop/matrix_local.sh --strict"
   run_cmd "bash scripts/interop/generate_evidence.sh"
   run_cmd "BOGO_PROFILE=scripts/interop/bogo_profile_v1_prod.json BOGO_STRICT=1 BOGO_ALLOW_UNIMPLEMENTED=0 BOGO_MAX_CRITICAL=0 BORINGSSL_DIR=${BORINGSSL_DIR} bash scripts/interop/bogo_run.sh"
