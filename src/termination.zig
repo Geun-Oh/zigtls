@@ -8,6 +8,7 @@ pub const Config = struct {
     session: tls13.session.Config,
     on_client_hello: ?ClientHelloCallback = null,
     callback_userdata: usize = 0,
+    client_hello_policy: ClientHelloPolicy = .{},
     handshake_rate_limiter: ?*rate_limit.TokenBucket = null,
     now_ns: ?NowNsFn = null,
     now_unix: ?NowUnixFn = null,
@@ -27,11 +28,19 @@ pub const Error = error{
     OutputBufferTooSmall,
     InvalidConfiguration,
     HandshakeRateLimited,
+    HandshakePolicyRejected,
 } || tls13.session.EngineError || std.mem.Allocator.Error;
 
 pub const ClientHelloMetadata = struct {
     server_name: ?[]const u8 = null,
     alpn_protocol: ?[]const u8 = null,
+};
+
+pub const ClientHelloPolicy = struct {
+    require_server_name: bool = false,
+    require_alpn: bool = false,
+    allowed_server_names: ?[]const []const u8 = null,
+    allowed_alpn_protocols: ?[]const []const u8 = null,
 };
 
 pub const ClientHelloCallback = *const fn (meta: ClientHelloMetadata, userdata: usize) void;
@@ -108,7 +117,11 @@ pub const Connection = struct {
         if (!self.accepted) return error.NotAccepted;
         try self.enforceHandshakeRateLimit();
         self.observeHandshakeStartIfNeeded();
-        self.emitClientHelloMetadata(record_bytes);
+        if (try self.inspectClientHelloAndCheckPolicy(record_bytes)) |alert_description| {
+            try self.rejectClientHelloPolicy(alert_description);
+            self.observeHandshakeFailureIfNeeded();
+            return error.HandshakePolicyRejected;
+        }
         const result = self.engine.ingestRecord(record_bytes) catch |err| {
             self.observeHandshakeFailureIfNeeded();
             return err;
@@ -121,7 +134,16 @@ pub const Connection = struct {
         if (!self.accepted) return error.NotAccepted;
         try self.enforceHandshakeRateLimit();
         self.observeHandshakeStartIfNeeded();
-        self.emitClientHelloMetadata(record_bytes);
+        if (try self.inspectClientHelloAndCheckPolicy(record_bytes)) |alert_description| {
+            try self.rejectClientHelloPolicy(alert_description);
+            self.observeHandshakeFailureIfNeeded();
+            return .{
+                .fatal = .{
+                    .err = error.HandshakePolicyRejected,
+                    .alert = .{ .level = .fatal, .description = alert_description },
+                },
+            };
+        }
         const out = self.engine.ingestRecordWithAlertIntent(record_bytes);
         switch (out) {
             .ok => |res| {
@@ -247,28 +269,66 @@ pub const Connection = struct {
         }
     }
 
-    fn emitClientHelloMetadata(self: *Connection, record_bytes: []const u8) void {
-        const cb = self.config.on_client_hello orelse return;
-        const parsed = tls13.record.parseRecord(record_bytes) catch return;
-        if (parsed.header.content_type != .handshake) return;
+    fn inspectClientHelloAndCheckPolicy(
+        self: *Connection,
+        record_bytes: []const u8,
+    ) Error!?tls13.alerts.AlertDescription {
+        const parsed = tls13.record.parseRecord(record_bytes) catch return null;
+        if (parsed.header.content_type != .handshake) return null;
 
         var cursor = parsed.payload;
         while (cursor.len > 0) {
-            const hs = tls13.handshake.parseOne(cursor) catch return;
+            const hs = tls13.handshake.parseOne(cursor) catch return null;
             const frame_len = 4 + @as(usize, @intCast(hs.header.length));
             cursor = cursor[frame_len..];
 
             if (hs.header.handshake_type != .client_hello) continue;
-            var hello = tls13.messages.ClientHello.decode(self.allocator, hs.body) catch return;
+            var hello = tls13.messages.ClientHello.decode(self.allocator, hs.body) catch |err| {
+                if (err == error.OutOfMemory) return error.OutOfMemory;
+                return null;
+            };
             defer hello.deinit(self.allocator);
 
             const meta = ClientHelloMetadata{
                 .server_name = extractServerName(hello.extensions),
                 .alpn_protocol = extractFirstAlpn(hello.extensions),
             };
-            cb(meta, self.config.callback_userdata);
-            return;
+            if (self.config.on_client_hello) |cb| cb(meta, self.config.callback_userdata);
+            return self.evaluateClientHelloPolicy(meta);
         }
+        return null;
+    }
+
+    fn rejectClientHelloPolicy(self: *Connection, alert_description: tls13.alerts.AlertDescription) Error!void {
+        self.telemetry.observeAlert(@intFromEnum(alert_description));
+        self.emitLog(.alert_sent, alert_description);
+        const frame = tls13.session.Engine.buildAlertRecord(.{
+            .level = .fatal,
+            .description = alert_description,
+        });
+        try self.pushPendingRecord(frame[0..]);
+    }
+
+    fn evaluateClientHelloPolicy(
+        self: Connection,
+        meta: ClientHelloMetadata,
+    ) ?tls13.alerts.AlertDescription {
+        const policy = self.config.client_hello_policy;
+        if (policy.require_server_name and meta.server_name == null) {
+            return .unrecognized_name;
+        }
+        if (policy.allowed_server_names) |allowed| {
+            const observed = meta.server_name orelse return .unrecognized_name;
+            if (!containsServerName(allowed, observed)) return .unrecognized_name;
+        }
+        if (policy.require_alpn and meta.alpn_protocol == null) {
+            return .no_application_protocol;
+        }
+        if (policy.allowed_alpn_protocols) |allowed| {
+            const observed = meta.alpn_protocol orelse return .no_application_protocol;
+            if (!containsExactProtocol(allowed, observed)) return .no_application_protocol;
+        }
+        return null;
     }
 
     fn pushPendingRecord(self: *Connection, bytes: []const u8) Error!void {
@@ -377,6 +437,20 @@ fn extractFirstAlpn(extensions: []const tls13.messages.Extension) ?[]const u8 {
     return data[3 .. 3 + first_len];
 }
 
+fn containsServerName(allowed: []const []const u8, observed: []const u8) bool {
+    for (allowed) |name| {
+        if (std.ascii.eqlIgnoreCase(name, observed)) return true;
+    }
+    return false;
+}
+
+fn containsExactProtocol(allowed: []const []const u8, observed: []const u8) bool {
+    for (allowed) |name| {
+        if (std.mem.eql(u8, name, observed)) return true;
+    }
+    return false;
+}
+
 const Capture = struct {
     called: bool = false,
     sni: [64]u8 = [_]u8{0} ** 64,
@@ -417,21 +491,47 @@ fn fixedNowUnix() i64 {
     return 10;
 }
 
-fn buildClientHelloRecord(allocator: std.mem.Allocator) ![]u8 {
-    const sni_ext = tls13.messages.Extension{
-        .extension_type = 0x0000,
-        .data = try allocator.dupe(u8, &.{ 0x00, 0x0e, 0x00, 0x00, 0x0b, 'e', 'x', 'a', 'm', 'p', 'l', 'e', '.', 'c', 'o', 'm' }),
-    };
-    const alpn_ext = tls13.messages.Extension{
-        .extension_type = 0x0010,
-        .data = try allocator.dupe(u8, &.{ 0x00, 0x03, 0x02, 'h', '2' }),
-    };
+const ClientHelloBuildOptions = struct {
+    include_sni: bool = true,
+    include_alpn: bool = true,
+    server_name: []const u8 = "example.com",
+    alpn: []const u8 = "h2",
+};
+
+fn buildClientHelloRecord(allocator: std.mem.Allocator, opts: ClientHelloBuildOptions) ![]u8 {
+    var ext_list = std.ArrayList(tls13.messages.Extension).empty;
+    defer ext_list.deinit(allocator);
+
+    if (opts.include_sni) {
+        const sni_data = try allocator.alloc(u8, 5 + opts.server_name.len);
+        sni_data[0] = 0;
+        sni_data[1] = @as(u8, @intCast(3 + opts.server_name.len));
+        sni_data[2] = 0;
+        std.mem.writeInt(u16, sni_data[3..5], @as(u16, @intCast(opts.server_name.len)), .big);
+        @memcpy(sni_data[5..], opts.server_name);
+        try ext_list.append(allocator, .{
+            .extension_type = 0x0000,
+            .data = sni_data,
+        });
+    }
+    if (opts.include_alpn) {
+        const alpn_data = try allocator.alloc(u8, 3 + opts.alpn.len);
+        alpn_data[0] = 0;
+        alpn_data[1] = @as(u8, @intCast(1 + opts.alpn.len));
+        alpn_data[2] = @as(u8, @intCast(opts.alpn.len));
+        @memcpy(alpn_data[3..], opts.alpn);
+        try ext_list.append(allocator, .{
+            .extension_type = 0x0010,
+            .data = alpn_data,
+        });
+    }
+
     var hello = tls13.messages.ClientHello{
         .random = [_]u8{0xaa} ** 32,
         .session_id = try allocator.dupe(u8, ""),
         .cipher_suites = try allocator.dupe(u16, &.{0x1301}),
         .compression_methods = try allocator.dupe(u8, &.{0x00}),
-        .extensions = try allocator.dupe(tls13.messages.Extension, &.{ sni_ext, alpn_ext }),
+        .extensions = try ext_list.toOwnedSlice(allocator),
     };
     defer hello.deinit(allocator);
 
@@ -523,13 +623,87 @@ test "client hello callback receives sni and alpn metadata" {
     defer conn.deinit();
     conn.accept(.{});
 
-    const rec = try buildClientHelloRecord(std.testing.allocator);
+    const rec = try buildClientHelloRecord(std.testing.allocator, .{});
     defer std.testing.allocator.free(rec);
     _ = try conn.ingest_tls_bytes_with_alert(rec);
 
     try std.testing.expect(cap.called);
     try std.testing.expectEqualStrings("example.com", cap.sni[0..cap.sni_len]);
     try std.testing.expectEqualStrings("h2", cap.alpn[0..cap.alpn_len]);
+}
+
+test "client hello policy rejects mismatched server name with unrecognized_name alert" {
+    var conn = Connection.init(std.testing.allocator, .{
+        .session = .{ .role = .server, .suite = .tls_aes_128_gcm_sha256 },
+        .client_hello_policy = .{
+            .allowed_server_names = &.{"api.example.com"},
+        },
+    });
+    defer conn.deinit();
+    conn.accept(.{});
+
+    const rec = try buildClientHelloRecord(std.testing.allocator, .{
+        .server_name = "example.com",
+    });
+    defer std.testing.allocator.free(rec);
+
+    const out = try conn.ingest_tls_bytes_with_alert(rec);
+    switch (out) {
+        .fatal => |f| try std.testing.expectEqual(
+            tls13.alerts.AlertDescription.unrecognized_name,
+            f.alert.description,
+        ),
+        .ok => return error.TestExpectedFatal,
+    }
+
+    var frame: [64]u8 = undefined;
+    const n = try conn.drain_tls_records(&frame);
+    try std.testing.expectEqual(@as(usize, 7), n);
+    try std.testing.expectEqual(@as(u8, 21), frame[0]);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(tls13.alerts.AlertDescription.unrecognized_name)), frame[6]);
+}
+
+test "client hello policy rejects mismatched ALPN with no_application_protocol alert" {
+    var conn = Connection.init(std.testing.allocator, .{
+        .session = .{ .role = .server, .suite = .tls_aes_128_gcm_sha256 },
+        .client_hello_policy = .{
+            .allowed_alpn_protocols = &.{"h3"},
+        },
+    });
+    defer conn.deinit();
+    conn.accept(.{});
+
+    const rec = try buildClientHelloRecord(std.testing.allocator, .{
+        .alpn = "h2",
+    });
+    defer std.testing.allocator.free(rec);
+
+    const out = try conn.ingest_tls_bytes_with_alert(rec);
+    switch (out) {
+        .fatal => |f| try std.testing.expectEqual(
+            tls13.alerts.AlertDescription.no_application_protocol,
+            f.alert.description,
+        ),
+        .ok => return error.TestExpectedFatal,
+    }
+}
+
+test "client hello policy enforces required server name" {
+    var conn = Connection.init(std.testing.allocator, .{
+        .session = .{ .role = .server, .suite = .tls_aes_128_gcm_sha256 },
+        .client_hello_policy = .{
+            .require_server_name = true,
+        },
+    });
+    defer conn.deinit();
+    conn.accept(.{});
+
+    const rec = try buildClientHelloRecord(std.testing.allocator, .{
+        .include_sni = false,
+    });
+    defer std.testing.allocator.free(rec);
+
+    try std.testing.expectError(error.HandshakePolicyRejected, conn.ingest_tls_bytes(rec));
 }
 
 test "validate config rejects early-data without replay filter" {
