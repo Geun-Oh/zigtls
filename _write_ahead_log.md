@@ -6924,3 +6924,66 @@ Commands Executed
 Observed Results
 - `certificate_validation.zig`: 42/42 tests passed.
 - `zig build test`: passed.
+===
+timestamp: 2026-02-15T15:20:00+09:00
+description: Plan interop shell syntax checks integration into build test gate
+type: plan
+===
+Motivation
+- Interop scripts include shell self-tests, but script syntax validation (`bash -n`) is not explicitly wired into default `zig build test` gate.
+- INTOP-001 matrix references shell syntax coverage; build-gated enforcement should be explicit.
+
+Scope
+- Add build system-command step to run `bash -n` against interop scripts.
+- Attach syntax-check step to top-level `zig build test`.
+- Update RFC matrix INTOP-001 coverage wording.
+
+Design
+- Use `b.addSystemCommand` with: `bash -n scripts/interop/*.sh` (explicit file list for deterministic behavior).
+- Keep existing self-tests and harness logic unchanged.
+
+Risks/Perf Impact
+- Minor test-duration increase.
+- Depends on `bash` availability in test environment.
+
+Test Plan (commands)
+- `bash -n scripts/interop/*.sh`
+- `zig build test`
+
+Rollback
+- Remove syntax-check build step dependency and matrix wording update.
+
+Commit Plan
+- `MINOR: interop: gate shell syntax checks in build test`
+===
+timestamp: 2026-02-15T15:23:00+09:00
+description: Gate interop shell syntax checks in default build test flow
+type: code change
+===
+Decisions + Rationale
+- Added build-gated `bash -n` syntax checks for interop shell scripts to make INTOP shell-syntax coverage deterministic in the default test path.
+- Kept existing script self-tests intact and complementary.
+
+Files/Functions Touched
+- `build.zig`
+  - Added `interop_shell_syntax_check` system-command step for `bash -n` across interop scripts.
+  - Attached syntax-check step to top-level `test_step` dependencies.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-INTOP-001` coverage wording to include build-gated shell syntax check.
+
+Risks/Perf Notes
+- Slight increase in `zig build test` duration.
+- Test gate depends on `bash` in environment.
+===
+timestamp: 2026-02-15T15:24:00+09:00
+description: Verify build-gated interop shell syntax checks
+type: test
+===
+Commands Executed
+- `zig fmt build.zig`
+- `bash -n scripts/interop/openssl_local.sh scripts/interop/rustls_local.sh scripts/interop/nss_local.sh scripts/interop/matrix_local.sh scripts/interop/bogo_run.sh`
+- `zig build test`
+
+Observed Results
+- `bash -n` syntax checks: passed.
+- `zig build test`: passed.

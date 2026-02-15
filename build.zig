@@ -198,6 +198,16 @@ pub fn build(b: *std.Build) void {
         "--self-test",
     });
 
+    const interop_shell_syntax_check = b.addSystemCommand(&.{
+        "bash",
+        "-n",
+        "scripts/interop/openssl_local.sh",
+        "scripts/interop/rustls_local.sh",
+        "scripts/interop/nss_local.sh",
+        "scripts/interop/matrix_local.sh",
+        "scripts/interop/bogo_run.sh",
+    });
+
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
@@ -208,6 +218,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_bogo_shim_tests.step);
     test_step.dependOn(&interop_matrix_self_test.step);
     test_step.dependOn(&bogo_summary_self_test.step);
+    test_step.dependOn(&interop_shell_syntax_check.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
