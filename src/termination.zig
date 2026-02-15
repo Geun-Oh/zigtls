@@ -9,10 +9,13 @@ pub const Config = struct {
     callback_userdata: usize = 0,
     handshake_rate_limiter: ?*rate_limit.TokenBucket = null,
     now_ns: ?NowNsFn = null,
+    on_log: ?LogCallback = null,
+    log_userdata: usize = 0,
 };
 
 pub const ConnectionContext = struct {
     connection_id: u64 = 0,
+    correlation_id: u64 = 0,
 };
 
 pub const Error = error{
@@ -29,6 +32,23 @@ pub const ClientHelloMetadata = struct {
 
 pub const ClientHelloCallback = *const fn (meta: ClientHelloMetadata, userdata: usize) void;
 pub const NowNsFn = *const fn () u64;
+pub const LogCallback = *const fn (event: LogEvent, record: LogRecord, userdata: usize) void;
+
+pub const LogEvent = enum {
+    accepted,
+    handshake_started,
+    handshake_succeeded,
+    handshake_failed,
+    alert_sent,
+    alert_received,
+    shutdown,
+};
+
+pub const LogRecord = struct {
+    connection_id: u64,
+    correlation_id: u64,
+    alert_description: ?tls13.alerts.AlertDescription = null,
+};
 
 pub const Connection = struct {
     allocator: std.mem.Allocator,
@@ -40,6 +60,8 @@ pub const Connection = struct {
     telemetry: metrics.Metrics = .{},
     handshake_started_at_ns: ?u64 = null,
     handshake_finalized: bool = false,
+    connection_id: u64 = 0,
+    correlation_id: u64 = 0,
 
     pub fn init(allocator: std.mem.Allocator, config: Config) Connection {
         return .{
@@ -63,8 +85,11 @@ pub const Connection = struct {
         self.pending_plaintext.deinit(self.allocator);
     }
 
-    pub fn accept(self: *Connection, _: ConnectionContext) void {
+    pub fn accept(self: *Connection, ctx: ConnectionContext) void {
         self.accepted = true;
+        self.connection_id = ctx.connection_id;
+        self.correlation_id = if (ctx.correlation_id == 0) ctx.connection_id else ctx.correlation_id;
+        self.emitLog(.accepted, null);
     }
 
     pub fn ingest_tls_bytes(self: *Connection, record_bytes: []const u8) Error!tls13.session.IngestResult {
@@ -93,6 +118,7 @@ pub const Connection = struct {
             },
             .fatal => |f| {
                 self.telemetry.observeAlert(@intFromEnum(f.alert.description));
+                self.emitLog(.alert_received, f.alert.description);
                 self.observeHandshakeFailureIfNeeded();
                 return out;
             },
@@ -153,6 +179,7 @@ pub const Connection = struct {
         const frame = tls13.session.Engine.buildAlertRecord(.{ .level = .warning, .description = .close_notify });
         try self.pushPendingRecord(frame[0..]);
         self.engine.machine.markClosed();
+        self.emitLog(.shutdown, tls13.alerts.AlertDescription.close_notify);
     }
 
     pub fn on_transport_eof(self: *Connection) Error!void {
@@ -174,11 +201,13 @@ pub const Connection = struct {
             switch (result.actions[i]) {
                 .send_alert => |alert| {
                     self.telemetry.observeAlert(@intFromEnum(alert.description));
+                    self.emitLog(.alert_sent, alert.description);
                     const frame = tls13.session.Engine.buildAlertRecord(alert);
                     try self.pushPendingRecord(frame[0..]);
                 },
                 .received_alert => |alert| {
                     self.telemetry.observeAlert(@intFromEnum(alert.description));
+                    self.emitLog(.alert_received, alert.description);
                 },
                 .send_key_update => |req| {
                     self.telemetry.observeKeyUpdate();
@@ -241,6 +270,7 @@ pub const Connection = struct {
         if (self.engine.machine.state == .connected) return;
         self.handshake_started_at_ns = self.nowNs();
         self.telemetry.observeHandshakeStart();
+        self.emitLog(.handshake_started, null);
     }
 
     fn observeHandshakeSuccessIfNeeded(self: *Connection) void {
@@ -249,6 +279,7 @@ pub const Connection = struct {
         const now = self.nowNs();
         self.telemetry.observeHandshakeFinished(true, now - started);
         self.handshake_finalized = true;
+        self.emitLog(.handshake_succeeded, null);
     }
 
     fn observeHandshakeFailureIfNeeded(self: *Connection) void {
@@ -257,11 +288,21 @@ pub const Connection = struct {
         const now = self.nowNs();
         self.telemetry.observeHandshakeFinished(false, now - started);
         self.handshake_finalized = true;
+        self.emitLog(.handshake_failed, null);
     }
 
     fn nowNs(self: Connection) u64 {
         if (self.config.now_ns) |f| return f();
         return @as(u64, @intCast(std.time.nanoTimestamp()));
+    }
+
+    fn emitLog(self: *Connection, event: LogEvent, alert_description: ?tls13.alerts.AlertDescription) void {
+        const cb = self.config.on_log orelse return;
+        cb(event, .{
+            .connection_id = self.connection_id,
+            .correlation_id = self.correlation_id,
+            .alert_description = alert_description,
+        }, self.config.log_userdata);
     }
 };
 
@@ -307,6 +348,12 @@ const Capture = struct {
     alpn_len: usize = 0,
 };
 
+const LogCapture = struct {
+    seen: [16]LogEvent = undefined,
+    seen_count: usize = 0,
+    last_record: LogRecord = .{ .connection_id = 0, .correlation_id = 0 },
+};
+
 fn onClientHello(meta: ClientHelloMetadata, userdata: usize) void {
     var c: *Capture = @ptrFromInt(userdata);
     c.called = true;
@@ -318,6 +365,15 @@ fn onClientHello(meta: ClientHelloMetadata, userdata: usize) void {
         c.alpn_len = @min(v.len, c.alpn.len);
         @memcpy(c.alpn[0..c.alpn_len], v[0..c.alpn_len]);
     }
+}
+
+fn onLog(event: LogEvent, record: LogRecord, userdata: usize) void {
+    var cap: *LogCapture = @ptrFromInt(userdata);
+    if (cap.seen_count < cap.seen.len) {
+        cap.seen[cap.seen_count] = event;
+        cap.seen_count += 1;
+    }
+    cap.last_record = record;
 }
 
 fn buildClientHelloRecord(allocator: std.mem.Allocator) ![]u8 {
@@ -529,4 +585,23 @@ test "collect actions counts alerts and keyupdates in telemetry" {
     const snapshot = conn.snapshot_telemetry();
     try std.testing.expectEqual(@as(u64, 2), snapshot.alert_counts[@intFromEnum(tls13.alerts.AlertDescription.close_notify)]);
     try std.testing.expectEqual(@as(u64, 1), snapshot.keyupdate_count);
+}
+
+test "logging callback includes correlation id and lifecycle events" {
+    var log_cap = LogCapture{};
+    var conn = Connection.init(std.testing.allocator, .{
+        .session = .{ .role = .server, .suite = .tls_aes_128_gcm_sha256 },
+        .on_log = onLog,
+        .log_userdata = @intFromPtr(&log_cap),
+    });
+    defer conn.deinit();
+    conn.accept(.{ .connection_id = 10, .correlation_id = 77 });
+
+    try std.testing.expectError(error.IncompleteHeader, conn.ingest_tls_bytes(&.{}));
+    try conn.shutdown();
+
+    try std.testing.expect(log_cap.seen_count >= 3);
+    try std.testing.expectEqual(LogEvent.accepted, log_cap.seen[0]);
+    try std.testing.expectEqual(@as(u64, 10), log_cap.last_record.connection_id);
+    try std.testing.expectEqual(@as(u64, 77), log_cap.last_record.correlation_id);
 }
