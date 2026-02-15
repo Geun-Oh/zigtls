@@ -18,12 +18,12 @@
       "\\bSPAKE\\b"
     ],
     "in_scope_required": [
-      "\\bTLS13\\b",
       "HRR|HelloRetryRequest",
       "KeyUpdate",
       "Resumption|SessionTicket|PSK",
       "Alert|close_notify",
-      "BasicHandshake|Basic"
+      "^Basic-",
+      "ALPN(Client|Server)-.*-TLS-TLS13"
     ],
     "in_scope_optional": [
       "CertificateSelection",
