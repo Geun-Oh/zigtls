@@ -32,13 +32,6 @@
     ]
   },
   "default_class": "out_of_scope",
-  "expected_failures": [
-    {
-      "pattern": "TLS13|HRR|HelloRetryRequest|KeyUpdate|Resumption|SessionTicket|PSK|Alert|close_notify|BasicHandshake|Basic",
-      "statuses": [
-        "skip",
-        "fail"
-      ]
-    }
-  ]
+  "expected_failure_names_file": "bogo_expected_failures_v1_prod.txt",
+  "expected_failures": []
 }

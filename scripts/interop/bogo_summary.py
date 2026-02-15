@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import os
 import re
 import sys
 from collections import Counter, defaultdict
@@ -94,6 +95,20 @@ def compile_profile(profile_path: str) -> dict[str, Any]:
             }
         )
 
+    expected_failure_names: set[str] = set()
+    names_file = raw.get("expected_failure_names_file")
+    if isinstance(names_file, str) and names_file:
+        resolved = names_file
+        if not os.path.isabs(resolved):
+            resolved = os.path.join(os.path.dirname(profile_path), names_file)
+        if os.path.exists(resolved):
+            with open(resolved, "r", encoding="utf-8") as f:
+                for line in f:
+                    entry = line.strip()
+                    if not entry or entry.startswith("#"):
+                        continue
+                    expected_failure_names.add(entry)
+
     return {
         "name": raw.get("name", "unnamed"),
         "version": raw.get("version", 1),
@@ -101,6 +116,7 @@ def compile_profile(profile_path: str) -> dict[str, Any]:
         "class_order": class_order,
         "compiled": compiled,
         "expected_failures": expected_failures,
+        "expected_failure_names": expected_failure_names,
     }
 
 
@@ -115,6 +131,8 @@ def classify_with_profile(name: str, profile: dict[str, Any]) -> str:
 
 
 def matches_expected_failure(name: str, status: str, profile: dict[str, Any]) -> bool:
+    if status in NON_PASS_STATUSES and name in profile.get("expected_failure_names", set()):
+        return True
     for row in profile.get("expected_failures", []):
         if status not in row["statuses"]:
             continue
@@ -175,6 +193,7 @@ def summarize(path: str, profile_path: str | None = None) -> dict:
             "name": profile["name"],
             "version": profile["version"],
             "default_class": profile["default_class"],
+            "expected_failure_name_count": len(profile.get("expected_failure_names", set())),
         }
         out["classification"] = {k: dict(v) for k, v in sorted(class_counter.items())}
         out["in_scope_required_total"] = in_scope_required_total
@@ -221,6 +240,7 @@ def self_test() -> int:
     }
     path = "/tmp/zigtls-bogo-selftest.json"
     profile_path = "/tmp/zigtls-bogo-selftest-profile.json"
+    names_path = "/tmp/zigtls-bogo-selftest-expected-failures.txt"
 
     with open(path, "w", encoding="utf-8") as f:
         json.dump(sample, f)
@@ -235,10 +255,11 @@ def self_test() -> int:
             "in_scope_optional": ["NoDelimiter"],
         },
         "default_class": "out_of_scope",
-        "expected_failures": [
-            {"pattern": "HRR", "statuses": ["fail"]},
-        ],
+        "expected_failures": [],
+        "expected_failure_names_file": names_path,
     }
+    with open(names_path, "w", encoding="utf-8") as f:
+        f.write("TLS13/HRR\n")
     with open(profile_path, "w", encoding="utf-8") as f:
         json.dump(profile, f)
 
