@@ -6,6 +6,7 @@ ASSERT_MODE=0
 ITERATIONS="${TIMING_ITERATIONS:-12000}"
 WARMUP="${TIMING_WARMUP:-1200}"
 MAX_GAP_RATIO="${TIMING_MAX_GAP_RATIO:-0.35}"
+ASSERT_ATTEMPTS="${TIMING_ASSERT_ATTEMPTS:-3}"
 
 usage() {
   cat <<USAGE
@@ -19,6 +20,7 @@ Options:
 
 Environment:
   TIMING_MAX_GAP_RATIO   Assertion threshold (default: 0.35)
+  TIMING_ASSERT_ATTEMPTS Assertion attempts for --assert majority vote (default: 3)
 USAGE
 }
 
@@ -61,6 +63,32 @@ assert_gap_threshold() {
 
   echo "[timing][assert] PASSED threshold=${MAX_GAP_RATIO}"
   return 0
+}
+
+assert_with_retries() {
+  local probe_bin="$1"
+  local need=$(( ASSERT_ATTEMPTS / 2 + 1 ))
+  local pass_count=0
+  local fail_count=0
+  local i
+  for (( i=1; i<=ASSERT_ATTEMPTS; i++ )); do
+    echo "[timing][assert] attempt=${i}/${ASSERT_ATTEMPTS}"
+    local output
+    output="$($probe_bin --iterations "$ITERATIONS" --warmup "$WARMUP")"
+    printf '%s\n' "$output"
+    if assert_gap_threshold "$output"; then
+      pass_count=$((pass_count + 1))
+    else
+      fail_count=$((fail_count + 1))
+    fi
+  done
+
+  if (( pass_count >= need )); then
+    echo "[timing][assert] consensus PASS pass=${pass_count} fail=${fail_count} need=${need}"
+    return 0
+  fi
+  echo "[timing][assert] consensus FAIL pass=${pass_count} fail=${fail_count} need=${need}" >&2
+  return 1
 }
 
 self_test() {
@@ -138,9 +166,13 @@ if [[ ! -x "$PROBE_BIN" ]]; then
   exit 1
 fi
 
-OUTPUT="$($PROBE_BIN --iterations "$ITERATIONS" --warmup "$WARMUP")"
-printf '%s\n' "$OUTPUT"
-
 if [[ "$ASSERT_MODE" -eq 1 ]]; then
-  assert_gap_threshold "$OUTPUT"
+  if ! [[ "$ASSERT_ATTEMPTS" =~ ^[0-9]+$ ]] || [[ "$ASSERT_ATTEMPTS" -lt 1 ]]; then
+    echo "TIMING_ASSERT_ATTEMPTS must be a positive integer" >&2
+    exit 2
+  fi
+  assert_with_retries "$PROBE_BIN"
+else
+  OUTPUT="$($PROBE_BIN --iterations "$ITERATIONS" --warmup "$WARMUP")"
+  printf '%s\n' "$OUTPUT"
 fi
