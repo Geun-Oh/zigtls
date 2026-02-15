@@ -408,6 +408,7 @@ fn isShimDebugEnabled() bool {
 }
 
 fn runBsslShimDelegate(allocator: std.mem.Allocator, passthrough_args: []const []const u8) !bool {
+    if (std.posix.getenv("BOGO_ENABLE_DELEGATE_SHIM") == null) return false;
     const delegate_path = std.posix.getenv("BOGO_BSSL_SHIM_PATH") orelse "/tmp/boringssl/build/ssl/test/bssl_shim";
     var probe = std.fs.openFileAbsolute(delegate_path, .{}) catch return false;
     probe.close();
