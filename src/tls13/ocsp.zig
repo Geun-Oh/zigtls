@@ -197,6 +197,24 @@ test "invalid next_update window is rejected unless soft-fail policy allows" {
     try std.testing.expectEqual(ValidationResult.soft_fail, soft);
 }
 
+test "missing next_update is rejected unless soft-fail policy allows" {
+    const now: i64 = 1_700_000_000;
+    try std.testing.expectError(error.InvalidTimeWindow, checkStapled(.{
+        .status = .good,
+        .produced_at = now - 10,
+        .this_update = now - 10,
+        .next_update = null,
+    }, now, false));
+
+    const soft = try checkStapled(.{
+        .status = .good,
+        .produced_at = now - 10,
+        .this_update = now - 10,
+        .next_update = null,
+    }, now, true);
+    try std.testing.expectEqual(ValidationResult.soft_fail, soft);
+}
+
 test "stale response boundary accepts skew limit and rejects beyond limit" {
     const now: i64 = 1_700_000_000;
 

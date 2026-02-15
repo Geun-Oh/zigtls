@@ -6482,3 +6482,68 @@ Commands Executed
 Observed Results
 - `session.zig`: 127/127 tests passed.
 - `zig build test`: passed.
+===
+timestamp: 2026-02-15T13:35:00+09:00
+description: Plan OCSP next_update-missing and integrated soft-fail propagation regression coverage
+type: plan
+===
+Motivation
+- OCSP checker has `next_update`-missing hard/soft behavior, but explicit branch test is absent.
+- Integrated peer validator currently asserts missing-response hard/soft policy, but does not pin soft-fail propagation for non-missing OCSP policy branch (e.g., unknown status).
+
+Scope
+- Add `ocsp.checkStapled` regression for `next_update=null` hard/soft fail behavior.
+- Add integrated `validateServerPeer` regression where unknown OCSP status is soft-failed when policy allows.
+- Update RFC matrix CERT-002 coverage wording.
+
+Design
+- Reuse existing `InvalidTimeWindow` and `ValidationResult.soft_fail` contracts for `next_update=null`.
+- Use valid chain + matching hostname + unknown stapled OCSP status to assert integrated soft-fail result.
+
+Risks/Perf Impact
+- Test/doc-only expansion; no runtime behavior change.
+
+Test Plan (commands)
+- `zig test src/tls13/ocsp.zig`
+- `zig test src/tls13/certificate_validation.zig`
+- `zig build test`
+
+Rollback
+- Remove added OCSP regression tests and matrix wording update.
+
+Commit Plan
+- `MINOR: cert: add ocsp next_update and integrated soft-fail regressions`
+===
+timestamp: 2026-02-15T13:38:00+09:00
+description: Add OCSP next_update-missing and integrated soft-fail propagation regressions
+type: code change
+===
+Decisions + Rationale
+- Added explicit OCSP branch regression for `next_update=null` hard/soft policy behavior.
+- Added integrated peer validator regression to pin soft-fail propagation for non-missing OCSP branch (`unknown` status) when policy allows.
+
+Files/Functions Touched
+- `src/tls13/ocsp.zig`
+  - Added test: `missing next_update is rejected unless soft-fail policy allows`.
+- `src/tls13/certificate_validation.zig`
+  - Added test: `integrated peer validator soft-fails unknown ocsp status when policy allows`.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-CERT-002` coverage wording to include missing `next_update` and integrated soft-fail propagation branch.
+
+Risks/Perf Notes
+- Test/doc-only expansion; no runtime behavior changes.
+===
+timestamp: 2026-02-15T13:39:00+09:00
+description: Verify OCSP branch regression additions
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/ocsp.zig src/tls13/certificate_validation.zig`
+- `zig test src/tls13/ocsp.zig`
+- `zig test src/tls13/certificate_validation.zig`
+- `zig build test`
+
+Observed Results
+- `ocsp.zig`: 10/10 tests passed.
+- `certificate_validation.zig`: 36/36 tests passed.
+- `zig build test`: passed.
