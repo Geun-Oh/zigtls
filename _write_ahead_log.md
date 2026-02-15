@@ -6608,3 +6608,61 @@ Commands Executed
 Observed Results
 - `ocsp.zig`: 11/11 tests passed.
 - `zig build test`: passed.
+===
+timestamp: 2026-02-15T14:02:00+09:00
+description: Plan integrated OCSP unknown-status hard-fail propagation regression coverage
+type: plan
+===
+Motivation
+- Integrated certificate validator tests pin OCSP soft-fail propagation for unknown status, but do not explicitly assert default-policy hard-fail propagation for the same branch.
+
+Scope
+- Add integrated `validateServerPeer` regression test asserting `UnknownStatus` under default OCSP policy.
+- Update RFC matrix CERT-002 coverage wording to mention integrated unknown-status hard/soft policy propagation.
+
+Design
+- Use valid chain + matching hostname + stapled OCSP response with `status=.unknown` and valid times.
+- Omit soft-fail override to exercise default hard-fail behavior.
+
+Risks/Perf Impact
+- Test/doc-only expansion; no runtime behavior changes.
+
+Test Plan (commands)
+- `zig test src/tls13/certificate_validation.zig`
+- `zig build test`
+
+Rollback
+- Remove integrated unknown-status hard-fail regression and matrix wording update.
+
+Commit Plan
+- `MINOR: cert: add integrated ocsp unknown hard-fail regression`
+===
+timestamp: 2026-02-15T14:04:00+09:00
+description: Add integrated OCSP unknown-status hard-fail propagation regression
+type: code change
+===
+Decisions + Rationale
+- Added integrated peer-validation regression to pin default-policy (`allow_soft_fail_ocsp=false`) hard-fail propagation for OCSP `unknown` status.
+- Complements existing integrated soft-fail regression and closes hard/soft parity for the same branch.
+
+Files/Functions Touched
+- `src/tls13/certificate_validation.zig`
+  - Added test: `integrated peer validator default policy hard-fails unknown ocsp status`.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-CERT-002` coverage wording to mention integrated unknown-status hard/soft policy propagation.
+
+Risks/Perf Notes
+- Test/doc-only expansion; no runtime behavior changes.
+===
+timestamp: 2026-02-15T14:05:00+09:00
+description: Verify integrated OCSP unknown-status hard-fail regression addition
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/certificate_validation.zig`
+- `zig test src/tls13/certificate_validation.zig`
+- `zig build test`
+
+Observed Results
+- `certificate_validation.zig`: 38/38 tests passed.
+- `zig build test`: passed.
