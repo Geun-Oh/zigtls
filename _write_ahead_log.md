@@ -7110,3 +7110,65 @@ Commands Executed
 Observed Results
 - `matrix_local.sh --self-test`: `self-test: ok`.
 - `zig build test`: passed.
+===
+timestamp: 2026-02-15T16:05:00+09:00
+description: Plan BoGo shim routing coverage expansion for cipher allowlist branches
+type: plan
+===
+Motivation
+- BoGo shim routing tests cover one supported cipher and one unsupported cipher, but do not pin all TLS 1.3 mandatory cipher allowlist branches.
+- Routing fallback behavior when test name is not TLS13/Basic should be explicitly regression-pinned.
+
+Scope
+- Add routing pass regressions for `TLS_AES_256_GCM_SHA384` and `TLS_CHACHA20_POLY1305_SHA256`.
+- Add routing unsupported regression when version/cipher are valid but test name is unrelated.
+- Update RFC matrix BOGO-001 wording to mention cipher-allowlist branch coverage.
+
+Design
+- Extend `tools/bogo_shim.zig` test block with focused `decideTestRouting` cases.
+- Keep parser and runtime behavior unchanged.
+
+Risks/Perf Impact
+- Test/doc-only expansion; no runtime behavior changes.
+
+Test Plan (commands)
+- `zig test tools/bogo_shim.zig`
+- `zig build test`
+
+Rollback
+- Remove added routing regression tests and matrix wording update.
+
+Commit Plan
+- `MINOR: bogo: expand shim cipher allowlist routing tests`
+===
+timestamp: 2026-02-15T16:08:00+09:00
+description: Expand BoGo shim routing regressions for TLS1.3 cipher allowlist and unrelated test-name branch
+type: code change
+===
+Decisions + Rationale
+- Added explicit routing pass tests for all mandatory TLS 1.3 cipher suites to pin allowlist behavior in shim routing logic.
+- Added routing negative test for unrelated test-name path even when version/cipher are valid, to lock fallback decision behavior.
+
+Files/Functions Touched
+- `tools/bogo_shim.zig`
+  - Added tests:
+    - `routing passes for tls13 required cipher variants`
+    - `routing rejects unrelated test name even with valid version and cipher`
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-BOGO-001` coverage wording to mention TLS1.3 cipher-allowlist branch tests.
+
+Risks/Perf Notes
+- Test/doc-only expansion; no runtime behavior changes.
+===
+timestamp: 2026-02-15T16:09:00+09:00
+description: Verify BoGo shim cipher-allowlist routing regression additions
+type: test
+===
+Commands Executed
+- `zig fmt tools/bogo_shim.zig`
+- `zig test tools/bogo_shim.zig`
+- `zig build test`
+
+Observed Results
+- `bogo_shim.zig`: 8/8 tests passed.
+- `zig build test`: passed.

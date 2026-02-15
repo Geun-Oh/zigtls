@@ -204,6 +204,24 @@ test "routing passes for tls13 basic case" {
     try std.testing.expectEqual(RoutingDecision.pass, decideTestRouting(cfg));
 }
 
+test "routing passes for tls13 required cipher variants" {
+    const aes256 = Config{
+        .port = 443,
+        .expect_version = "TLS1.3",
+        .expect_cipher = "TLS_AES_256_GCM_SHA384",
+        .test_name = "TLS13/AES256",
+    };
+    try std.testing.expectEqual(RoutingDecision.pass, decideTestRouting(aes256));
+
+    const chacha20 = Config{
+        .port = 443,
+        .expect_version = "TLS1.3",
+        .expect_cipher = "TLS_CHACHA20_POLY1305_SHA256",
+        .test_name = "TLS13/CHACHA20",
+    };
+    try std.testing.expectEqual(RoutingDecision.pass, decideTestRouting(chacha20));
+}
+
 test "routing rejects non tls13 version" {
     const cfg = Config{
         .port = 443,
@@ -219,6 +237,16 @@ test "routing rejects unsupported cipher suite" {
         .expect_version = "TLS1.3",
         .expect_cipher = "TLS_FAKE_CIPHER",
         .test_name = "TLS13/BasicHandshake",
+    };
+    try std.testing.expectEqual(RoutingDecision.unsupported, decideTestRouting(cfg));
+}
+
+test "routing rejects unrelated test name even with valid version and cipher" {
+    const cfg = Config{
+        .port = 443,
+        .expect_version = "TLS1.3",
+        .expect_cipher = "TLS_AES_128_GCM_SHA256",
+        .test_name = "Record/Overflow",
     };
     try std.testing.expectEqual(RoutingDecision.unsupported, decideTestRouting(cfg));
 }
