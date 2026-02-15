@@ -6297,3 +6297,67 @@ Commands Executed
 Observed Results
 - `session.zig`: 124/124 tests passed.
 - `zig build test`: passed.
+===
+timestamp: 2026-02-15T13:00:00+09:00
+description: Plan server-role KeyUpdate behavior regression coverage expansion
+type: plan
+===
+Motivation
+- Current KeyUpdate tests focus on client-role connected flow.
+- Server-role connected KeyUpdate behavior (request handling, reciprocal send policy, traffic-secret ratchet) is not explicitly regression-pinned.
+
+Scope
+- Add server-role KeyUpdate tests for `update_requested` and `update_not_requested` branches.
+- Verify action shape parity with client path and ensure traffic-secret ratchet occurs on server role as well.
+- Update RFC matrix HS-003 coverage wording to mention server-role branch coverage.
+
+Design
+- Bring server engine to connected state via `client_hello` then `finished`.
+- Ingest KeyUpdate records and assert:
+  - `update_requested`: emits `key_update` + `send_key_update(update_not_requested)` and ratchets secret.
+  - `update_not_requested`: emits only `key_update` and ratchets secret.
+
+Risks/Perf Impact
+- Test-only coverage addition; no runtime behavior change.
+
+Test Plan (commands)
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Rollback
+- Remove server-role KeyUpdate regression tests and matrix wording update.
+
+Commit Plan
+- `MINOR: tls13: add server-role keyupdate regression coverage`
+===
+timestamp: 2026-02-15T13:02:00+09:00
+description: Expand KeyUpdate regression coverage to server-role connected path
+type: code change
+===
+Decisions + Rationale
+- Added explicit server-role KeyUpdate regression tests to pin symmetry with existing client-role behavior.
+- Verified both `update_requested` and `update_not_requested` branches perform expected action emission and traffic-secret ratchet.
+
+Files/Functions Touched
+- `src/tls13/session.zig`
+  - Added tests:
+    - `server role keyupdate request is surfaced and reciprocated`
+    - `server role keyupdate update_not_requested does not trigger reciprocal send action`
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-HS-003` wording/coverage to mention client/server connected-path coverage.
+
+Risks/Perf Notes
+- Test/doc-only expansion; no runtime behavior changes.
+===
+timestamp: 2026-02-15T13:03:00+09:00
+description: Verify server-role KeyUpdate regression additions
+type: test
+===
+Commands Executed
+- `zig fmt src/tls13/session.zig`
+- `zig test src/tls13/session.zig`
+- `zig build test`
+
+Observed Results
+- `session.zig`: 126/126 tests passed.
+- `zig build test`: passed.

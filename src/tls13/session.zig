@@ -2154,6 +2154,75 @@ test "keyupdate update_not_requested does not trigger reciprocal send action" {
     }
 }
 
+test "server role keyupdate request is surfaced and reciprocated" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+    _ = try engine.ingestRecord(&clientHelloRecord());
+    _ = try engine.ingestRecord(&finishedRecord());
+    const before = engine.latest_secret orelse return error.TestUnexpectedResult;
+
+    const ku = keyUpdateRecord(.update_requested);
+    const res = try engine.ingestRecord(&ku);
+
+    try std.testing.expectEqual(state.ConnectionState.connected, engine.machine.state);
+    try std.testing.expectEqual(@as(usize, 4), res.action_count);
+    switch (res.actions[1]) {
+        .key_update => |req| try std.testing.expectEqual(handshake.KeyUpdateRequest.update_requested, req),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (res.actions[2]) {
+        .send_key_update => |req| try std.testing.expectEqual(handshake.KeyUpdateRequest.update_not_requested, req),
+        else => return error.TestUnexpectedResult,
+    }
+
+    const after = engine.latest_secret orelse return error.TestUnexpectedResult;
+    switch (before) {
+        .sha256 => |b| switch (after) {
+            .sha256 => |a| try std.testing.expect(!std.mem.eql(u8, &b, &a)),
+            else => return error.TestUnexpectedResult,
+        },
+        .sha384 => |b| switch (after) {
+            .sha384 => |a| try std.testing.expect(!std.mem.eql(u8, &b, &a)),
+            else => return error.TestUnexpectedResult,
+        },
+    }
+}
+
+test "server role keyupdate update_not_requested does not trigger reciprocal send action" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+    _ = try engine.ingestRecord(&clientHelloRecord());
+    _ = try engine.ingestRecord(&finishedRecord());
+    const before = engine.latest_secret orelse return error.TestUnexpectedResult;
+
+    const ku = keyUpdateRecord(.update_not_requested);
+    const res = try engine.ingestRecord(&ku);
+
+    try std.testing.expectEqual(@as(usize, 3), res.action_count);
+    switch (res.actions[1]) {
+        .key_update => |req| try std.testing.expectEqual(handshake.KeyUpdateRequest.update_not_requested, req),
+        else => return error.TestUnexpectedResult,
+    }
+
+    const after = engine.latest_secret orelse return error.TestUnexpectedResult;
+    switch (before) {
+        .sha256 => |b| switch (after) {
+            .sha256 => |a| try std.testing.expect(!std.mem.eql(u8, &b, &a)),
+            else => return error.TestUnexpectedResult,
+        },
+        .sha384 => |b| switch (after) {
+            .sha384 => |a| try std.testing.expect(!std.mem.eql(u8, &b, &a)),
+            else => return error.TestUnexpectedResult,
+        },
+    }
+}
+
 test "invalid keyupdate request byte is rejected as invalid request" {
     var engine = Engine.init(std.testing.allocator, .{
         .role = .client,
