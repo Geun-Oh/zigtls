@@ -53,6 +53,9 @@ configure_strict_interop_env() {
   if [[ -z "${NSS_LIB_DIR:-}" && -n "${NSS_DIR:-}" && -d "${NSS_DIR}/lib" ]]; then
     maybe_set_default_env "NSS_LIB_DIR" "${NSS_DIR}/lib"
   fi
+  if [[ -z "${BORINGSSL_DIR:-}" && -d "/tmp/boringssl" ]]; then
+    maybe_set_default_env "BORINGSSL_DIR" "/tmp/boringssl"
+  fi
 }
 
 assert_strict_interop_env() {
