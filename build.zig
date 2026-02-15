@@ -127,6 +127,20 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(perf_probe);
     const install_perf_probe = b.addInstallArtifact(perf_probe, .{});
 
+    const timing_probe = b.addExecutable(.{
+        .name = "timing-probe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/timing_probe.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zigtls", .module = mod },
+            },
+        }),
+    });
+    b.installArtifact(timing_probe);
+    const install_timing_probe = b.addInstallArtifact(timing_probe, .{});
+
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).
     // This will evaluate the `run` step rather than the default step.
@@ -161,6 +175,9 @@ pub fn build(b: *std.Build) void {
 
     const perf_probe_step = b.step("perf-probe", "Build local performance probe executable");
     perf_probe_step.dependOn(&install_perf_probe.step);
+
+    const timing_probe_step = b.step("timing-probe", "Build local timing probe executable");
+    timing_probe_step.dependOn(&install_timing_probe.step);
 
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
@@ -203,6 +220,18 @@ pub fn build(b: *std.Build) void {
     });
     const run_bogo_shim_tests = b.addRunArtifact(bogo_shim_tests);
 
+    const timing_probe_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/timing_probe.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zigtls", .module = mod },
+            },
+        }),
+    });
+    const run_timing_probe_tests = b.addRunArtifact(timing_probe_tests);
+
     const interop_matrix_self_test = b.addSystemCommand(&.{
         "bash",
         "scripts/interop/matrix_local.sh",
@@ -223,6 +252,14 @@ pub fn build(b: *std.Build) void {
         "scripts/interop/nss_local.sh",
         "scripts/interop/matrix_local.sh",
         "scripts/interop/bogo_run.sh",
+        "scripts/interop/generate_evidence.sh",
+        "scripts/security/run_timing_harness.sh",
+    });
+
+    const timing_harness_self_test = b.addSystemCommand(&.{
+        "bash",
+        "scripts/security/run_timing_harness.sh",
+        "--self-test",
     });
 
     // A top level step for running all tests. dependOn can be called multiple
@@ -233,8 +270,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_corpus_replay_tests.step);
     test_step.dependOn(&run_bogo_shim_tests.step);
+    test_step.dependOn(&run_timing_probe_tests.step);
     test_step.dependOn(&interop_matrix_self_test.step);
     test_step.dependOn(&bogo_summary_self_test.step);
+    test_step.dependOn(&timing_harness_self_test.step);
     test_step.dependOn(&interop_shell_syntax_check.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
