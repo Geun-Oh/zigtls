@@ -56,6 +56,7 @@ run_check() {
 
   local signoff_doc="$root/docs/release-signoff.md"
   local external_doc="$root/docs/external-validation-2026-02-15.md"
+  local closure_doc="$root/docs/task-closure-matrix.md"
   local signoff_interop_ref=""
   local external_interop_ref=""
   local signoff_reliability_ref=""
@@ -156,6 +157,31 @@ run_check() {
     missing=1
   fi
 
+  if [[ -f "$closure_doc" ]]; then
+    while IFS= read -r quoted; do
+      local ref="${quoted#\`}"
+      ref="${ref%\`}"
+
+      case "$ref" in
+        bash\ *|zig\ *|python3\ *|go\ *|RUSTLS_*=*|NSS_*=*|BORINGSSL_DIR=*|BOGO_*=*)
+          continue
+          ;;
+      esac
+
+      if [[ "$ref" =~ ^(docs|scripts|src|tests|tools|examples|artifacts)/ ]]; then
+        if [[ "$ref" == *"*"* || "$ref" == *"?"* || "$ref" == *"["* ]]; then
+          if ! compgen -G "$root/$ref" >/dev/null; then
+            echo "task-closure reference glob has no matches: $ref" >&2
+            missing=1
+          fi
+        elif [[ ! -e "$root/$ref" ]]; then
+          echo "task-closure reference missing: $ref" >&2
+          missing=1
+        fi
+      fi
+    done < <(grep -Eo '`[^`]+`' "$closure_doc")
+  fi
+
   if [[ "$missing" -ne 0 ]]; then
     return 1
   fi
@@ -186,6 +212,13 @@ self_test() {
   for doc in "${required_docs[@]}"; do
     echo "# stub" > "$root/docs/$doc"
   done
+  cat > "$root/docs/task-closure-matrix.md" <<'R'
+# closure fixture
+
+- `docs/release-signoff.md`
+- `scripts/interop/bogo_expected_failures_v1_prod.txt`
+- `artifacts/interop/*/report.md`
+R
 
   cat > "$root/docs/release-signoff.md" <<'R'
 # Release Sign-off (zigtls)
@@ -319,6 +352,26 @@ R
 R
   if run_check "$root" >/dev/null 2>&1; then
     echo "self-test failed: expected stale strict metric failure" >&2
+    rm -rf "$tmp"
+    return 1
+  fi
+
+  cat > "$root/docs/external-validation-2026-02-15.md" <<'R'
+# External Validation
+
+- interop evidence bundle:
+  - `artifacts/interop/20260102T000000Z/`
+- BoGo strict metrics:
+  - `critical_failure_count=0`
+  - `expected_failure_name_count=0`
+  - `in_scope_required_non_pass=0`
+  - `in_scope_required_non_pass_raw=0`
+R
+  run_check "$root" >/dev/null
+
+  echo "- \`src/missing_file.zig\`" >> "$root/docs/task-closure-matrix.md"
+  if run_check "$root" >/dev/null 2>&1; then
+    echo "self-test failed: expected missing task-closure reference failure" >&2
     rm -rf "$tmp"
     return 1
   fi
