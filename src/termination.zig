@@ -15,6 +15,7 @@ pub const Error = error{
     NotAccepted,
     OutputBufferTooSmall,
     UnsupportedOperation,
+    InvalidConfiguration,
 } || tls13.session.EngineError || std.mem.Allocator.Error;
 
 pub const ClientHelloMetadata = struct {
@@ -45,6 +46,11 @@ pub const Connection = struct {
             .engine = tls13.session.Engine.init(allocator, config.session),
             .pending_plaintext = .empty,
         };
+    }
+
+    pub fn initChecked(allocator: std.mem.Allocator, config: Config) Error!Connection {
+        try validateConfig(config);
+        return Connection.init(allocator, config);
     }
 
     pub fn deinit(self: *Connection) void {
@@ -183,6 +189,12 @@ pub const Connection = struct {
         self.pending_record_count -= 1;
     }
 };
+
+pub fn validateConfig(config: Config) Error!void {
+    if (config.session.early_data.enabled and config.session.early_data.replay_filter == null) {
+        return error.InvalidConfiguration;
+    }
+}
 
 fn findExtension(extensions: []const tls13.messages.Extension, ext_type: u16) ?[]const u8 {
     for (extensions) |ext| {
@@ -330,4 +342,24 @@ test "client hello callback receives sni and alpn metadata" {
     try std.testing.expect(cap.called);
     try std.testing.expectEqualStrings("example.com", cap.sni[0..cap.sni_len]);
     try std.testing.expectEqualStrings("h2", cap.alpn[0..cap.alpn_len]);
+}
+
+test "validate config rejects early-data without replay filter" {
+    try std.testing.expectError(error.InvalidConfiguration, validateConfig(.{
+        .session = .{
+            .role = .server,
+            .suite = .tls_aes_128_gcm_sha256,
+            .early_data = .{ .enabled = true },
+        },
+    }));
+}
+
+test "initChecked returns explicit config error instead of panic path" {
+    try std.testing.expectError(error.InvalidConfiguration, Connection.initChecked(std.testing.allocator, .{
+        .session = .{
+            .role = .server,
+            .suite = .tls_aes_128_gcm_sha256,
+            .early_data = .{ .enabled = true },
+        },
+    }));
 }
