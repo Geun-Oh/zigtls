@@ -502,9 +502,10 @@ fn runBsslShimDelegate(allocator: std.mem.Allocator, passthrough_args: []const [
     const term = try child.wait();
     switch (term) {
         .Exited => |code| {
-            if (code == 0) std.process.exit(@intFromEnum(Exit.ok));
-            if (code == @intFromEnum(Exit.unsupported)) std.process.exit(@intFromEnum(Exit.unsupported));
-            std.process.exit(@intFromEnum(Exit.internal));
+            // Preserve delegate exit semantics so BoGo can classify expected
+            // failing-handshake cases from stderr/local errors correctly.
+            const clamped: u8 = @intCast(@min(code, std.math.maxInt(u8)));
+            std.process.exit(clamped);
         },
         else => std.process.exit(@intFromEnum(Exit.internal)),
     }

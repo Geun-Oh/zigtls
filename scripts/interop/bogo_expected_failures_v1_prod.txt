@@ -7,7 +7,6 @@ ALPNServer-Decline-TLS-TLS13-Split
 ALPNServer-EmptyProtocolName-TLS-TLS13
 ALPNServer-EmptyProtocolName-TLS-TLS13-Hints
 ALPNServer-EmptyProtocolName-TLS-TLS13-Split
-ALPNServer-Reject-TLS-TLS13
 ALPNServer-Reject-TLS-TLS13-Hints
 ALPNServer-Reject-TLS-TLS13-Split
 ALPNServer-SelectEmpty-TLS-TLS13
