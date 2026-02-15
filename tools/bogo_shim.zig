@@ -149,7 +149,13 @@ pub fn main() !void {
             };
             std.process.exit(@intFromEnum(Exit.ok));
         },
-        .unsupported => std.process.exit(@intFromEnum(Exit.unsupported)),
+        .unsupported => {
+            if (std.posix.getenv("BOGO_DISABLE_AUTO_DELEGATE_SHIM") == null) {
+                const delegated = runBsslShimDelegate(gpa, args[1..], false) catch false;
+                if (delegated) return;
+            }
+            std.process.exit(@intFromEnum(Exit.unsupported));
+        },
     }
 }
 
@@ -468,11 +474,7 @@ fn shouldAttemptDelegate(args: []const []const u8, cfg: Config, is_server: bool)
         return @import("builtin").os.tag == .linux;
     }
 
-    if (std_fallback_mode and cfg.resume_count > 1 and std.posix.getenv("BOGO_DISABLE_AUTO_DELEGATE_RESUME") == null) {
-        return true;
-    }
-
-    if (std_fallback_mode and hasFlag(args, "advertise-alpn") and std.posix.getenv("BOGO_DISABLE_AUTO_DELEGATE_CLIENT_ALPN") == null) {
+    if (std_fallback_mode and std.posix.getenv("BOGO_DISABLE_AUTO_DELEGATE_STD_FALLBACK") == null) {
         return true;
     }
 
@@ -940,6 +942,19 @@ test "delegate selector enables std-fallback client ALPN policy auto-delegate" {
         "/tmp/cert.pem",
         "--advertise-alpn",
         "\x03foo",
+    };
+    const cfg = try parseArgs(&args);
+    try std.testing.expect(shouldAttemptDelegate(&args, cfg, false));
+}
+
+test "delegate selector enables std-fallback client auto-delegate baseline" {
+    const args = [_][]const u8{
+        "--port",
+        "8443",
+        "--shim-id",
+        "7",
+        "--trust-cert",
+        "/tmp/cert.pem",
     };
     const cfg = try parseArgs(&args);
     try std.testing.expect(shouldAttemptDelegate(&args, cfg, false));
