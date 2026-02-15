@@ -64,17 +64,45 @@ assert_strict_interop_env() {
   fi
 
   local missing=()
+  local invalid=()
   [[ -n "${RUSTLS_CLIENT:-}" ]] || missing+=("RUSTLS_CLIENT")
   [[ -n "${RUSTLS_SERVER:-}" ]] || missing+=("RUSTLS_SERVER")
   [[ -n "${NSS_DIR:-}" ]] || missing+=("NSS_DIR")
   [[ -n "${NSS_BIN_DIR:-}" ]] || missing+=("NSS_BIN_DIR")
   [[ -n "${NSS_LIB_DIR:-}" ]] || missing+=("NSS_LIB_DIR")
+  if [[ "$TASK_GATES" -eq 1 ]]; then
+    [[ -n "${BORINGSSL_DIR:-}" ]] || missing+=("BORINGSSL_DIR")
+  fi
 
-  if [[ "${#missing[@]}" -eq 0 ]]; then
+  if [[ -n "${RUSTLS_CLIENT:-}" && ! -x "${RUSTLS_CLIENT}" ]]; then
+    invalid+=("RUSTLS_CLIENT(not executable):${RUSTLS_CLIENT}")
+  fi
+  if [[ -n "${RUSTLS_SERVER:-}" && ! -x "${RUSTLS_SERVER}" ]]; then
+    invalid+=("RUSTLS_SERVER(not executable):${RUSTLS_SERVER}")
+  fi
+  if [[ -n "${NSS_DIR:-}" && ! -d "${NSS_DIR}" ]]; then
+    invalid+=("NSS_DIR(not directory):${NSS_DIR}")
+  fi
+  if [[ -n "${NSS_BIN_DIR:-}" && ! -d "${NSS_BIN_DIR}" ]]; then
+    invalid+=("NSS_BIN_DIR(not directory):${NSS_BIN_DIR}")
+  fi
+  if [[ -n "${NSS_LIB_DIR:-}" && ! -d "${NSS_LIB_DIR}" ]]; then
+    invalid+=("NSS_LIB_DIR(not directory):${NSS_LIB_DIR}")
+  fi
+  if [[ "$TASK_GATES" -eq 1 && -n "${BORINGSSL_DIR:-}" && ! -d "${BORINGSSL_DIR}" ]]; then
+    invalid+=("BORINGSSL_DIR(not directory):${BORINGSSL_DIR}")
+  fi
+
+  if [[ "${#missing[@]}" -eq 0 && "${#invalid[@]}" -eq 0 ]]; then
     return 0
   fi
 
-  echo "[preflight] strict interop missing env: ${missing[*]}" >&2
+  if [[ "${#missing[@]}" -ne 0 ]]; then
+    echo "[preflight] strict interop missing env: ${missing[*]}" >&2
+  fi
+  if [[ "${#invalid[@]}" -ne 0 ]]; then
+    echo "[preflight] strict interop invalid env: ${invalid[*]}" >&2
+  fi
   echo "[preflight] set vars manually or ensure local toolchains exist at default discovery paths" >&2
   exit 2
 }
