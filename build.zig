@@ -286,6 +286,7 @@ pub fn build(b: *std.Build) void {
         "scripts/reliability/run_soak_chaos.sh",
         "scripts/release/check_api_surface.sh",
         "scripts/release/check_dependency_baseline.sh",
+        "scripts/release/check_external_consumer.sh",
     });
 
     const timing_harness_self_test = b.addSystemCommand(&.{
@@ -328,6 +329,17 @@ pub fn build(b: *std.Build) void {
         "scripts/release/check_dependency_baseline.sh",
     });
 
+    const external_consumer_self_test = b.addSystemCommand(&.{
+        "bash",
+        "scripts/release/check_external_consumer.sh",
+        "--self-test",
+    });
+
+    const external_consumer_check = b.addSystemCommand(&.{
+        "bash",
+        "scripts/release/check_external_consumer.sh",
+    });
+
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
@@ -347,6 +359,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&api_surface_check.step);
     test_step.dependOn(&dependency_baseline_self_test.step);
     test_step.dependOn(&dependency_baseline_check.step);
+    test_step.dependOn(&external_consumer_self_test.step);
+    test_step.dependOn(&external_consumer_check.step);
     test_step.dependOn(&interop_shell_syntax_check.step);
     test_step.dependOn(&lb_event_loop_sample_run.step);
 
