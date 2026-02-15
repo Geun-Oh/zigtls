@@ -122,6 +122,7 @@ configure_strict_env_defaults
 assert_strict_env
 
 run_cmd "bash scripts/release/check_write_ahead_log.sh"
+run_cmd "bash scripts/release/check_task_closure_matrix.sh"
 
 if [[ "$MODE" == "all" || "$MODE" == "basic" ]]; then
   run_cmd "zig build test"
