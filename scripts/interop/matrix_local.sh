@@ -74,12 +74,19 @@ S
 
   set +e
   run_matrix "$tmp/ok.sh" "$tmp/fail.sh" "$tmp/ok.sh" >/dev/null
-  local code=$?
+  local code_fail=$?
+  run_matrix "$tmp/ok.sh" "$tmp/missing.sh" "$tmp/ok.sh" >/dev/null
+  local code_missing=$?
   set -e
   rm -rf "$tmp"
 
-  if [[ "$code" -ne 1 ]]; then
-    echo "self-test failed: expected matrix failure exit code 1"
+  if [[ "$code_fail" -ne 1 ]]; then
+    echo "self-test failed: expected matrix failure exit code 1 for failing target"
+    return 1
+  fi
+
+  if [[ "$code_missing" -ne 1 ]]; then
+    echo "self-test failed: expected matrix failure exit code 1 for missing target"
     return 1
   fi
 

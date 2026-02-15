@@ -7052,3 +7052,61 @@ Commands Executed
 Observed Results
 - `bogo_summary.py --self-test`: `self-test: ok`.
 - `zig build test`: passed.
+===
+timestamp: 2026-02-15T15:47:00+09:00
+description: Plan interop matrix self-test expansion for missing-executable branch
+type: plan
+===
+Motivation
+- `matrix_local.sh --self-test` currently verifies matrix failure aggregation on non-zero target exit, but does not explicitly cover the missing/non-executable script branch in `run_target`.
+
+Scope
+- Extend `matrix_local.sh` self-test to exercise missing-executable path and assert matrix-level failure exit handling.
+- Update RFC matrix INTOP-001 coverage wording to mention missing-executable branch self-test.
+
+Design
+- In `self_test`, invoke `run_matrix` with one non-executable path and assert exit code remains `1` (failure aggregation).
+- Keep existing self-test case intact.
+
+Risks/Perf Impact
+- Script test-only change; runtime harness behavior unchanged.
+
+Test Plan (commands)
+- `bash scripts/interop/matrix_local.sh --self-test`
+- `zig build test`
+
+Rollback
+- Remove added self-test branch assertions and matrix wording update.
+
+Commit Plan
+- `MINOR: interop: extend matrix self-test missing-target branch`
+===
+timestamp: 2026-02-15T15:49:00+09:00
+description: Extend interop matrix self-test to cover missing-executable target branch
+type: code change
+===
+Decisions + Rationale
+- Expanded `matrix_local.sh` self-test to explicitly exercise missing/non-executable script path in addition to non-zero target failure path.
+- Pinned matrix-level failure aggregation semantics (`run_matrix` returns 1) for both branches.
+
+Files/Functions Touched
+- `scripts/interop/matrix_local.sh`
+  - `self_test`: added second run_matrix assertion using missing target path.
+  - Added distinct failure diagnostics for failing-target and missing-target checks.
+- `docs/rfc8446-matrix.md`
+  - Updated `RFC8446-INTOP-001` coverage wording to include missing-executable branch in matrix self-test.
+
+Risks/Perf Notes
+- Script self-test only; no runtime interop behavior changes.
+===
+timestamp: 2026-02-15T15:50:00+09:00
+description: Verify interop matrix missing-target self-test expansion
+type: test
+===
+Commands Executed
+- `bash scripts/interop/matrix_local.sh --self-test`
+- `zig build test`
+
+Observed Results
+- `matrix_local.sh --self-test`: `self-test: ok`.
+- `zig build test`: passed.
