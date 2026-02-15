@@ -7466,3 +7466,69 @@ Commands Executed
 Observed Results
 - `matrix_local.sh --self-test`: `self-test: ok`.
 - `zig build test`: passed.
+===
+timestamp: 2026-02-15T17:20:00+09:00
+description: Plan release-readiness security evidence docs and formal risk-acceptance closure
+type: plan
+===
+Motivation
+- `_task.md` Phase 3/4 and release gating require explicit security review artifacts and closure of checklist partial/todo items.
+- Current checklist still has partial/todo entries without a single formal acceptance/sign-off ledger.
+
+Scope
+- Add release evidence docs:
+  - `docs/side-channel-review.md`
+  - `docs/risk-acceptance.md`
+  - `docs/release-signoff.md`
+- Update `docs/security-hardening-checklist.md` release-blocking section to reference formal risk acceptance/sign-off artifacts and mark closure state.
+- Update `docs/release-runbook.md` to include the new evidence artifacts in gate/release steps.
+
+Design
+- Keep claims bounded to repository-verifiable evidence (tests, scripts, docs, current limitations).
+- Mark unresolved full-RFC items as explicit risk acceptance with rationale, owner, and review date fields.
+
+Risks/Perf Impact
+- Documentation-only changes; no runtime behavior impact.
+
+Test Plan (commands)
+- `zig build test`
+- `bash scripts/release/preflight.sh --dry-run`
+
+Rollback
+- Remove new release evidence docs and checklist/runbook references.
+
+Commit Plan
+- `MINOR: docs: add security evidence and risk acceptance artifacts`
+===
+timestamp: 2026-02-15T17:32:00+09:00
+description: Add release security evidence docs and formal risk-acceptance linkage
+type: docs
+===
+Decisions + Rationale
+- Added explicit side-channel review, risk-acceptance register, and release sign-off artifacts to close release-gate evidence gaps without overstating implementation completeness.
+- Updated hardening checklist release-blocking criteria to reference formal risk acceptance and sign-off artifacts.
+- Updated release runbook to require attachment/review of new security evidence artifacts.
+
+Files/Functions Touched
+- Added:
+  - `docs/side-channel-review.md`
+  - `docs/risk-acceptance.md`
+  - `docs/release-signoff.md`
+- Updated:
+  - `docs/security-hardening-checklist.md`
+  - `docs/release-runbook.md`
+
+Risks/Perf Notes
+- Documentation-only updates; no runtime behavior changes.
+===
+timestamp: 2026-02-15T17:33:00+09:00
+description: Verify release-evidence documentation updates against build gate and preflight flow
+type: test
+===
+Commands Executed
+- `zig build test`
+- `bash scripts/release/preflight.sh --dry-run`
+
+Observed Results
+- `zig build test`: passed.
+- `preflight --dry-run`: printed full command sequence and completed with "all checks passed".
