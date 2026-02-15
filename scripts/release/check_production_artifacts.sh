@@ -54,6 +54,47 @@ run_check() {
     missing=1
   fi
 
+  local signoff_doc="$root/docs/release-signoff.md"
+  local external_doc="$root/docs/external-validation-2026-02-15.md"
+  local signoff_interop_ref=""
+  local external_interop_ref=""
+  local signoff_reliability_ref=""
+
+  if [[ -f "$signoff_doc" ]]; then
+    signoff_interop_ref="$(grep -Eo 'artifacts/interop/[0-9]{8}T[0-9]{6}Z/' "$signoff_doc" | head -n 1 || true)"
+    signoff_reliability_ref="$(grep -Eo 'artifacts/reliability/[0-9]{8}T[0-9]{6}Z/report\.md' "$signoff_doc" | head -n 1 || true)"
+  fi
+  if [[ -f "$external_doc" ]]; then
+    external_interop_ref="$(grep -Eo 'artifacts/interop/[0-9]{8}T[0-9]{6}Z/' "$external_doc" | head -n 1 || true)"
+  fi
+
+  if [[ -z "$signoff_interop_ref" ]]; then
+    echo "missing interop evidence path in docs/release-signoff.md" >&2
+    missing=1
+  fi
+  if [[ -z "$external_interop_ref" ]]; then
+    echo "missing interop evidence path in docs/external-validation-2026-02-15.md" >&2
+    missing=1
+  fi
+  if [[ -n "$signoff_interop_ref" && -n "$external_interop_ref" && "$signoff_interop_ref" != "$external_interop_ref" ]]; then
+    echo "interop evidence path mismatch between signoff and external validation docs" >&2
+    echo "  signoff: $signoff_interop_ref" >&2
+    echo "  external: $external_interop_ref" >&2
+    missing=1
+  fi
+  if [[ -n "$signoff_interop_ref" && ! -f "$root/$signoff_interop_ref/report.md" ]]; then
+    echo "referenced interop evidence report missing: $signoff_interop_ref" >&2
+    missing=1
+  fi
+
+  if [[ -z "$signoff_reliability_ref" ]]; then
+    echo "missing reliability report path in docs/release-signoff.md" >&2
+    missing=1
+  elif [[ ! -f "$root/$signoff_reliability_ref" ]]; then
+    echo "referenced reliability report missing: $signoff_reliability_ref" >&2
+    missing=1
+  fi
+
   local latest_interop_report=""
   latest_interop_report="$(find "$root/artifacts/interop" -mindepth 2 -maxdepth 2 -name report.md 2>/dev/null | LC_ALL=C sort | tail -n 1)"
   if [[ -n "$latest_interop_report" ]]; then
@@ -106,6 +147,21 @@ self_test() {
   for doc in "${required_docs[@]}"; do
     echo "# stub" > "$root/docs/$doc"
   done
+
+  cat > "$root/docs/release-signoff.md" <<'R'
+# Release Sign-off (zigtls)
+
+- Strict interop evidence bundle (`artifacts/interop/20260101T000000Z/`)
+- Reliability report (`artifacts/reliability/20260101T000000Z/report.md`)
+R
+
+  cat > "$root/docs/external-validation-2026-02-15.md" <<'R'
+# External Validation
+
+- interop evidence bundle:
+  - `artifacts/interop/20260101T000000Z/`
+R
+
   : > "$root/scripts/interop/bogo_expected_failures_v1_prod.txt"
   cat > "$root/artifacts/interop/20260101T000000Z/report.md" <<'R'
 # Interop Evidence Bundle
