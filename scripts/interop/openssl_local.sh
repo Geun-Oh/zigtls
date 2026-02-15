@@ -26,11 +26,43 @@ openssl req -x509 -newkey rsa:2048 -nodes \
 openssl s_server -tls1_3 -accept 8443 -cert "$CERT" -key "$KEY" -quiet >"$LOG" 2>&1 &
 SERVER_PID=$!
 
-sleep 1
-set +e
-OUTPUT="$(echo "ping" | openssl s_client -connect 127.0.0.1:8443 -tls1_3 -servername localhost 2>/dev/null)"
-STATUS=$?
-set -e
+wait_for_listener() {
+  if ! command -v nc >/dev/null 2>&1; then
+    sleep 1
+    return 0
+  fi
+  local attempts=50
+  local i=0
+  while [[ "$i" -lt "$attempts" ]]; do
+    if ! kill -0 "$SERVER_PID" >/dev/null 2>&1; then
+      return 1
+    fi
+    if nc -z 127.0.0.1 8443 >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+if ! wait_for_listener; then
+  echo "openssl server did not become ready" >&2
+  kill "$SERVER_PID" >/dev/null 2>&1 || true
+  wait "$SERVER_PID" 2>/dev/null || true
+  exit 1
+fi
+
+STATUS=1
+OUTPUT=""
+for _ in 1 2 3; do
+  set +e
+  OUTPUT="$(echo "ping" | openssl s_client -connect 127.0.0.1:8443 -tls1_3 -servername localhost 2>/dev/null)"
+  STATUS=$?
+  set -e
+  [[ "$STATUS" -eq 0 ]] && break
+  sleep 0.2
+done
 
 kill "$SERVER_PID" >/dev/null 2>&1 || true
 wait "$SERVER_PID" 2>/dev/null || true

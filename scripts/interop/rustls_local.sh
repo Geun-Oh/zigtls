@@ -52,21 +52,52 @@ else
 fi
 SERVER_PID=$!
 
-sleep 1
+wait_for_listener() {
+  if ! command -v nc >/dev/null 2>&1; then
+    sleep 1
+    return 0
+  fi
+  local attempts=50
+  local i=0
+  while [[ "$i" -lt "$attempts" ]]; do
+    if ! kill -0 "$SERVER_PID" >/dev/null 2>&1; then
+      return 1
+    fi
+    if nc -z 127.0.0.1 8444 >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
+if ! wait_for_listener; then
+  echo "rustls server did not become ready" >&2
+  kill "$SERVER_PID" >/dev/null 2>&1 || true
+  wait "$SERVER_PID" 2>/dev/null || true
+  exit 1
+fi
+
 client_uses_modern_cli=0
 if "$RUSTLS_CLIENT" --help 2>/dev/null | grep -q -- "Usage: tlsclient-mio"; then
   client_uses_modern_cli=1
 fi
 
-set +e
-if [[ "$client_uses_modern_cli" -eq 1 ]]; then
-  "$RUSTLS_CLIENT" --http --cafile "$CERT" --port 8444 localhost >/dev/null 2>&1
-  STATUS=$?
-else
-  "$RUSTLS_CLIENT" --cafile "$CERT" --hostname localhost --port 8444 127.0.0.1 >/dev/null 2>&1
-  STATUS=$?
-fi
-set -e
+STATUS=1
+for _ in 1 2 3; do
+  set +e
+  if [[ "$client_uses_modern_cli" -eq 1 ]]; then
+    "$RUSTLS_CLIENT" --http --cafile "$CERT" --port 8444 localhost >/dev/null 2>&1
+    STATUS=$?
+  else
+    "$RUSTLS_CLIENT" --cafile "$CERT" --hostname localhost --port 8444 127.0.0.1 >/dev/null 2>&1
+    STATUS=$?
+  fi
+  set -e
+  [[ "$STATUS" -eq 0 ]] && break
+  sleep 0.2
+done
 
 kill "$SERVER_PID" >/dev/null 2>&1 || true
 wait "$SERVER_PID" 2>/dev/null || true

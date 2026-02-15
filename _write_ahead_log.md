@@ -8283,3 +8283,146 @@ Observed Results
 - shell syntax checks: passed.
 - perf probe assertion mode: passed (`[perf][assert] PASSED`).
 - `zig build test`: passed.
+===
+timestamp: 2026-02-15T12:46:57+09:00
+description: Plan WS-B initial pass to reduce BoGo in-scope required non-pass count
+ type: plan
+===
+Motivation
+- Strict BoGo gate is now active and currently fails with large in-scope required non-pass counts.
+- Next step is to increase in-scope pass coverage by improving shim compatibility/routing for required categories.
+
+Scope
+- Inspect BoringSSL runner shim invocation contract and argument patterns.
+- Expand `tools/bogo_shim.zig` parsing/routing for required categories (TLS13 basic/HRR/KeyUpdate/Resumption/Alert subset).
+- Run targeted BoGo filtered subsets and measure strict summary deltas.
+
+Risks/Perf Impact
+- BoGo shim-only behavior change.
+
+Test Plan (commands)
+- `zig test tools/bogo_shim.zig`
+- targeted `bash scripts/interop/bogo_run.sh` with filter/profile
+- `python3 scripts/interop/bogo_summary.py --profile ... --strict ...`
+- `zig build test`
+===
+timestamp: 2026-02-15T13:05:00+09:00
+description: Plan WS-C2 reproducible single-command interop evidence generation
+type: plan
+===
+Motivation
+- `_task.md` WS-C2 requires reproducible interop evidence generation from a fresh environment with a single command.
+- Current scripts provide individual checks, but no consolidated artifact-oriented entrypoint.
+
+Scope
+- Add `scripts/interop/generate_evidence.sh` as a one-command entrypoint that:
+  - runs strict local interop matrix,
+  - captures command outputs and environment metadata,
+  - writes standardized evidence bundle under `artifacts/interop/<timestamp>/`.
+- Add deterministic manifest/report file in the bundle.
+- Update release runbook to reference this command as WS-C2 gate path.
+
+Risks/Perf Impact
+- Script/docs-only changes.
+- No runtime TLS engine hot-path impact.
+
+Test Plan (commands)
+- `bash -n scripts/interop/generate_evidence.sh`
+- `bash scripts/interop/generate_evidence.sh --self-test`
+- strict evidence generation run with required env vars
+- `zig build test`
+
+Rollback
+- Revert added evidence script and doc updates.
+
+Commit Plan
+- `MINOR: interop: add single-command evidence bundle generator`
+===
+timestamp: 2026-02-15T13:08:30+09:00
+description: Plan interop harness readiness polling to remove flaky strict-matrix failures
+type: plan
+===
+Motivation
+- WS-C2 evidence run failed with transient openssl/rustls local interop failures while env bindings were valid.
+- Current harnesses use fixed `sleep 1`, which is race-prone on busy hosts and undermines reproducibility.
+
+Scope
+- Update `scripts/interop/openssl_local.sh` and `scripts/interop/rustls_local.sh` to replace fixed sleeps with bounded readiness polling.
+- Add bounded handshake retry loop to reduce transient startup race failures.
+- Keep existing pass/fail semantics and CLI compatibility.
+
+Risks/Perf Impact
+- Script-only behavior hardening; no TLS runtime path changes.
+- Slightly longer harness run time in worst case due polling windows.
+
+Test Plan (commands)
+- `bash -n scripts/interop/openssl_local.sh scripts/interop/rustls_local.sh`
+- strict matrix command with required env vars
+- evidence generation command
+- `zig build test`
+
+Rollback
+- Revert readiness polling loops and restore fixed sleeps.
+
+Commit Plan
+- `MINOR: interop: harden local harness startup with readiness polling`
+===
+timestamp: 2026-02-15T13:11:30+09:00
+description: Add single-command interop evidence bundle generator for WS-C2
+type: code change
+===
+Decisions + Rationale
+- Added one-command interop evidence bundle generator to close WS-C2 reproducibility requirement.
+- Added standardized bundle structure and report to make release evidence archival deterministic.
+
+Files/Functions Touched
+- Added `scripts/interop/generate_evidence.sh`
+  - Strict matrix invocation (`--strict`) wrapper.
+  - Timestamped bundle emission under `artifacts/interop/<timestamp>/`.
+  - Captures `matrix.log`, `metadata.txt`, `env.txt`, and `report.md`.
+  - Added `--self-test` to validate bundle generation semantics.
+- Updated `docs/release-runbook.md`
+  - Added WS-C2 one-command evidence generation gate and artifact archival step.
+
+Risks/Perf Notes
+- Script/docs-only change.
+- No TLS runtime hot-path impact.
+===
+timestamp: 2026-02-15T13:12:40+09:00
+description: Harden local openssl/rustls harness startup against race conditions
+type: code change
+===
+Decisions + Rationale
+- Replaced fixed startup sleeps in local interop harnesses with bounded listener polling and retry loops.
+- Goal is deterministic strict matrix behavior on variable host scheduling conditions.
+
+Files/Functions Touched
+- Updated `scripts/interop/openssl_local.sh`
+  - Added `wait_for_listener` using `nc -z` polling (fallback to short sleep if `nc` unavailable).
+  - Added bounded `openssl s_client` retry loop.
+- Updated `scripts/interop/rustls_local.sh`
+  - Added `wait_for_listener` with same polling strategy.
+  - Added bounded rustls client retry loop.
+
+Risks/Perf Notes
+- Harness-only behavior hardening.
+- Slightly increased worst-case script duration due bounded polling/retries.
+===
+timestamp: 2026-02-15T13:13:40+09:00
+description: Validate WS-C2 evidence generator and hardened interop harnesses
+type: test
+===
+Commands Executed
+- `bash -n scripts/interop/generate_evidence.sh`
+- `bash scripts/interop/generate_evidence.sh --self-test`
+- `bash -n scripts/interop/openssl_local.sh scripts/interop/rustls_local.sh scripts/interop/generate_evidence.sh`
+- `RUSTLS_CLIENT=/tmp/rustls/target/release/tlsclient-mio RUSTLS_SERVER=/tmp/rustls/target/release/tlsserver-mio NSS_DIR=/opt/homebrew/opt/nss NSS_BIN_DIR=/opt/homebrew/opt/nss/bin NSS_LIB_DIR=/opt/homebrew/opt/nss/lib bash scripts/interop/matrix_local.sh --strict` (first run in sandbox failed due socket bind permission; reran with escalation)
+- `RUSTLS_CLIENT=/tmp/rustls/target/release/tlsclient-mio RUSTLS_SERVER=/tmp/rustls/target/release/tlsserver-mio NSS_DIR=/opt/homebrew/opt/nss NSS_BIN_DIR=/opt/homebrew/opt/nss/bin NSS_LIB_DIR=/opt/homebrew/opt/nss/lib bash scripts/interop/generate_evidence.sh` (first run in sandbox failed due socket bind permission; reran with escalation)
+- `zig build test`
+
+Observed Results
+- syntax checks: passed.
+- evidence script self-test: passed.
+- strict matrix (escalated): PASS (openssl/rustls/nss all PASS).
+- evidence generation (escalated): PASS with bundle created at `artifacts/interop/20260215T035057Z`.
+- `zig build test`: passed.
