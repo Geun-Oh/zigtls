@@ -1,12 +1,15 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const alerts = @import("alerts.zig");
+const certificate_validation = @import("certificate_validation.zig");
 const early_data = @import("early_data.zig");
 const handshake = @import("handshake.zig");
 const keyschedule = @import("keyschedule.zig");
 const messages = @import("messages.zig");
+const ocsp = @import("ocsp.zig");
 const record = @import("record.zig");
 const state = @import("state.zig");
+const trust_store = @import("trust_store.zig");
 
 pub const default_signature_algorithms = [_]u16{
     0x0403, // ecdsa_secp256r1_sha256
@@ -32,6 +35,32 @@ pub const GroupPolicy = struct {
 };
 
 pub const KeyLogCallback = *const fn (label: []const u8, secret: []const u8, userdata: usize) void;
+pub const NowUnixFn = *const fn () i64;
+
+pub const SignCertificateVerifyFn = *const fn (
+    transcript_hash: []const u8,
+    signature_scheme: u16,
+    out_signature: []u8,
+    userdata: usize,
+) anyerror!usize;
+
+pub const ServerCredentials = struct {
+    cert_chain_der: []const []const u8 = &.{},
+    signature_scheme: u16 = 0x0807, // ed25519
+    sign_certificate_verify: ?SignCertificateVerifyFn = null,
+    signer_userdata: usize = 0,
+};
+
+pub const PeerValidationConfig = struct {
+    enforce_certificate_verify: bool = true,
+    require_peer_certificate: bool = false,
+    expected_server_name: ?[]const u8 = null,
+    trust_store: ?*const trust_store.TrustStore = null,
+    now_unix: ?NowUnixFn = null,
+    enforce_ocsp: bool = false,
+    allow_soft_fail_ocsp: bool = false,
+    stapled_ocsp: ?ocsp.ResponseView = null,
+};
 
 pub const Config = struct {
     role: state.Role,
@@ -39,6 +68,8 @@ pub const Config = struct {
     early_data: EarlyDataConfig = .{},
     group_policy: GroupPolicy = .{},
     allowed_signature_algorithms: []const u16 = &default_signature_algorithms,
+    server_credentials: ?ServerCredentials = null,
+    peer_validation: PeerValidationConfig = .{},
     enable_debug_keylog: bool = false,
     keylog_callback: ?KeyLogCallback = null,
     keylog_userdata: usize = 0,
@@ -64,6 +95,19 @@ pub fn validateConfig(config: Config) InitError!void {
     if (config.enable_debug_keylog and config.keylog_callback == null) {
         return error.InvalidConfiguration;
     }
+    if (config.server_credentials) |creds| {
+        if (creds.cert_chain_der.len == 0) return error.InvalidConfiguration;
+        if (creds.sign_certificate_verify == null) return error.InvalidConfiguration;
+        if (!containsU16(config.allowed_signature_algorithms, creds.signature_scheme)) {
+            return error.InvalidConfiguration;
+        }
+    }
+    if (config.peer_validation.expected_server_name) |name| {
+        if (name.len == 0) return error.InvalidConfiguration;
+    }
+    if (config.role != .client and config.peer_validation.expected_server_name != null) {
+        return error.InvalidConfiguration;
+    }
 }
 
 pub const Metrics = struct {
@@ -79,6 +123,7 @@ pub const Action = union(enum) {
     hello_retry_request: void,
     key_update: handshake.KeyUpdateRequest,
     send_key_update: handshake.KeyUpdateRequest,
+    send_handshake_flight: u8,
     received_alert: alerts.Alert,
     send_alert: alerts.Alert,
     state_changed: state.ConnectionState,
@@ -152,7 +197,15 @@ pub const EngineError = error{
     PskBinderCountMismatch,
     DowngradeDetected,
     UnsupportedSignatureAlgorithm,
-} || record.ParseError || handshake.ParseError || handshake.KeyUpdateError || state.TransitionError || alerts.DecodeError;
+    MissingServerCredentials,
+    MissingKeyExchangeSecret,
+    MissingPeerCertificate,
+    PeerCertificateValidationFailed,
+    ApplicationCipherNotReady,
+    DecryptFailed,
+    InvalidInnerContentType,
+    SequenceOverflow,
+} || record.ParseError || handshake.ParseError || handshake.KeyUpdateError || state.TransitionError || alerts.DecodeError || std.mem.Allocator.Error;
 
 const ext_server_name: u16 = 0x0000;
 const ext_supported_groups: u16 = 0x000a;
@@ -162,6 +215,7 @@ const ext_cookie: u16 = 0x002c;
 const ext_key_share: u16 = 0x0033;
 const ext_pre_shared_key: u16 = 0x0029;
 const ext_psk_key_exchange_modes: u16 = 0x002d;
+const max_peer_chain_depth: usize = 8;
 
 const Transcript = union(enum) {
     sha256: std.crypto.hash.sha2.Sha256,
@@ -193,7 +247,14 @@ pub const Engine = struct {
     machine: state.Machine,
     transcript: Transcript,
     early_secret: ?TrafficSecret = null,
-    handshake_secret: ?TrafficSecret = null,
+    handshake_read_secret: ?TrafficSecret = null,
+    handshake_write_secret: ?TrafficSecret = null,
+    key_exchange_secret: ?[32]u8 = null,
+    client_x25519_secret_key: ?[32]u8 = null,
+    negotiated_alpn: [255]u8 = [_]u8{0} ** 255,
+    negotiated_alpn_len: usize = 0,
+    peer_leaf_certificate_der: ?[]u8 = null,
+    saw_peer_certificate: bool = false,
     master_secret: ?TrafficSecret = null,
     latest_secret: ?TrafficSecret = null,
     early_data_idempotent: bool = false,
@@ -202,6 +263,26 @@ pub const Engine = struct {
     early_data_ticket: ?[]u8 = null,
     saw_close_notify: bool = false,
     metrics: Metrics = .{},
+    outbound_records: std.ArrayList([]u8),
+    app_read_secret: ?TrafficSecret = null,
+    app_write_secret: ?TrafficSecret = null,
+    hs_read_key: [32]u8 = [_]u8{0} ** 32,
+    hs_write_key: [32]u8 = [_]u8{0} ** 32,
+    hs_read_iv: [12]u8 = [_]u8{0} ** 12,
+    hs_write_iv: [12]u8 = [_]u8{0} ** 12,
+    hs_key_len: usize = 0,
+    hs_tag_len: usize = 16,
+    hs_read_seq: u64 = 0,
+    hs_write_seq: u64 = 0,
+    app_read_key: [32]u8 = [_]u8{0} ** 32,
+    app_write_key: [32]u8 = [_]u8{0} ** 32,
+    app_read_iv: [12]u8 = [_]u8{0} ** 12,
+    app_write_iv: [12]u8 = [_]u8{0} ** 12,
+    app_key_len: usize = 0,
+    app_tag_len: usize = 16,
+    app_read_seq: u64 = 0,
+    app_write_seq: u64 = 0,
+    app_data_scratch: [record.max_plaintext]u8 = [_]u8{0} ** record.max_plaintext,
 
     pub fn init(allocator: std.mem.Allocator, config: Config) Engine {
         return .{
@@ -209,6 +290,7 @@ pub const Engine = struct {
             .config = config,
             .machine = state.Machine.init(config.role),
             .transcript = Transcript.init(config.suite),
+            .outbound_records = .empty,
         };
     }
 
@@ -220,7 +302,22 @@ pub const Engine = struct {
     pub fn deinit(self: *Engine) void {
         self.zeroizeLatestSecret();
         self.zeroizeStagedSecrets();
+        self.zeroizeKeyExchangeSecret();
+        self.zeroizeClientEphemeralState();
+        self.clearPeerLeafCertificate();
         self.clearEarlyDataTicket();
+        self.zeroizeHandshakeTrafficState();
+        self.zeroizeApplicationTrafficState();
+        while (self.outbound_records.items.len > 0) {
+            const rec = self.outbound_records.orderedRemove(0);
+            self.allocator.free(rec);
+        }
+        self.outbound_records.deinit(self.allocator);
+    }
+
+    pub fn popOutboundRecord(self: *Engine) ?[]u8 {
+        if (self.outbound_records.items.len == 0) return null;
+        return self.outbound_records.orderedRemove(0);
     }
 
     pub fn beginEarlyData(self: *Engine, ticket: []const u8, idempotent: bool) !void {
@@ -258,51 +355,30 @@ pub const Engine = struct {
         return self.metrics;
     }
 
+    pub fn setClientX25519SecretKey(self: *Engine, secret_key: [32]u8) EngineError!void {
+        if (self.config.role != .client) return error.IllegalTransition;
+        self.zeroizeClientEphemeralState();
+        self.client_x25519_secret_key = secret_key;
+    }
+
+    pub fn generateClientX25519KeyShare(self: *Engine) EngineError![32]u8 {
+        if (self.config.role != .client) return error.IllegalTransition;
+        self.zeroizeClientEphemeralState();
+        const kp = std.crypto.dh.X25519.KeyPair.generate();
+        self.client_x25519_secret_key = kp.secret_key;
+        return kp.public_key;
+    }
+
     pub fn ingestRecord(self: *Engine, record_bytes: []const u8) EngineError!IngestResult {
         const parsed = try record.parseRecord(record_bytes);
         var result = IngestResult.init(5 + parsed.payload.len);
 
         switch (parsed.header.content_type) {
             .handshake => {
-                var cursor = parsed.payload;
-                while (cursor.len > 0) {
-                    const frame = try handshake.parseOne(cursor);
-                    const frame_len = 4 + @as(usize, @intCast(frame.header.length));
-                    self.transcript.update(cursor[0..frame_len]);
-                    try self.validateHandshakeBody(frame.header.handshake_type, frame.body);
-                    self.metrics.handshake_messages += 1;
-
-                    const prev_state = self.machine.state;
-                    const event = handshake.classifyEvent(frame);
-                    try self.machine.onEvent(event);
-                    try result.push(.{ .handshake = frame.header.handshake_type });
-                    if (event == .hello_retry_request) {
-                        try result.push(.{ .hello_retry_request = {} });
-                    }
-                    if (self.config.role == .client and
-                        event == .server_hello and
-                        self.machine.state == .wait_encrypted_extensions)
-                    {
-                        self.derivePreApplicationKeyScheduleStages();
-                    }
-                    if (frame.header.handshake_type == .key_update) {
-                        self.metrics.keyupdate_messages += 1;
-                        const req = try handshake.parseKeyUpdateRequest(frame.body);
-                        self.ratchetLatestTrafficSecret();
-                        try result.push(.{ .key_update = req });
-                        if (req == .update_requested) {
-                            try result.push(.{ .send_key_update = .update_not_requested });
-                        }
-                    }
-                    try result.push(.{ .state_changed = self.machine.state });
-
-                    if (prev_state != .connected and self.machine.state == .connected) {
-                        self.metrics.connected_transitions += 1;
-                        self.deriveConnectedKeyScheduleStages();
-                        self.emitDebugKeyLog(self.keylogInitialLabel());
-                    }
-                    cursor = frame.rest;
-                }
+                try self.ingestHandshakePayload(parsed.payload, &result);
+            },
+            .change_cipher_spec => {
+                if (!isIgnorableTls13ChangeCipherSpec(parsed.payload)) return error.UnsupportedRecordType;
             },
             .alert => {
                 const alert = try alerts.Alert.decode(parsed.payload);
@@ -317,23 +393,29 @@ pub const Engine = struct {
                 try result.push(.{ .state_changed = self.machine.state });
             },
             .application_data => {
-                if (self.machine.state != .connected) {
-                    if (self.config.role != .server) return error.EarlyDataRejected;
-                    if (!self.config.early_data.enabled) return error.EarlyDataRejected;
-                    if (!self.early_data_idempotent) return error.EarlyDataRejected;
-                    if (!self.early_data_within_window) return error.EarlyDataTicketExpired;
-                    if (!self.early_data_admitted) {
-                        const replay_filter = self.config.early_data.replay_filter orelse return error.MissingReplayFilter;
-                        const ticket = self.early_data_ticket orelse return error.EarlyDataRejected;
-                        const scope: early_data.ReplayScopeKey = .{
-                            .node_id = self.config.early_data.replay_node_id,
-                            .epoch = self.config.early_data.replay_epoch,
-                        };
-                        if (replay_filter.seenOrInsertScoped(scope, ticket)) return error.EarlyDataRejected;
-                        self.early_data_admitted = true;
+                if (self.machine.state == .connected) {
+                    try self.decryptConnectedApplicationData(parsed.header, parsed.payload, &result);
+                } else {
+                    if (self.hs_key_len != 0) {
+                        try self.decryptHandshakeApplicationData(parsed.header, parsed.payload, &result);
+                    } else {
+                        if (self.config.role != .server) return error.EarlyDataRejected;
+                        if (!self.config.early_data.enabled) return error.EarlyDataRejected;
+                        if (!self.early_data_idempotent) return error.EarlyDataRejected;
+                        if (!self.early_data_within_window) return error.EarlyDataTicketExpired;
+                        if (!self.early_data_admitted) {
+                            const replay_filter = self.config.early_data.replay_filter orelse return error.MissingReplayFilter;
+                            const ticket = self.early_data_ticket orelse return error.EarlyDataRejected;
+                            const scope: early_data.ReplayScopeKey = .{
+                                .node_id = self.config.early_data.replay_node_id,
+                                .epoch = self.config.early_data.replay_epoch,
+                            };
+                            if (replay_filter.seenOrInsertScoped(scope, ticket)) return error.EarlyDataRejected;
+                            self.early_data_admitted = true;
+                        }
+                        try result.push(.{ .application_data = parsed.payload });
                     }
                 }
-                try result.push(.{ .application_data = parsed.payload });
             },
             else => return error.UnsupportedRecordType,
         }
@@ -382,86 +464,902 @@ pub const Engine = struct {
         return frame;
     }
 
-    fn deriveConnectedKeyScheduleStages(self: *Engine) void {
+    pub fn buildProtectedKeyUpdateRecord(
+        self: *Engine,
+        allocator: std.mem.Allocator,
+        request: handshake.KeyUpdateRequest,
+    ) (EngineError || std.mem.Allocator.Error)![]u8 {
+        try self.ensureApplicationTrafficReady();
+
+        const hs_payload_len: usize = 5;
+        const inner_len = hs_payload_len + 1;
+        if (inner_len > record.max_plaintext) return error.RecordOverflow;
+        const rec_len = 5 + inner_len + self.app_tag_len;
+
+        var frame = try allocator.alloc(u8, rec_len);
+        errdefer allocator.free(frame);
+
+        frame[0] = @intFromEnum(record.ContentType.application_data);
+        std.mem.writeInt(u16, frame[1..3], record.tls_legacy_record_version, .big);
+        std.mem.writeInt(u16, frame[3..5], @as(u16, @intCast(inner_len + self.app_tag_len)), .big);
+
+        var clear: [record.max_plaintext]u8 = undefined;
+        clear[0] = @intFromEnum(state.HandshakeType.key_update);
+        const len = handshake.writeU24(1);
+        @memcpy(clear[1..4], &len);
+        clear[4] = @intFromEnum(request);
+        clear[5] = @intFromEnum(record.ContentType.handshake);
+
+        const nonce = buildTls13Nonce(self.app_write_iv, self.app_write_seq);
+        var tag: [16]u8 = undefined;
         switch (self.config.suite) {
             .tls_aes_128_gcm_sha256 => {
-                const digest = self.transcriptDigestSha256();
-                const zeros = [_]u8{0} ** 32;
-                const early = keyschedule.extract(.tls_aes_128_gcm_sha256, &zeros, &zeros);
-                const derived = keyschedule.deriveSecret(.tls_aes_128_gcm_sha256, early, "derived", &digest);
-                const hs_base = keyschedule.extract(.tls_aes_128_gcm_sha256, &derived, &digest);
-                const hs_traffic = keyschedule.deriveSecret(.tls_aes_128_gcm_sha256, hs_base, "c hs traffic", &digest);
-                const master_derived = keyschedule.deriveSecret(.tls_aes_128_gcm_sha256, hs_base, "derived", &digest);
-                const master = keyschedule.extract(.tls_aes_128_gcm_sha256, &master_derived, &zeros);
-                self.early_secret = .{ .sha256 = early };
-                self.handshake_secret = .{ .sha256 = hs_traffic };
-                self.master_secret = .{ .sha256 = master };
-                self.latest_secret = .{ .sha256 = keyschedule.deriveSecret(.tls_aes_128_gcm_sha256, master, "c ap traffic", &digest) };
-            },
-            .tls_chacha20_poly1305_sha256 => {
-                const digest = self.transcriptDigestSha256();
-                const zeros = [_]u8{0} ** 32;
-                const early = keyschedule.extract(.tls_chacha20_poly1305_sha256, &zeros, &zeros);
-                const derived = keyschedule.deriveSecret(.tls_chacha20_poly1305_sha256, early, "derived", &digest);
-                const hs_base = keyschedule.extract(.tls_chacha20_poly1305_sha256, &derived, &digest);
-                const hs_traffic = keyschedule.deriveSecret(.tls_chacha20_poly1305_sha256, hs_base, "c hs traffic", &digest);
-                const master_derived = keyschedule.deriveSecret(.tls_chacha20_poly1305_sha256, hs_base, "derived", &digest);
-                const master = keyschedule.extract(.tls_chacha20_poly1305_sha256, &master_derived, &zeros);
-                self.early_secret = .{ .sha256 = early };
-                self.handshake_secret = .{ .sha256 = hs_traffic };
-                self.master_secret = .{ .sha256 = master };
-                self.latest_secret = .{ .sha256 = keyschedule.deriveSecret(.tls_chacha20_poly1305_sha256, master, "c ap traffic", &digest) };
+                const key = self.app_write_key[0..16].*;
+                std.crypto.aead.aes_gcm.Aes128Gcm.encrypt(frame[5 .. 5 + inner_len], &tag, clear[0..inner_len], frame[0..5], nonce, key);
             },
             .tls_aes_256_gcm_sha384 => {
-                const digest = self.transcriptDigestSha384();
-                const zeros = [_]u8{0} ** 48;
-                const early = keyschedule.extract(.tls_aes_256_gcm_sha384, &zeros, &zeros);
-                const derived = keyschedule.deriveSecret(.tls_aes_256_gcm_sha384, early, "derived", &digest);
-                const hs_base = keyschedule.extract(.tls_aes_256_gcm_sha384, &derived, &digest);
-                const hs_traffic = keyschedule.deriveSecret(.tls_aes_256_gcm_sha384, hs_base, "c hs traffic", &digest);
-                const master_derived = keyschedule.deriveSecret(.tls_aes_256_gcm_sha384, hs_base, "derived", &digest);
-                const master = keyschedule.extract(.tls_aes_256_gcm_sha384, &master_derived, &zeros);
-                self.early_secret = .{ .sha384 = early };
-                self.handshake_secret = .{ .sha384 = hs_traffic };
-                self.master_secret = .{ .sha384 = master };
-                self.latest_secret = .{ .sha384 = keyschedule.deriveSecret(.tls_aes_256_gcm_sha384, master, "c ap traffic", &digest) };
+                const key = self.app_write_key[0..32].*;
+                std.crypto.aead.aes_gcm.Aes256Gcm.encrypt(frame[5 .. 5 + inner_len], &tag, clear[0..inner_len], frame[0..5], nonce, key);
+            },
+            .tls_chacha20_poly1305_sha256 => {
+                const key = self.app_write_key[0..32].*;
+                std.crypto.aead.chacha_poly.ChaCha20Poly1305.encrypt(frame[5 .. 5 + inner_len], &tag, clear[0..inner_len], frame[0..5], nonce, key);
+            },
+        }
+        @memcpy(frame[5 + inner_len ..], &tag);
+        self.app_write_seq = std.math.add(u64, self.app_write_seq, 1) catch return error.SequenceOverflow;
+        return frame;
+    }
+
+    pub fn onKeyUpdateRecordQueued(self: *Engine) void {
+        self.ratchetWriteTrafficSecret();
+    }
+
+    pub fn buildApplicationDataRecord(
+        self: *Engine,
+        allocator: std.mem.Allocator,
+        plaintext: []const u8,
+    ) (EngineError || std.mem.Allocator.Error)![]u8 {
+        if (plaintext.len == 0) return allocator.alloc(u8, 0);
+        if (plaintext.len + 1 > record.max_plaintext) return error.RecordOverflow;
+        try self.ensureApplicationTrafficReady();
+
+        const inner_len = plaintext.len + 1;
+        const rec_len = 5 + inner_len + self.app_tag_len;
+        var frame = try allocator.alloc(u8, rec_len);
+        errdefer allocator.free(frame);
+
+        frame[0] = @intFromEnum(record.ContentType.application_data);
+        std.mem.writeInt(u16, frame[1..3], record.tls_legacy_record_version, .big);
+        std.mem.writeInt(u16, frame[3..5], @as(u16, @intCast(inner_len + self.app_tag_len)), .big);
+
+        var clear: [record.max_plaintext]u8 = undefined;
+        @memcpy(clear[0..plaintext.len], plaintext);
+        clear[plaintext.len] = @intFromEnum(record.ContentType.application_data);
+        const nonce = buildTls13Nonce(self.app_write_iv, self.app_write_seq);
+        var tag: [16]u8 = undefined;
+
+        switch (self.config.suite) {
+            .tls_aes_128_gcm_sha256 => {
+                const key = self.app_write_key[0..16].*;
+                std.crypto.aead.aes_gcm.Aes128Gcm.encrypt(frame[5 .. 5 + inner_len], &tag, clear[0..inner_len], frame[0..5], nonce, key);
+            },
+            .tls_aes_256_gcm_sha384 => {
+                const key = self.app_write_key[0..32].*;
+                std.crypto.aead.aes_gcm.Aes256Gcm.encrypt(frame[5 .. 5 + inner_len], &tag, clear[0..inner_len], frame[0..5], nonce, key);
+            },
+            .tls_chacha20_poly1305_sha256 => {
+                const key = self.app_write_key[0..32].*;
+                std.crypto.aead.chacha_poly.ChaCha20Poly1305.encrypt(frame[5 .. 5 + inner_len], &tag, clear[0..inner_len], frame[0..5], nonce, key);
+            },
+        }
+        @memcpy(frame[5 + inner_len ..], &tag);
+        self.app_write_seq = std.math.add(u64, self.app_write_seq, 1) catch return error.SequenceOverflow;
+        return frame;
+    }
+
+    fn ingestHandshakePayload(self: *Engine, payload: []const u8, result: *IngestResult) EngineError!void {
+        var cursor = payload;
+        while (cursor.len > 0) {
+            const frame = try handshake.parseOne(cursor);
+            const frame_len = 4 + @as(usize, @intCast(frame.header.length));
+            try self.validateHandshakeBody(frame.header.handshake_type, frame.body);
+            self.transcript.update(cursor[0..frame_len]);
+            self.metrics.handshake_messages += 1;
+
+            const prev_state = self.machine.state;
+            const event = handshake.classifyEvent(frame);
+            try self.machine.onEvent(event);
+            try result.push(.{ .handshake = frame.header.handshake_type });
+            if (event == .hello_retry_request) {
+                try result.push(.{ .hello_retry_request = {} });
+            }
+            if (self.config.role == .client and
+                event == .server_hello and
+                self.machine.state == .wait_encrypted_extensions)
+            {
+                try self.derivePreApplicationKeyScheduleStages();
+            }
+            if (self.config.role == .server and frame.header.handshake_type == .client_hello and prev_state == .start) {
+                const queued = try self.queueServerHandshakeFlight(frame.body);
+                if (queued > 0) {
+                    try result.push(.{ .send_handshake_flight = queued });
+                }
+            }
+            if (frame.header.handshake_type == .key_update) {
+                self.metrics.keyupdate_messages += 1;
+                const req = try handshake.parseKeyUpdateRequest(frame.body);
+                self.ratchetReadTrafficSecret();
+                self.ratchetLatestTrafficSecret();
+                try result.push(.{ .key_update = req });
+                if (req == .update_requested) {
+                    try result.push(.{ .send_key_update = .update_not_requested });
+                }
+            }
+            try result.push(.{ .state_changed = self.machine.state });
+
+            if (prev_state != .connected and self.machine.state == .connected) {
+                self.metrics.connected_transitions += 1;
+                if (!(self.config.role == .server and self.app_key_len != 0)) {
+                    try self.deriveConnectedKeyScheduleStages();
+                }
+                self.emitDebugKeyLog(self.keylogInitialLabel());
+            }
+            cursor = frame.rest;
+        }
+    }
+
+    fn decryptConnectedApplicationData(
+        self: *Engine,
+        header: record.Header,
+        payload: []const u8,
+        result: *IngestResult,
+    ) EngineError!void {
+        try self.ensureApplicationTrafficReady();
+        if (payload.len < self.app_tag_len + 1) return error.DecryptFailed;
+        const ciphertext_len = payload.len - self.app_tag_len;
+        if (ciphertext_len > self.app_data_scratch.len) return error.RecordOverflow;
+        const ciphertext = payload[0..ciphertext_len];
+        var tag: [16]u8 = undefined;
+        @memcpy(&tag, payload[ciphertext_len..]);
+        const nonce = buildTls13Nonce(self.app_read_iv, self.app_read_seq);
+        const ad = header.encode();
+
+        switch (self.config.suite) {
+            .tls_aes_128_gcm_sha256 => {
+                const key = self.app_read_key[0..16].*;
+                std.crypto.aead.aes_gcm.Aes128Gcm.decrypt(self.app_data_scratch[0..ciphertext_len], ciphertext, tag, &ad, nonce, key) catch return error.DecryptFailed;
+            },
+            .tls_aes_256_gcm_sha384 => {
+                const key = self.app_read_key[0..32].*;
+                std.crypto.aead.aes_gcm.Aes256Gcm.decrypt(self.app_data_scratch[0..ciphertext_len], ciphertext, tag, &ad, nonce, key) catch return error.DecryptFailed;
+            },
+            .tls_chacha20_poly1305_sha256 => {
+                const key = self.app_read_key[0..32].*;
+                std.crypto.aead.chacha_poly.ChaCha20Poly1305.decrypt(self.app_data_scratch[0..ciphertext_len], ciphertext, tag, &ad, nonce, key) catch return error.DecryptFailed;
+            },
+        }
+
+        self.app_read_seq = std.math.add(u64, self.app_read_seq, 1) catch return error.SequenceOverflow;
+        const inner = std.mem.trimRight(u8, self.app_data_scratch[0..ciphertext_len], "\x00");
+        if (inner.len == 0) return error.InvalidInnerContentType;
+        const inner_type = std.meta.intToEnum(record.ContentType, inner[inner.len - 1]) catch return error.InvalidInnerContentType;
+        const clear = inner[0 .. inner.len - 1];
+        switch (inner_type) {
+            .application_data => {
+                try result.push(.{ .application_data = clear });
+            },
+            .alert => {
+                const alert = try alerts.Alert.decode(clear);
+                self.metrics.alerts_received += 1;
+                try result.push(.{ .received_alert = alert });
+                if (alert.description == .close_notify) {
+                    self.saw_close_notify = true;
+                    self.machine.markClosed();
+                } else {
+                    self.machine.markClosing();
+                }
+                try result.push(.{ .state_changed = self.machine.state });
+            },
+            .handshake => try self.ingestHandshakePayload(clear, result),
+            else => return error.InvalidInnerContentType,
+        }
+    }
+
+    fn decryptHandshakeApplicationData(
+        self: *Engine,
+        header: record.Header,
+        payload: []const u8,
+        result: *IngestResult,
+    ) EngineError!void {
+        if (payload.len < self.hs_tag_len + 1) return error.DecryptFailed;
+        const ciphertext_len = payload.len - self.hs_tag_len;
+        if (ciphertext_len > self.app_data_scratch.len) return error.RecordOverflow;
+        const ciphertext = payload[0..ciphertext_len];
+        var tag: [16]u8 = undefined;
+        @memcpy(&tag, payload[ciphertext_len..]);
+        const nonce = buildTls13Nonce(self.hs_read_iv, self.hs_read_seq);
+        const ad = header.encode();
+
+        switch (self.config.suite) {
+            .tls_aes_128_gcm_sha256 => {
+                const key = self.hs_read_key[0..16].*;
+                std.crypto.aead.aes_gcm.Aes128Gcm.decrypt(self.app_data_scratch[0..ciphertext_len], ciphertext, tag, &ad, nonce, key) catch return error.DecryptFailed;
+            },
+            .tls_aes_256_gcm_sha384 => {
+                const key = self.hs_read_key[0..32].*;
+                std.crypto.aead.aes_gcm.Aes256Gcm.decrypt(self.app_data_scratch[0..ciphertext_len], ciphertext, tag, &ad, nonce, key) catch return error.DecryptFailed;
+            },
+            .tls_chacha20_poly1305_sha256 => {
+                const key = self.hs_read_key[0..32].*;
+                std.crypto.aead.chacha_poly.ChaCha20Poly1305.decrypt(self.app_data_scratch[0..ciphertext_len], ciphertext, tag, &ad, nonce, key) catch return error.DecryptFailed;
+            },
+        }
+
+        self.hs_read_seq = std.math.add(u64, self.hs_read_seq, 1) catch return error.SequenceOverflow;
+        const inner = std.mem.trimRight(u8, self.app_data_scratch[0..ciphertext_len], "\x00");
+        if (inner.len == 0) return error.InvalidInnerContentType;
+        const inner_type = std.meta.intToEnum(record.ContentType, inner[inner.len - 1]) catch return error.InvalidInnerContentType;
+        const clear = inner[0 .. inner.len - 1];
+        switch (inner_type) {
+            .handshake => try self.ingestHandshakePayload(clear, result),
+            .alert => {
+                const alert = try alerts.Alert.decode(clear);
+                self.metrics.alerts_received += 1;
+                try result.push(.{ .received_alert = alert });
+                if (alert.description == .close_notify) {
+                    self.saw_close_notify = true;
+                    self.machine.markClosed();
+                } else {
+                    self.machine.markClosing();
+                }
+                try result.push(.{ .state_changed = self.machine.state });
+            },
+            else => return error.InvalidInnerContentType,
+        }
+    }
+
+    fn queueServerHandshakeFlight(self: *Engine, client_hello_body: []const u8) EngineError!u8 {
+        const creds = self.config.server_credentials orelse return error.MissingServerCredentials;
+        _ = creds.sign_certificate_verify orelse return error.MissingServerCredentials;
+
+        var hello = messages.ClientHello.decode(self.allocator, client_hello_body) catch return error.InvalidHelloMessage;
+        defer hello.deinit(self.allocator);
+        const client_pub = extractClientHelloX25519Public(hello.extensions) catch return error.InvalidKeyShareExtension;
+        const server_kp = std.crypto.dh.X25519.KeyPair.generate();
+        const shared = std.crypto.dh.X25519.scalarmult(server_kp.secret_key, client_pub) catch return error.InvalidKeyShareExtension;
+        self.key_exchange_secret = shared;
+        try self.captureClientHelloAlpnSelection(hello.extensions);
+
+        var count: u8 = 0;
+        const sh = try self.buildServerHelloBody(hello, server_kp.public_key);
+        try self.enqueueHandshakeRecord(.server_hello, sh);
+        count += 1;
+        try self.derivePreApplicationKeyScheduleStages();
+
+        const ee = try self.buildEncryptedExtensionsBody();
+        try self.enqueueEncryptedHandshakeRecord(.encrypted_extensions, ee);
+        count += 1;
+
+        const cert = try self.buildCertificateBody(creds);
+        try self.enqueueEncryptedHandshakeRecord(.certificate, cert);
+        count += 1;
+
+        const cert_verify = try self.buildCertificateVerifyBody(creds);
+        try self.enqueueEncryptedHandshakeRecord(.certificate_verify, cert_verify);
+        count += 1;
+
+        const fin = try self.buildFinishedBody();
+        try self.enqueueEncryptedHandshakeRecord(.finished, fin);
+        count += 1;
+        try self.deriveConnectedKeyScheduleStages();
+
+        return count;
+    }
+
+    fn buildServerHelloBody(self: *Engine, hello: messages.ClientHello, server_pub: [32]u8) EngineError![]u8 {
+        const ext_version = try self.allocator.dupe(u8, &.{ 0x03, 0x04 });
+        errdefer self.allocator.free(ext_version);
+        var ext_key_share_data = try self.allocator.alloc(u8, 2 + 2 + server_pub.len);
+        errdefer self.allocator.free(ext_key_share_data);
+        std.mem.writeInt(u16, ext_key_share_data[0..2], named_group_x25519, .big);
+        std.mem.writeInt(u16, ext_key_share_data[2..4], @as(u16, @intCast(server_pub.len)), .big);
+        @memcpy(ext_key_share_data[4..], &server_pub);
+        var ext_list = try self.allocator.alloc(messages.Extension, 2);
+        errdefer self.allocator.free(ext_list);
+        ext_list[0] = .{ .extension_type = ext_supported_versions, .data = ext_version };
+        ext_list[1] = .{ .extension_type = ext_key_share, .data = ext_key_share_data };
+
+        var random: [32]u8 = undefined;
+        std.crypto.random.bytes(&random);
+
+        var sh = messages.ServerHello{
+            .random = random,
+            .session_id_echo = try self.allocator.dupe(u8, hello.session_id),
+            .cipher_suite = configuredCipherSuiteCodepoint(self.config.suite),
+            .compression_method = 0x00,
+            .extensions = ext_list,
+        };
+        defer sh.deinit(self.allocator);
+        return sh.encode(self.allocator) catch return error.InvalidHelloMessage;
+    }
+
+    fn buildEncryptedExtensionsBody(self: *Engine) EngineError![]u8 {
+        if (self.negotiated_alpn_len == 0) {
+            const out = try self.allocator.alloc(u8, 2);
+            out[0] = 0x00;
+            out[1] = 0x00;
+            return out;
+        }
+
+        const protocol_len = self.negotiated_alpn_len;
+        const list_len = 1 + protocol_len;
+        const ext_data_len = 2 + list_len;
+        const ext_len = 4 + ext_data_len;
+        const out_len = 2 + ext_len;
+        var out = try self.allocator.alloc(u8, out_len);
+        std.mem.writeInt(u16, out[0..2], @as(u16, @intCast(ext_len)), .big);
+        std.mem.writeInt(u16, out[2..4], ext_alpn, .big);
+        std.mem.writeInt(u16, out[4..6], @as(u16, @intCast(ext_data_len)), .big);
+        std.mem.writeInt(u16, out[6..8], @as(u16, @intCast(list_len)), .big);
+        out[8] = @as(u8, @intCast(protocol_len));
+        @memcpy(out[9 .. 9 + protocol_len], self.negotiated_alpn[0..protocol_len]);
+        return out;
+    }
+
+    fn captureClientHelloAlpnSelection(self: *Engine, extensions: []const messages.Extension) EngineError!void {
+        self.negotiated_alpn_len = 0;
+        const alpn = findExtensionData(extensions, ext_alpn) orelse return;
+        const selected = try firstClientHelloAlpnProtocol(alpn);
+        if (selected.len > self.negotiated_alpn.len) return error.InvalidAlpnExtension;
+        @memcpy(self.negotiated_alpn[0..selected.len], selected);
+        self.negotiated_alpn_len = selected.len;
+    }
+
+    fn buildCertificateBody(self: *Engine, creds: ServerCredentials) EngineError![]u8 {
+        var cert_list_len: usize = 0;
+        for (creds.cert_chain_der) |cert_der| {
+            cert_list_len += 3 + cert_der.len + 2;
+        }
+        const body_len = 1 + 3 + cert_list_len;
+        var out = try self.allocator.alloc(u8, body_len);
+        var i: usize = 0;
+        out[i] = 0x00; // request context len
+        i += 1;
+        const list_u24 = handshake.writeU24(@as(u24, @intCast(cert_list_len)));
+        @memcpy(out[i .. i + 3], &list_u24);
+        i += 3;
+        for (creds.cert_chain_der) |cert_der| {
+            const cert_len_u24 = handshake.writeU24(@as(u24, @intCast(cert_der.len)));
+            @memcpy(out[i .. i + 3], &cert_len_u24);
+            i += 3;
+            @memcpy(out[i .. i + cert_der.len], cert_der);
+            i += cert_der.len;
+            out[i] = 0x00;
+            out[i + 1] = 0x00;
+            i += 2;
+        }
+        return out;
+    }
+
+    fn buildCertificateVerifyBody(self: *Engine, creds: ServerCredentials) EngineError![]u8 {
+        const signer = creds.sign_certificate_verify orelse return error.MissingServerCredentials;
+        if (!self.isAllowedSignatureAlgorithm(creds.signature_scheme)) {
+            return error.UnsupportedSignatureAlgorithm;
+        }
+        const verify_payload = try self.buildCertificateVerifyPayload(.local);
+        defer self.allocator.free(verify_payload);
+        var sig_tmp: [1024]u8 = undefined;
+        const sig_len = signer(
+            verify_payload,
+            creds.signature_scheme,
+            sig_tmp[0..],
+            creds.signer_userdata,
+        ) catch return error.MissingServerCredentials;
+        if (sig_len == 0 or sig_len > sig_tmp.len or sig_len > std.math.maxInt(u16)) {
+            return error.InvalidInnerContentType;
+        }
+        if (creds.signature_scheme == 0x0807 and sig_len != std.crypto.sign.Ed25519.Signature.encoded_length) {
+            return error.InvalidCertificateVerifyMessage;
+        }
+
+        const out = try self.allocator.alloc(u8, 4 + sig_len);
+        std.mem.writeInt(u16, out[0..2], creds.signature_scheme, .big);
+        std.mem.writeInt(u16, out[2..4], @as(u16, @intCast(sig_len)), .big);
+        @memcpy(out[4..], sig_tmp[0..sig_len]);
+        return out;
+    }
+
+    fn buildFinishedBody(self: *Engine) EngineError![]u8 {
+        const secret_to_use: TrafficSecret = self.handshake_write_secret orelse return error.MissingKeyExchangeSecret;
+        switch (secret_to_use) {
+            .sha256 => |secret| {
+                const transcript_hash = self.transcriptDigestSha256();
+                const fin_key = keyschedule.finishedKey(.tls_aes_128_gcm_sha256, secret);
+                const verify = keyschedule.finishedVerifyData(.tls_aes_128_gcm_sha256, fin_key, &transcript_hash);
+                return try self.allocator.dupe(u8, &verify);
+            },
+            .sha384 => |secret| {
+                const transcript_hash = self.transcriptDigestSha384();
+                const fin_key = keyschedule.finishedKey(.tls_aes_256_gcm_sha384, secret);
+                const verify = keyschedule.finishedVerifyData(.tls_aes_256_gcm_sha384, fin_key, &transcript_hash);
+                return try self.allocator.dupe(u8, &verify);
             },
         }
     }
 
-    fn derivePreApplicationKeyScheduleStages(self: *Engine) void {
+    fn enqueueHandshakeRecord(self: *Engine, hs_type: state.HandshakeType, body: []const u8) EngineError!void {
+        const hs_len_u24 = handshake.writeU24(@as(u24, @intCast(body.len)));
+        var frame = try self.allocator.alloc(u8, 5 + 4 + body.len);
+        errdefer self.allocator.free(frame);
+
+        frame[0] = @intFromEnum(record.ContentType.handshake);
+        std.mem.writeInt(u16, frame[1..3], record.tls_legacy_record_version, .big);
+        std.mem.writeInt(u16, frame[3..5], @as(u16, @intCast(4 + body.len)), .big);
+        frame[5] = @intFromEnum(hs_type);
+        @memcpy(frame[6..9], &hs_len_u24);
+        @memcpy(frame[9..], body);
+        self.transcript.update(frame[5..]);
+        try self.outbound_records.append(self.allocator, frame);
+        self.allocator.free(@constCast(body));
+    }
+
+    fn enqueueEncryptedHandshakeRecord(self: *Engine, hs_type: state.HandshakeType, body: []const u8) EngineError!void {
+        if (self.hs_key_len == 0) return error.MissingKeyExchangeSecret;
+        const hs_payload_len = 4 + body.len;
+        const inner_len = hs_payload_len + 1;
+        if (inner_len > record.max_plaintext) return error.RecordOverflow;
+        const rec_len = 5 + inner_len + self.hs_tag_len;
+
+        var frame = try self.allocator.alloc(u8, rec_len);
+        errdefer self.allocator.free(frame);
+
+        frame[0] = @intFromEnum(record.ContentType.application_data);
+        std.mem.writeInt(u16, frame[1..3], record.tls_legacy_record_version, .big);
+        std.mem.writeInt(u16, frame[3..5], @as(u16, @intCast(inner_len + self.hs_tag_len)), .big);
+
+        var clear: [record.max_plaintext]u8 = undefined;
+        clear[0] = @intFromEnum(hs_type);
+        const hs_len_u24 = handshake.writeU24(@as(u24, @intCast(body.len)));
+        @memcpy(clear[1..4], &hs_len_u24);
+        @memcpy(clear[4 .. 4 + body.len], body);
+        clear[hs_payload_len] = @intFromEnum(record.ContentType.handshake);
+
+        const nonce = buildTls13Nonce(self.hs_write_iv, self.hs_write_seq);
+        var tag: [16]u8 = undefined;
+        switch (self.config.suite) {
+            .tls_aes_128_gcm_sha256 => {
+                const key = self.hs_write_key[0..16].*;
+                std.crypto.aead.aes_gcm.Aes128Gcm.encrypt(frame[5 .. 5 + inner_len], &tag, clear[0..inner_len], frame[0..5], nonce, key);
+            },
+            .tls_aes_256_gcm_sha384 => {
+                const key = self.hs_write_key[0..32].*;
+                std.crypto.aead.aes_gcm.Aes256Gcm.encrypt(frame[5 .. 5 + inner_len], &tag, clear[0..inner_len], frame[0..5], nonce, key);
+            },
+            .tls_chacha20_poly1305_sha256 => {
+                const key = self.hs_write_key[0..32].*;
+                std.crypto.aead.chacha_poly.ChaCha20Poly1305.encrypt(frame[5 .. 5 + inner_len], &tag, clear[0..inner_len], frame[0..5], nonce, key);
+            },
+        }
+        @memcpy(frame[5 + inner_len ..], &tag);
+        self.hs_write_seq = std.math.add(u64, self.hs_write_seq, 1) catch return error.SequenceOverflow;
+
+        self.transcript.update(clear[0..hs_payload_len]);
+        try self.outbound_records.append(self.allocator, frame);
+        self.allocator.free(@constCast(body));
+    }
+
+    fn deriveConnectedKeyScheduleStages(self: *Engine) EngineError!void {
+        switch (self.config.suite) {
+            .tls_aes_128_gcm_sha256 => {
+                const digest = self.transcriptDigestSha256();
+                const empty_digest = emptyTranscriptHashSha256();
+                const zeros = [_]u8{0} ** 32;
+                const ikm = try self.keyExchangeIkm();
+                const early = keyschedule.extract(.tls_aes_128_gcm_sha256, &zeros, &zeros);
+                const derived = keyschedule.deriveSecret(.tls_aes_128_gcm_sha256, early, "derived", &empty_digest);
+                const hs_base = keyschedule.extract(.tls_aes_128_gcm_sha256, &derived, ikm);
+                const master_derived = keyschedule.deriveSecret(.tls_aes_128_gcm_sha256, hs_base, "derived", &empty_digest);
+                const master = keyschedule.extract(.tls_aes_128_gcm_sha256, &master_derived, &zeros);
+                const client_ap = keyschedule.deriveSecret(.tls_aes_128_gcm_sha256, master, "c ap traffic", &digest);
+                const server_ap = keyschedule.deriveSecret(.tls_aes_128_gcm_sha256, master, "s ap traffic", &digest);
+                self.early_secret = .{ .sha256 = early };
+                self.master_secret = .{ .sha256 = master };
+                self.installApplicationSecrets(
+                    .{ .sha256 = client_ap },
+                    .{ .sha256 = server_ap },
+                );
+            },
+            .tls_chacha20_poly1305_sha256 => {
+                const digest = self.transcriptDigestSha256();
+                const empty_digest = emptyTranscriptHashSha256();
+                const zeros = [_]u8{0} ** 32;
+                const ikm = try self.keyExchangeIkm();
+                const early = keyschedule.extract(.tls_chacha20_poly1305_sha256, &zeros, &zeros);
+                const derived = keyschedule.deriveSecret(.tls_chacha20_poly1305_sha256, early, "derived", &empty_digest);
+                const hs_base = keyschedule.extract(.tls_chacha20_poly1305_sha256, &derived, ikm);
+                const master_derived = keyschedule.deriveSecret(.tls_chacha20_poly1305_sha256, hs_base, "derived", &empty_digest);
+                const master = keyschedule.extract(.tls_chacha20_poly1305_sha256, &master_derived, &zeros);
+                const client_ap = keyschedule.deriveSecret(.tls_chacha20_poly1305_sha256, master, "c ap traffic", &digest);
+                const server_ap = keyschedule.deriveSecret(.tls_chacha20_poly1305_sha256, master, "s ap traffic", &digest);
+                self.early_secret = .{ .sha256 = early };
+                self.master_secret = .{ .sha256 = master };
+                self.installApplicationSecrets(
+                    .{ .sha256 = client_ap },
+                    .{ .sha256 = server_ap },
+                );
+            },
+            .tls_aes_256_gcm_sha384 => {
+                const digest = self.transcriptDigestSha384();
+                const empty_digest = emptyTranscriptHashSha384();
+                const zeros = [_]u8{0} ** 48;
+                const ikm = try self.keyExchangeIkm();
+                const early = keyschedule.extract(.tls_aes_256_gcm_sha384, &zeros, &zeros);
+                const derived = keyschedule.deriveSecret(.tls_aes_256_gcm_sha384, early, "derived", &empty_digest);
+                const hs_base = keyschedule.extract(.tls_aes_256_gcm_sha384, &derived, ikm);
+                const master_derived = keyschedule.deriveSecret(.tls_aes_256_gcm_sha384, hs_base, "derived", &empty_digest);
+                const master = keyschedule.extract(.tls_aes_256_gcm_sha384, &master_derived, &zeros);
+                const client_ap = keyschedule.deriveSecret(.tls_aes_256_gcm_sha384, master, "c ap traffic", &digest);
+                const server_ap = keyschedule.deriveSecret(.tls_aes_256_gcm_sha384, master, "s ap traffic", &digest);
+                self.early_secret = .{ .sha384 = early };
+                self.master_secret = .{ .sha384 = master };
+                self.installApplicationSecrets(
+                    .{ .sha384 = client_ap },
+                    .{ .sha384 = server_ap },
+                );
+            },
+        }
+    }
+
+    fn derivePreApplicationKeyScheduleStages(self: *Engine) EngineError!void {
         return switch (self.config.suite) {
             .tls_aes_128_gcm_sha256 => blk: {
                 const digest = self.transcriptDigestSha256();
+                const empty_digest = emptyTranscriptHashSha256();
                 const zeros = [_]u8{0} ** 32;
+                const ikm = try self.keyExchangeIkm();
                 const early = keyschedule.extract(.tls_aes_128_gcm_sha256, &zeros, &zeros);
-                const derived = keyschedule.deriveSecret(.tls_aes_128_gcm_sha256, early, "derived", &digest);
-                const hs_base = keyschedule.extract(.tls_aes_128_gcm_sha256, &derived, &digest);
+                const derived = keyschedule.deriveSecret(.tls_aes_128_gcm_sha256, early, "derived", &empty_digest);
+                const hs_base = keyschedule.extract(.tls_aes_128_gcm_sha256, &derived, ikm);
+                const client_hs_traffic = keyschedule.deriveSecret(.tls_aes_128_gcm_sha256, hs_base, "c hs traffic", &digest);
+                const server_hs_traffic = keyschedule.deriveSecret(.tls_aes_128_gcm_sha256, hs_base, "s hs traffic", &digest);
                 self.early_secret = .{ .sha256 = early };
-                self.handshake_secret = .{ .sha256 = keyschedule.deriveSecret(.tls_aes_128_gcm_sha256, hs_base, "c hs traffic", &digest) };
+                self.installHandshakeTrafficSecrets(
+                    .{ .sha256 = client_hs_traffic },
+                    .{ .sha256 = server_hs_traffic },
+                );
                 break :blk;
             },
             .tls_chacha20_poly1305_sha256 => blk: {
                 const digest = self.transcriptDigestSha256();
+                const empty_digest = emptyTranscriptHashSha256();
                 const zeros = [_]u8{0} ** 32;
+                const ikm = try self.keyExchangeIkm();
                 const early = keyschedule.extract(.tls_chacha20_poly1305_sha256, &zeros, &zeros);
-                const derived = keyschedule.deriveSecret(.tls_chacha20_poly1305_sha256, early, "derived", &digest);
-                const hs_base = keyschedule.extract(.tls_chacha20_poly1305_sha256, &derived, &digest);
+                const derived = keyschedule.deriveSecret(.tls_chacha20_poly1305_sha256, early, "derived", &empty_digest);
+                const hs_base = keyschedule.extract(.tls_chacha20_poly1305_sha256, &derived, ikm);
+                const client_hs_traffic = keyschedule.deriveSecret(.tls_chacha20_poly1305_sha256, hs_base, "c hs traffic", &digest);
+                const server_hs_traffic = keyschedule.deriveSecret(.tls_chacha20_poly1305_sha256, hs_base, "s hs traffic", &digest);
                 self.early_secret = .{ .sha256 = early };
-                self.handshake_secret = .{ .sha256 = keyschedule.deriveSecret(.tls_chacha20_poly1305_sha256, hs_base, "c hs traffic", &digest) };
+                self.installHandshakeTrafficSecrets(
+                    .{ .sha256 = client_hs_traffic },
+                    .{ .sha256 = server_hs_traffic },
+                );
                 break :blk;
             },
             .tls_aes_256_gcm_sha384 => blk: {
                 const digest = self.transcriptDigestSha384();
+                const empty_digest = emptyTranscriptHashSha384();
                 const zeros = [_]u8{0} ** 48;
+                const ikm = try self.keyExchangeIkm();
                 const early = keyschedule.extract(.tls_aes_256_gcm_sha384, &zeros, &zeros);
-                const derived = keyschedule.deriveSecret(.tls_aes_256_gcm_sha384, early, "derived", &digest);
-                const hs_base = keyschedule.extract(.tls_aes_256_gcm_sha384, &derived, &digest);
+                const derived = keyschedule.deriveSecret(.tls_aes_256_gcm_sha384, early, "derived", &empty_digest);
+                const hs_base = keyschedule.extract(.tls_aes_256_gcm_sha384, &derived, ikm);
+                const client_hs_traffic = keyschedule.deriveSecret(.tls_aes_256_gcm_sha384, hs_base, "c hs traffic", &digest);
+                const server_hs_traffic = keyschedule.deriveSecret(.tls_aes_256_gcm_sha384, hs_base, "s hs traffic", &digest);
                 self.early_secret = .{ .sha384 = early };
-                self.handshake_secret = .{ .sha384 = keyschedule.deriveSecret(.tls_aes_256_gcm_sha384, hs_base, "c hs traffic", &digest) };
+                self.installHandshakeTrafficSecrets(
+                    .{ .sha384 = client_hs_traffic },
+                    .{ .sha384 = server_hs_traffic },
+                );
                 break :blk;
             },
         };
+    }
+
+    fn installHandshakeTrafficSecrets(self: *Engine, client_secret: TrafficSecret, server_secret: TrafficSecret) void {
+        if (self.config.role == .client) {
+            self.handshake_write_secret = client_secret;
+            self.handshake_read_secret = server_secret;
+        } else {
+            self.handshake_write_secret = server_secret;
+            self.handshake_read_secret = client_secret;
+        }
+
+        switch (self.config.suite) {
+            .tls_aes_128_gcm_sha256 => {
+                const write_secret = switch (self.handshake_write_secret.?) {
+                    .sha256 => |s| s,
+                    .sha384 => unreachable,
+                };
+                const read_secret = switch (self.handshake_read_secret.?) {
+                    .sha256 => |s| s,
+                    .sha384 => unreachable,
+                };
+                const w_key = keyschedule.deriveLabel(.tls_aes_128_gcm_sha256, write_secret, "key", "", 16);
+                const r_key = keyschedule.deriveLabel(.tls_aes_128_gcm_sha256, read_secret, "key", "", 16);
+                const w_iv = keyschedule.deriveLabel(.tls_aes_128_gcm_sha256, write_secret, "iv", "", 12);
+                const r_iv = keyschedule.deriveLabel(.tls_aes_128_gcm_sha256, read_secret, "iv", "", 12);
+                @memset(self.hs_write_key[0..], 0);
+                @memset(self.hs_read_key[0..], 0);
+                @memcpy(self.hs_write_key[0..16], &w_key);
+                @memcpy(self.hs_read_key[0..16], &r_key);
+                @memcpy(self.hs_write_iv[0..], &w_iv);
+                @memcpy(self.hs_read_iv[0..], &r_iv);
+                self.hs_key_len = 16;
+            },
+            .tls_aes_256_gcm_sha384 => {
+                const write_secret = switch (self.handshake_write_secret.?) {
+                    .sha256 => unreachable,
+                    .sha384 => |s| s,
+                };
+                const read_secret = switch (self.handshake_read_secret.?) {
+                    .sha256 => unreachable,
+                    .sha384 => |s| s,
+                };
+                const w_key = keyschedule.deriveLabel(.tls_aes_256_gcm_sha384, write_secret, "key", "", 32);
+                const r_key = keyschedule.deriveLabel(.tls_aes_256_gcm_sha384, read_secret, "key", "", 32);
+                const w_iv = keyschedule.deriveLabel(.tls_aes_256_gcm_sha384, write_secret, "iv", "", 12);
+                const r_iv = keyschedule.deriveLabel(.tls_aes_256_gcm_sha384, read_secret, "iv", "", 12);
+                @memcpy(self.hs_write_key[0..32], &w_key);
+                @memcpy(self.hs_read_key[0..32], &r_key);
+                @memcpy(self.hs_write_iv[0..], &w_iv);
+                @memcpy(self.hs_read_iv[0..], &r_iv);
+                self.hs_key_len = 32;
+            },
+            .tls_chacha20_poly1305_sha256 => {
+                const write_secret = switch (self.handshake_write_secret.?) {
+                    .sha256 => |s| s,
+                    .sha384 => unreachable,
+                };
+                const read_secret = switch (self.handshake_read_secret.?) {
+                    .sha256 => |s| s,
+                    .sha384 => unreachable,
+                };
+                const w_key = keyschedule.deriveLabel(.tls_chacha20_poly1305_sha256, write_secret, "key", "", 32);
+                const r_key = keyschedule.deriveLabel(.tls_chacha20_poly1305_sha256, read_secret, "key", "", 32);
+                const w_iv = keyschedule.deriveLabel(.tls_chacha20_poly1305_sha256, write_secret, "iv", "", 12);
+                const r_iv = keyschedule.deriveLabel(.tls_chacha20_poly1305_sha256, read_secret, "iv", "", 12);
+                @memcpy(self.hs_write_key[0..32], &w_key);
+                @memcpy(self.hs_read_key[0..32], &r_key);
+                @memcpy(self.hs_write_iv[0..], &w_iv);
+                @memcpy(self.hs_read_iv[0..], &r_iv);
+                self.hs_key_len = 32;
+            },
+        }
+        self.hs_tag_len = 16;
+        self.hs_write_seq = 0;
+        self.hs_read_seq = 0;
+    }
+
+    fn keyExchangeIkm(self: *Engine) EngineError![]const u8 {
+        if (self.key_exchange_secret) |*secret| return secret[0..];
+        return error.MissingKeyExchangeSecret;
+    }
+
+    fn ensureApplicationTrafficReady(self: *Engine) EngineError!void {
+        if (self.machine.state != .connected) return error.ApplicationCipherNotReady;
+        if (self.app_key_len != 0) return;
+        try self.deriveConnectedKeyScheduleStages();
+        if (self.app_key_len == 0) return error.ApplicationCipherNotReady;
+    }
+
+    fn installApplicationSecrets(self: *Engine, client_secret: TrafficSecret, server_secret: TrafficSecret) void {
+        if (self.config.role == .client) {
+            self.app_write_secret = client_secret;
+            self.app_read_secret = server_secret;
+        } else {
+            self.app_write_secret = server_secret;
+            self.app_read_secret = client_secret;
+        }
+
+        switch (self.config.suite) {
+            .tls_aes_128_gcm_sha256 => {
+                const write_secret = switch (self.app_write_secret.?) {
+                    .sha256 => |s| s,
+                    .sha384 => unreachable,
+                };
+                const read_secret = switch (self.app_read_secret.?) {
+                    .sha256 => |s| s,
+                    .sha384 => unreachable,
+                };
+                const w_key = keyschedule.deriveLabel(.tls_aes_128_gcm_sha256, write_secret, "key", "", 16);
+                const r_key = keyschedule.deriveLabel(.tls_aes_128_gcm_sha256, read_secret, "key", "", 16);
+                const w_iv = keyschedule.deriveLabel(.tls_aes_128_gcm_sha256, write_secret, "iv", "", 12);
+                const r_iv = keyschedule.deriveLabel(.tls_aes_128_gcm_sha256, read_secret, "iv", "", 12);
+                @memset(self.app_write_key[0..], 0);
+                @memset(self.app_read_key[0..], 0);
+                @memcpy(self.app_write_key[0..16], &w_key);
+                @memcpy(self.app_read_key[0..16], &r_key);
+                @memcpy(self.app_write_iv[0..], &w_iv);
+                @memcpy(self.app_read_iv[0..], &r_iv);
+                self.app_key_len = 16;
+                self.latest_secret = self.app_write_secret;
+            },
+            .tls_aes_256_gcm_sha384 => {
+                const write_secret = switch (self.app_write_secret.?) {
+                    .sha256 => unreachable,
+                    .sha384 => |s| s,
+                };
+                const read_secret = switch (self.app_read_secret.?) {
+                    .sha256 => unreachable,
+                    .sha384 => |s| s,
+                };
+                const w_key = keyschedule.deriveLabel(.tls_aes_256_gcm_sha384, write_secret, "key", "", 32);
+                const r_key = keyschedule.deriveLabel(.tls_aes_256_gcm_sha384, read_secret, "key", "", 32);
+                const w_iv = keyschedule.deriveLabel(.tls_aes_256_gcm_sha384, write_secret, "iv", "", 12);
+                const r_iv = keyschedule.deriveLabel(.tls_aes_256_gcm_sha384, read_secret, "iv", "", 12);
+                @memcpy(self.app_write_key[0..32], &w_key);
+                @memcpy(self.app_read_key[0..32], &r_key);
+                @memcpy(self.app_write_iv[0..], &w_iv);
+                @memcpy(self.app_read_iv[0..], &r_iv);
+                self.app_key_len = 32;
+                self.latest_secret = self.app_write_secret;
+            },
+            .tls_chacha20_poly1305_sha256 => {
+                const write_secret = switch (self.app_write_secret.?) {
+                    .sha256 => |s| s,
+                    .sha384 => unreachable,
+                };
+                const read_secret = switch (self.app_read_secret.?) {
+                    .sha256 => |s| s,
+                    .sha384 => unreachable,
+                };
+                const w_key = keyschedule.deriveLabel(.tls_chacha20_poly1305_sha256, write_secret, "key", "", 32);
+                const r_key = keyschedule.deriveLabel(.tls_chacha20_poly1305_sha256, read_secret, "key", "", 32);
+                const w_iv = keyschedule.deriveLabel(.tls_chacha20_poly1305_sha256, write_secret, "iv", "", 12);
+                const r_iv = keyschedule.deriveLabel(.tls_chacha20_poly1305_sha256, read_secret, "iv", "", 12);
+                @memcpy(self.app_write_key[0..32], &w_key);
+                @memcpy(self.app_read_key[0..32], &r_key);
+                @memcpy(self.app_write_iv[0..], &w_iv);
+                @memcpy(self.app_read_iv[0..], &r_iv);
+                self.app_key_len = 32;
+                self.latest_secret = self.app_write_secret;
+            },
+        }
+        self.app_tag_len = 16;
+        self.app_write_seq = 0;
+        self.app_read_seq = 0;
+    }
+
+    fn ratchetReadTrafficSecret(self: *Engine) void {
+        const cur = self.app_read_secret orelse return;
+        self.app_read_secret = switch (self.config.suite) {
+            .tls_aes_128_gcm_sha256 => switch (cur) {
+                .sha256 => |secret| .{ .sha256 = keyschedule.deriveLabel(.tls_aes_128_gcm_sha256, secret, "traffic upd", "", 32) },
+                .sha384 => unreachable,
+            },
+            .tls_chacha20_poly1305_sha256 => switch (cur) {
+                .sha256 => |secret| .{ .sha256 = keyschedule.deriveLabel(.tls_chacha20_poly1305_sha256, secret, "traffic upd", "", 32) },
+                .sha384 => unreachable,
+            },
+            .tls_aes_256_gcm_sha384 => switch (cur) {
+                .sha256 => unreachable,
+                .sha384 => |secret| .{ .sha384 = keyschedule.deriveLabel(.tls_aes_256_gcm_sha384, secret, "traffic upd", "", 48) },
+            },
+        };
+        const read = self.app_read_secret.?;
+        switch (self.config.suite) {
+            .tls_aes_128_gcm_sha256 => {
+                const sec = switch (read) {
+                    .sha256 => |s| s,
+                    .sha384 => unreachable,
+                };
+                const key = keyschedule.deriveLabel(.tls_aes_128_gcm_sha256, sec, "key", "", 16);
+                const iv = keyschedule.deriveLabel(.tls_aes_128_gcm_sha256, sec, "iv", "", 12);
+                @memcpy(self.app_read_key[0..16], &key);
+                @memcpy(self.app_read_iv[0..], &iv);
+            },
+            .tls_aes_256_gcm_sha384 => {
+                const sec = switch (read) {
+                    .sha256 => unreachable,
+                    .sha384 => |s| s,
+                };
+                const key = keyschedule.deriveLabel(.tls_aes_256_gcm_sha384, sec, "key", "", 32);
+                const iv = keyschedule.deriveLabel(.tls_aes_256_gcm_sha384, sec, "iv", "", 12);
+                @memcpy(self.app_read_key[0..32], &key);
+                @memcpy(self.app_read_iv[0..], &iv);
+            },
+            .tls_chacha20_poly1305_sha256 => {
+                const sec = switch (read) {
+                    .sha256 => |s| s,
+                    .sha384 => unreachable,
+                };
+                const key = keyschedule.deriveLabel(.tls_chacha20_poly1305_sha256, sec, "key", "", 32);
+                const iv = keyschedule.deriveLabel(.tls_chacha20_poly1305_sha256, sec, "iv", "", 12);
+                @memcpy(self.app_read_key[0..32], &key);
+                @memcpy(self.app_read_iv[0..], &iv);
+            },
+        }
+        self.app_read_seq = 0;
+    }
+
+    fn ratchetWriteTrafficSecret(self: *Engine) void {
+        const cur = self.app_write_secret orelse return;
+        self.app_write_secret = switch (self.config.suite) {
+            .tls_aes_128_gcm_sha256 => switch (cur) {
+                .sha256 => |secret| .{ .sha256 = keyschedule.deriveLabel(.tls_aes_128_gcm_sha256, secret, "traffic upd", "", 32) },
+                .sha384 => unreachable,
+            },
+            .tls_chacha20_poly1305_sha256 => switch (cur) {
+                .sha256 => |secret| .{ .sha256 = keyschedule.deriveLabel(.tls_chacha20_poly1305_sha256, secret, "traffic upd", "", 32) },
+                .sha384 => unreachable,
+            },
+            .tls_aes_256_gcm_sha384 => switch (cur) {
+                .sha256 => unreachable,
+                .sha384 => |secret| .{ .sha384 = keyschedule.deriveLabel(.tls_aes_256_gcm_sha384, secret, "traffic upd", "", 48) },
+            },
+        };
+        const write = self.app_write_secret.?;
+        switch (self.config.suite) {
+            .tls_aes_128_gcm_sha256 => {
+                const sec = switch (write) {
+                    .sha256 => |s| s,
+                    .sha384 => unreachable,
+                };
+                const key = keyschedule.deriveLabel(.tls_aes_128_gcm_sha256, sec, "key", "", 16);
+                const iv = keyschedule.deriveLabel(.tls_aes_128_gcm_sha256, sec, "iv", "", 12);
+                @memcpy(self.app_write_key[0..16], &key);
+                @memcpy(self.app_write_iv[0..], &iv);
+            },
+            .tls_aes_256_gcm_sha384 => {
+                const sec = switch (write) {
+                    .sha256 => unreachable,
+                    .sha384 => |s| s,
+                };
+                const key = keyschedule.deriveLabel(.tls_aes_256_gcm_sha384, sec, "key", "", 32);
+                const iv = keyschedule.deriveLabel(.tls_aes_256_gcm_sha384, sec, "iv", "", 12);
+                @memcpy(self.app_write_key[0..32], &key);
+                @memcpy(self.app_write_iv[0..], &iv);
+            },
+            .tls_chacha20_poly1305_sha256 => {
+                const sec = switch (write) {
+                    .sha256 => |s| s,
+                    .sha384 => unreachable,
+                };
+                const key = keyschedule.deriveLabel(.tls_chacha20_poly1305_sha256, sec, "key", "", 32);
+                const iv = keyschedule.deriveLabel(.tls_chacha20_poly1305_sha256, sec, "iv", "", 12);
+                @memcpy(self.app_write_key[0..32], &key);
+                @memcpy(self.app_write_iv[0..], &iv);
+            },
+        }
+        self.app_write_seq = 0;
+        self.latest_secret = self.app_write_secret;
+        self.emitDebugKeyLog(self.keylogNextLabel());
+    }
+
+    fn zeroizeApplicationTrafficState(self: *Engine) void {
+        std.crypto.secureZero(u8, self.app_write_key[0..]);
+        std.crypto.secureZero(u8, self.app_read_key[0..]);
+        std.crypto.secureZero(u8, self.app_write_iv[0..]);
+        std.crypto.secureZero(u8, self.app_read_iv[0..]);
+        self.app_write_secret = null;
+        self.app_read_secret = null;
+        self.app_key_len = 0;
+        self.app_tag_len = 16;
+        self.app_read_seq = 0;
+        self.app_write_seq = 0;
+    }
+
+    fn zeroizeHandshakeTrafficState(self: *Engine) void {
+        std.crypto.secureZero(u8, self.hs_write_key[0..]);
+        std.crypto.secureZero(u8, self.hs_read_key[0..]);
+        std.crypto.secureZero(u8, self.hs_write_iv[0..]);
+        std.crypto.secureZero(u8, self.hs_read_iv[0..]);
+        self.hs_key_len = 0;
+        self.hs_tag_len = 16;
+        self.hs_write_seq = 0;
+        self.hs_read_seq = 0;
     }
 
     fn transcriptDigestSha256(self: *Engine) [32]u8 {
@@ -483,6 +1381,18 @@ pub const Engine = struct {
         var digest: [48]u8 = undefined;
         var h = hasher;
         h.final(&digest);
+        return digest;
+    }
+
+    fn emptyTranscriptHashSha256() [32]u8 {
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash("", &digest, .{});
+        return digest;
+    }
+
+    fn emptyTranscriptHashSha384() [48]u8 {
+        var digest: [48]u8 = undefined;
+        std.crypto.hash.sha2.Sha384.hash("", &digest, .{});
         return digest;
     }
 
@@ -551,8 +1461,37 @@ pub const Engine = struct {
 
     fn zeroizeStagedSecrets(self: *Engine) void {
         self.zeroizeSecretSlot(&self.early_secret);
-        self.zeroizeSecretSlot(&self.handshake_secret);
+        self.zeroizeSecretSlot(&self.handshake_read_secret);
+        self.zeroizeSecretSlot(&self.handshake_write_secret);
         self.zeroizeSecretSlot(&self.master_secret);
+    }
+
+    fn zeroizeKeyExchangeSecret(self: *Engine) void {
+        if (self.key_exchange_secret) |*secret| {
+            std.crypto.secureZero(u8, secret[0..]);
+            self.key_exchange_secret = null;
+        }
+    }
+
+    fn zeroizeClientEphemeralState(self: *Engine) void {
+        if (self.client_x25519_secret_key) |*secret| {
+            std.crypto.secureZero(u8, secret[0..]);
+            self.client_x25519_secret_key = null;
+        }
+    }
+
+    fn clearPeerLeafCertificate(self: *Engine) void {
+        if (self.peer_leaf_certificate_der) |der| {
+            std.crypto.secureZero(u8, der);
+            self.allocator.free(der);
+            self.peer_leaf_certificate_der = null;
+        }
+        self.saw_peer_certificate = false;
+    }
+
+    fn nowUnix(self: Engine) i64 {
+        if (self.config.peer_validation.now_unix) |f| return f();
+        return std.time.timestamp();
     }
 
     fn zeroizeSecretSlot(self: *Engine, slot: *?TrafficSecret) void {
@@ -564,6 +1503,234 @@ pub const Engine = struct {
             }
             slot.* = null;
         }
+    }
+
+    fn capturePeerLeafCertificate(self: *Engine, cert: messages.CertificateMsg) EngineError!void {
+        if (cert.entries.len == 0) return error.InvalidCertificateMessage;
+        self.clearPeerLeafCertificate();
+        self.peer_leaf_certificate_der = try self.allocator.dupe(u8, cert.entries[0].cert_data);
+        self.saw_peer_certificate = true;
+    }
+
+    fn validatePeerCertificatePolicy(self: *Engine, cert_msg: messages.CertificateMsg) EngineError!void {
+        const has_name_policy = self.config.role == .client and self.config.peer_validation.expected_server_name != null;
+        const has_trust_policy = self.config.peer_validation.trust_store != null;
+        const has_ocsp_policy = self.config.peer_validation.enforce_ocsp;
+        if (!has_name_policy and !has_trust_policy and !has_ocsp_policy) return;
+
+        if (cert_msg.entries.len == 0) return error.MissingPeerCertificate;
+        if (cert_msg.entries.len > max_peer_chain_depth) return error.PeerCertificateValidationFailed;
+
+        var parsed_chain: [max_peer_chain_depth]std.crypto.Certificate.Parsed = undefined;
+        var cert_chain: [max_peer_chain_depth]std.crypto.Certificate = undefined;
+        for (cert_msg.entries, 0..) |entry, i| {
+            if (!isLikelyDerSequence(entry.cert_data)) return error.PeerCertificateValidationFailed;
+            cert_chain[i] = .{ .buffer = entry.cert_data, .index = 0 };
+            parsed_chain[i] = cert_chain[i].parse() catch return error.PeerCertificateValidationFailed;
+        }
+
+        const now = self.nowUnix();
+        if (cert_msg.entries.len > 1) {
+            var idx: usize = 0;
+            while (idx + 1 < cert_msg.entries.len) : (idx += 1) {
+                parsed_chain[idx].verify(parsed_chain[idx + 1], now) catch return error.PeerCertificateValidationFailed;
+            }
+        }
+
+        if (self.config.peer_validation.expected_server_name) |expected_server_name| {
+            parsed_chain[0].verifyHostName(expected_server_name) catch return error.PeerCertificateValidationFailed;
+        }
+        if (self.config.peer_validation.trust_store) |store| {
+            var trusted = false;
+            var rev_index = cert_msg.entries.len;
+            while (rev_index > 0) : (rev_index -= 1) {
+                const parsed = parsed_chain[rev_index - 1];
+                store.verifyParsed(parsed, now) catch continue;
+                trusted = true;
+                break;
+            }
+            if (!trusted) return error.PeerCertificateValidationFailed;
+        }
+        if (self.config.peer_validation.enforce_ocsp) {
+            _ = certificate_validation.validateStapledOcsp(
+                self.config.peer_validation.stapled_ocsp,
+                now,
+                .{
+                    .allow_soft_fail_ocsp = self.config.peer_validation.allow_soft_fail_ocsp,
+                },
+            ) catch return error.PeerCertificateValidationFailed;
+        }
+    }
+
+    fn peerCertificateIsRequired(self: Engine) bool {
+        if (self.config.peer_validation.require_peer_certificate) return true;
+        if (self.config.peer_validation.trust_store != null) return true;
+        if (self.config.peer_validation.enforce_ocsp) return true;
+        return false;
+    }
+
+    fn verifyPeerCertificateVerify(self: *Engine, algorithm: u16, signature: []const u8) EngineError!void {
+        const leaf_der = self.peer_leaf_certificate_der orelse return error.MissingPeerCertificate;
+        if (!isLikelyDerSequence(leaf_der)) return error.InvalidCertificateVerifyMessage;
+        const cert: std.crypto.Certificate = .{ .buffer = leaf_der, .index = 0 };
+        const parsed = cert.parse() catch return error.InvalidCertificateVerifyMessage;
+        const payload = try self.buildCertificateVerifyPayload(.peer);
+        defer self.allocator.free(payload);
+
+        switch (algorithm) {
+            0x0403, 0x0503 => try self.verifyEcdsaCertificateVerify(parsed, payload, signature, algorithm),
+            0x0804, 0x0805, 0x0806 => try self.verifyRsaPssCertificateVerify(parsed, payload, signature, algorithm),
+            0x0807 => try self.verifyEd25519CertificateVerify(parsed, payload, signature),
+            else => return error.UnsupportedSignatureAlgorithm,
+        }
+    }
+
+    const CertificateVerifyPerspective = enum {
+        local,
+        peer,
+    };
+
+    fn buildCertificateVerifyPayload(self: *Engine, perspective: CertificateVerifyPerspective) EngineError![]u8 {
+        const local_context = switch (self.config.role) {
+            .client => "TLS 1.3, client CertificateVerify",
+            .server => "TLS 1.3, server CertificateVerify",
+        };
+        const peer_context = switch (self.config.role) {
+            .client => "TLS 1.3, server CertificateVerify",
+            .server => "TLS 1.3, client CertificateVerify",
+        };
+        const context = switch (perspective) {
+            .local => local_context,
+            .peer => peer_context,
+        };
+
+        var digest_256: [32]u8 = undefined;
+        var digest_384: [48]u8 = undefined;
+        const digest = switch (self.config.suite) {
+            .tls_aes_128_gcm_sha256, .tls_chacha20_poly1305_sha256 => blk: {
+                digest_256 = self.transcriptDigestSha256();
+                break :blk digest_256[0..];
+            },
+            .tls_aes_256_gcm_sha384 => blk: {
+                digest_384 = self.transcriptDigestSha384();
+                break :blk digest_384[0..];
+            },
+        };
+
+        const out_len = 64 + context.len + 1 + digest.len;
+        var out = try self.allocator.alloc(u8, out_len);
+        @memset(out[0..64], 0x20);
+        @memcpy(out[64 .. 64 + context.len], context);
+        out[64 + context.len] = 0x00;
+        @memcpy(out[65 + context.len ..], digest);
+        return out;
+    }
+
+    fn verifyEd25519CertificateVerify(
+        self: *Engine,
+        parsed: std.crypto.Certificate.Parsed,
+        payload: []const u8,
+        signature: []const u8,
+    ) EngineError!void {
+        _ = self;
+        const Ed25519 = std.crypto.sign.Ed25519;
+        if (parsed.pub_key_algo != .curveEd25519) return error.UnsupportedSignatureAlgorithm;
+        if (signature.len != Ed25519.Signature.encoded_length) return error.InvalidCertificateVerifyMessage;
+        const sig = Ed25519.Signature.fromBytes(signature[0..Ed25519.Signature.encoded_length].*);
+        const peer_pub = parsed.pubKey();
+        if (peer_pub.len != Ed25519.PublicKey.encoded_length) return error.InvalidCertificateVerifyMessage;
+        const pub_key = Ed25519.PublicKey.fromBytes(peer_pub[0..Ed25519.PublicKey.encoded_length].*) catch {
+            return error.InvalidCertificateVerifyMessage;
+        };
+        sig.verify(payload, pub_key) catch return error.InvalidCertificateVerifyMessage;
+    }
+
+    fn verifyEcdsaCertificateVerify(
+        self: *Engine,
+        parsed: std.crypto.Certificate.Parsed,
+        payload: []const u8,
+        signature: []const u8,
+        algorithm: u16,
+    ) EngineError!void {
+        _ = self;
+        const curve = switch (parsed.pub_key_algo) {
+            .X9_62_id_ecPublicKey => |c| c,
+            else => return error.UnsupportedSignatureAlgorithm,
+        };
+        const pub_key_bytes = parsed.pubKey();
+
+        switch (algorithm) {
+            0x0403 => {
+                if (curve != .X9_62_prime256v1) return error.UnsupportedSignatureAlgorithm;
+                const Ecdsa = std.crypto.sign.ecdsa.Ecdsa(std.crypto.ecc.P256, std.crypto.hash.sha2.Sha256);
+                const sig = Ecdsa.Signature.fromDer(signature) catch return error.InvalidCertificateVerifyMessage;
+                const pub_key = Ecdsa.PublicKey.fromSec1(pub_key_bytes) catch return error.InvalidCertificateVerifyMessage;
+                var verifier = sig.verifier(pub_key) catch return error.InvalidCertificateVerifyMessage;
+                verifier.update(payload);
+                verifier.verify() catch return error.InvalidCertificateVerifyMessage;
+            },
+            0x0503 => {
+                if (curve != .secp384r1) return error.UnsupportedSignatureAlgorithm;
+                const Ecdsa = std.crypto.sign.ecdsa.Ecdsa(std.crypto.ecc.P384, std.crypto.hash.sha2.Sha384);
+                const sig = Ecdsa.Signature.fromDer(signature) catch return error.InvalidCertificateVerifyMessage;
+                const pub_key = Ecdsa.PublicKey.fromSec1(pub_key_bytes) catch return error.InvalidCertificateVerifyMessage;
+                var verifier = sig.verifier(pub_key) catch return error.InvalidCertificateVerifyMessage;
+                verifier.update(payload);
+                verifier.verify() catch return error.InvalidCertificateVerifyMessage;
+            },
+            else => return error.UnsupportedSignatureAlgorithm,
+        }
+    }
+
+    fn verifyRsaPssCertificateVerify(
+        self: *Engine,
+        parsed: std.crypto.Certificate.Parsed,
+        payload: []const u8,
+        signature: []const u8,
+        algorithm: u16,
+    ) EngineError!void {
+        _ = self;
+        switch (parsed.pub_key_algo) {
+            .rsaEncryption, .rsassa_pss => {},
+            else => return error.UnsupportedSignatureAlgorithm,
+        }
+
+        const Rsa = std.crypto.Certificate.rsa;
+        const components = Rsa.PublicKey.parseDer(parsed.pubKey()) catch return error.InvalidCertificateVerifyMessage;
+        const key = Rsa.PublicKey.fromBytes(components.exponent, components.modulus) catch return error.InvalidCertificateVerifyMessage;
+
+        switch (components.modulus.len) {
+            inline 128, 256, 384, 512 => |modulus_len| {
+                if (signature.len != modulus_len) return error.InvalidCertificateVerifyMessage;
+                const sig = Rsa.PSSSignature.fromBytes(modulus_len, signature);
+                switch (algorithm) {
+                    0x0804 => Rsa.PSSSignature.concatVerify(modulus_len, sig, &.{payload}, key, std.crypto.hash.sha2.Sha256) catch return error.InvalidCertificateVerifyMessage,
+                    0x0805 => Rsa.PSSSignature.concatVerify(modulus_len, sig, &.{payload}, key, std.crypto.hash.sha2.Sha384) catch return error.InvalidCertificateVerifyMessage,
+                    0x0806 => Rsa.PSSSignature.concatVerify(modulus_len, sig, &.{payload}, key, std.crypto.hash.sha2.Sha512) catch return error.InvalidCertificateVerifyMessage,
+                    else => return error.UnsupportedSignatureAlgorithm,
+                }
+            },
+            else => return error.InvalidCertificateVerifyMessage,
+        }
+    }
+
+    fn isLikelyDerSequence(der: []const u8) bool {
+        if (der.len < 2) return false;
+        if (der[0] != 0x30) return false;
+        const len_octet = der[1];
+        if ((len_octet & 0x80) == 0) {
+            return der.len == 2 + @as(usize, len_octet);
+        }
+        const len_len = len_octet & 0x7f;
+        if (len_len == 0 or len_len > 4) return false;
+        const len_len_usize = @as(usize, len_len);
+        if (der.len < 2 + len_len_usize) return false;
+        var declared_len: usize = 0;
+        var i: usize = 0;
+        while (i < len_len_usize) : (i += 1) {
+            declared_len = (declared_len << 8) | der[2 + i];
+        }
+        return der.len == 2 + len_len_usize + declared_len;
     }
 
     fn validateHandshakeBody(self: *Engine, handshake_type: state.HandshakeType, body: []const u8) EngineError!void {
@@ -583,6 +1750,7 @@ pub const Engine = struct {
                         try self.requireHrrExtensions(sh.extensions);
                     } else {
                         try self.requireServerHelloExtensions(sh.extensions);
+                        try self.bindClientKeyExchangeSecret(sh.extensions);
                     }
                 }
             },
@@ -599,6 +1767,8 @@ pub const Engine = struct {
             .certificate => {
                 var cert = messages.CertificateMsg.decode(self.allocator, body) catch return error.InvalidCertificateMessage;
                 defer cert.deinit(self.allocator);
+                try self.capturePeerLeafCertificate(cert);
+                try self.validatePeerCertificatePolicy(cert);
             },
             .certificate_verify => {
                 var cert_verify = messages.CertificateVerifyMsg.decode(self.allocator, body) catch return error.InvalidCertificateVerifyMessage;
@@ -606,10 +1776,46 @@ pub const Engine = struct {
                 if (!self.isAllowedSignatureAlgorithm(cert_verify.algorithm)) {
                     return error.UnsupportedSignatureAlgorithm;
                 }
+                if (self.config.peer_validation.enforce_certificate_verify) {
+                    try self.verifyPeerCertificateVerify(cert_verify.algorithm, cert_verify.signature);
+                }
             },
             .finished => {
                 if (body.len != keyschedule.digestLen(self.config.suite)) {
                     return error.InvalidFinishedMessage;
+                }
+                if (self.config.role == .server and self.peerCertificateIsRequired() and !self.saw_peer_certificate) {
+                    return error.MissingPeerCertificate;
+                }
+                if (self.config.role == .server and self.config.server_credentials != null and self.handshake_read_secret != null) {
+                    const hs_secret = self.handshake_read_secret.?;
+                    const ok = switch (self.config.suite) {
+                        .tls_aes_128_gcm_sha256 => switch (hs_secret) {
+                            .sha256 => |secret| blk: {
+                                const transcript_hash = self.transcriptDigestSha256();
+                                const fin_key = keyschedule.finishedKey(.tls_aes_128_gcm_sha256, secret);
+                                break :blk keyschedule.verifyFinished(.tls_aes_128_gcm_sha256, fin_key, &transcript_hash, body);
+                            },
+                            .sha384 => false,
+                        },
+                        .tls_chacha20_poly1305_sha256 => switch (hs_secret) {
+                            .sha256 => |secret| blk: {
+                                const transcript_hash = self.transcriptDigestSha256();
+                                const fin_key = keyschedule.finishedKey(.tls_chacha20_poly1305_sha256, secret);
+                                break :blk keyschedule.verifyFinished(.tls_chacha20_poly1305_sha256, fin_key, &transcript_hash, body);
+                            },
+                            .sha384 => false,
+                        },
+                        .tls_aes_256_gcm_sha384 => switch (hs_secret) {
+                            .sha256 => false,
+                            .sha384 => |secret| blk: {
+                                const transcript_hash = self.transcriptDigestSha384();
+                                const fin_key = keyschedule.finishedKey(.tls_aes_256_gcm_sha384, secret);
+                                break :blk keyschedule.verifyFinished(.tls_aes_256_gcm_sha384, fin_key, &transcript_hash, body);
+                            },
+                        },
+                    };
+                    if (!ok) return error.InvalidFinishedMessage;
                 }
             },
             .encrypted_extensions => {
@@ -641,8 +1847,9 @@ pub const Engine = struct {
         const key_share = findExtensionData(extensions, ext_key_share) orelse return error.MissingRequiredClientHelloExtension;
         try validateClientHelloKeyShareExtension(key_share);
         try validateClientHelloKeyShareGroupsSubset(key_share, supported_groups, self.config.group_policy);
-        const alpn = findExtensionData(extensions, ext_alpn) orelse return error.MissingRequiredClientHelloExtension;
-        try validateClientHelloAlpnExtension(alpn);
+        if (findExtensionData(extensions, ext_alpn)) |alpn| {
+            try validateClientHelloAlpnExtension(alpn);
+        }
         if (!isStrictTls13LegacyCompressionVector(compression_methods)) return error.InvalidCompressionMethod;
         try validatePskOfferExtensions(extensions, self.config.suite);
     }
@@ -658,6 +1865,23 @@ pub const Engine = struct {
         }
     }
 
+    fn bindClientKeyExchangeSecret(self: *Engine, extensions: []const messages.Extension) EngineError!void {
+        if (self.config.role != .client) return;
+        const key_share = findExtensionData(extensions, ext_key_share) orelse return error.MissingRequiredServerHelloExtension;
+        if (key_share.len != 36) return error.InvalidKeyShareExtension;
+        const group = @as(u16, @intCast(readU16(key_share[0..2])));
+        if (group != named_group_x25519) return error.InvalidKeyShareExtension;
+        const key_len = readU16(key_share[2..4]);
+        if (key_len != 32) return error.InvalidKeyShareExtension;
+        const client_secret = self.client_x25519_secret_key orelse return error.MissingKeyExchangeSecret;
+
+        var server_pub: [32]u8 = undefined;
+        @memcpy(&server_pub, key_share[4..36]);
+        const shared = std.crypto.dh.X25519.scalarmult(client_secret, server_pub) catch return error.InvalidKeyShareExtension;
+        self.key_exchange_secret = shared;
+        self.zeroizeClientEphemeralState();
+    }
+
     fn requireHrrExtensions(self: Engine, extensions: []const messages.Extension) EngineError!void {
         try requireAllowedExtensions(extensions, &.{ ext_supported_versions, ext_key_share, ext_cookie }, error.UnexpectedHrrExtension);
         const supported_versions = findExtensionData(extensions, ext_supported_versions) orelse return error.MissingRequiredHrrExtension;
@@ -669,6 +1893,17 @@ pub const Engine = struct {
         }
     }
 };
+
+fn buildTls13Nonce(base_iv: [12]u8, seq: u64) [12]u8 {
+    var nonce = base_iv;
+    var seq_bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, &seq_bytes, seq, .big);
+    var i: usize = 0;
+    while (i < seq_bytes.len) : (i += 1) {
+        nonce[nonce.len - seq_bytes.len + i] ^= seq_bytes[i];
+    }
+    return nonce;
+}
 
 pub fn estimatedConnectionMemoryCeiling(config: Config) usize {
     const ticket_cap: usize = if (config.early_data.enabled) config.early_data.max_ticket_len else 0;
@@ -707,6 +1942,7 @@ pub fn classifyErrorAlert(err: anyerror) alerts.Alert {
         error.InvalidPskBinderLength,
         error.PskBinderCountMismatch,
         error.UnsupportedSignatureAlgorithm,
+        error.InvalidInnerContentType,
         error.InvalidRequest,
         => .illegal_parameter,
 
@@ -714,7 +1950,15 @@ pub fn classifyErrorAlert(err: anyerror) alerts.Alert {
         error.MissingReplayFilter,
         error.EarlyDataTicketExpired,
         error.EarlyDataTicketTooLarge,
+        error.MissingServerCredentials,
+        error.MissingKeyExchangeSecret,
         => .handshake_failure,
+
+        error.MissingPeerCertificate => .certificate_required,
+        error.PeerCertificateValidationFailed => .bad_certificate,
+
+        error.DecryptFailed,
+        => .decrypt_error,
 
         error.InvalidDescription,
         error.InvalidLevel,
@@ -823,6 +2067,19 @@ test "validateConfig rejects debug keylog without callback" {
     }));
 }
 
+test "validateConfig rejects server credential signature scheme outside allowed policy" {
+    try std.testing.expectError(error.InvalidConfiguration, validateConfig(.{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+        .allowed_signature_algorithms = &.{0x0807},
+        .server_credentials = .{
+            .cert_chain_der = &test_server_cert_chain,
+            .signature_scheme = 0x0804,
+            .sign_certificate_verify = testSignCertificateVerify,
+        },
+    }));
+}
+
 test "initChecked returns explicit invalid configuration error" {
     try std.testing.expectError(error.InvalidConfiguration, Engine.initChecked(std.testing.allocator, .{
         .role = .server,
@@ -854,12 +2111,14 @@ test "zeroize staged secrets clears stage slots" {
 
     const secret = [_]u8{0xaa} ** 32;
     engine.early_secret = .{ .sha256 = secret };
-    engine.handshake_secret = .{ .sha256 = secret };
+    engine.handshake_read_secret = .{ .sha256 = secret };
+    engine.handshake_write_secret = .{ .sha256 = secret };
     engine.master_secret = .{ .sha256 = secret };
     engine.zeroizeStagedSecrets();
 
     try std.testing.expect(engine.early_secret == null);
-    try std.testing.expect(engine.handshake_secret == null);
+    try std.testing.expect(engine.handshake_read_secret == null);
+    try std.testing.expect(engine.handshake_write_secret == null);
     try std.testing.expect(engine.master_secret == null);
 }
 
@@ -901,7 +2160,7 @@ test "debug keylog callback fires when enabled in debug mode" {
     });
     defer engine.deinit();
 
-    _ = try engine.ingestRecord(&serverHelloRecord());
+    try ingestValidServerHelloForClient(&engine);
     _ = try engine.ingestRecord(&encryptedExtensionsRecord());
     _ = try engine.ingestRecord(&finishedRecord());
 
@@ -935,7 +2194,7 @@ test "debug keylog callback is suppressed when disabled" {
     });
     defer engine.deinit();
 
-    _ = try engine.ingestRecord(&serverHelloRecord());
+    try ingestValidServerHelloForClient(&engine);
     _ = try engine.ingestRecord(&encryptedExtensionsRecord());
     _ = try engine.ingestRecord(&finishedRecord());
     try std.testing.expect(!tracker.called);
@@ -958,14 +2217,17 @@ test "debug keylog callback uses server label in server role" {
     var engine = Engine.init(std.testing.allocator, .{
         .role = .server,
         .suite = .tls_aes_128_gcm_sha256,
+        .server_credentials = testServerCredentials(),
         .enable_debug_keylog = true,
         .keylog_callback = Hooks.onKeyLog,
         .keylog_userdata = @intFromPtr(&tracker),
     });
     defer engine.deinit();
 
-    _ = try engine.ingestRecord(&clientHelloRecord());
-    _ = try engine.ingestRecord(&finishedRecord());
+    try ingestValidClientHelloForServer(&engine);
+    const fin = try validFinishedRecordForServer(&engine, std.testing.allocator);
+    defer std.testing.allocator.free(fin);
+    _ = try engine.ingestRecord(fin);
 
     if (builtin.mode == .Debug) {
         try std.testing.expect(tracker.called);
@@ -1024,6 +2286,35 @@ fn indexOfExtension(extensions: []const messages.Extension, extension_type: u16)
     return null;
 }
 
+fn isIgnorableTls13ChangeCipherSpec(payload: []const u8) bool {
+    return payload.len == 1 and payload[0] == 0x01;
+}
+
+fn extractClientHelloX25519Public(extensions: []const messages.Extension) ![32]u8 {
+    const key_share = findExtensionData(extensions, ext_key_share) orelse return error.MissingRequiredClientHelloExtension;
+    if (key_share.len < 2) return error.InvalidKeyShareExtension;
+    const vec_len = readU16(key_share[0..2]);
+    if (vec_len + 2 != key_share.len) return error.InvalidKeyShareExtension;
+
+    var i: usize = 2;
+    const end = key_share.len;
+    while (i < end) {
+        if (i + 4 > end) return error.InvalidKeyShareExtension;
+        const group = @as(u16, @intCast(readU16(key_share[i .. i + 2])));
+        const key_len = readU16(key_share[i + 2 .. i + 4]);
+        i += 4;
+        if (i + key_len > end) return error.InvalidKeyShareExtension;
+        if (group == named_group_x25519) {
+            if (key_len != 32) return error.InvalidKeyShareExtension;
+            var out: [32]u8 = undefined;
+            @memcpy(&out, key_share[i .. i + key_len]);
+            return out;
+        }
+        i += key_len;
+    }
+    return error.InvalidKeyShareExtension;
+}
+
 fn validateClientHelloServerNameExtension(data: []const u8) EngineError!void {
     if (data.len < 5) return error.InvalidServerNameExtension;
     const list_len = readU16(data[0..2]);
@@ -1055,17 +2346,21 @@ fn validateClientHelloAlpnExtension(data: []const u8) EngineError!void {
     if (i != end) return error.InvalidAlpnExtension;
 }
 
+fn firstClientHelloAlpnProtocol(data: []const u8) EngineError![]const u8 {
+    try validateClientHelloAlpnExtension(data);
+    const first_len = data[2];
+    if (first_len == 0) return error.InvalidAlpnExtension;
+    if (3 + first_len > data.len) return error.InvalidAlpnExtension;
+    return data[3 .. 3 + first_len];
+}
+
 fn validateClientHelloSupportedGroupsExtension(data: []const u8, policy: GroupPolicy) EngineError!void {
+    _ = policy;
     if (data.len < 2) return error.InvalidSupportedGroupsExtension;
     const list_len = readU16(data[0..2]);
     if (list_len == 0) return error.InvalidSupportedGroupsExtension;
     if (list_len % 2 != 0) return error.InvalidSupportedGroupsExtension;
     if (list_len + 2 != data.len) return error.InvalidSupportedGroupsExtension;
-    var i: usize = 2;
-    while (i < data.len) : (i += 2) {
-        const group = @as(u16, @intCast(readU16(data[i .. i + 2])));
-        if (!groupAllowedByPolicy(policy, group)) return error.InvalidSupportedGroupsExtension;
-    }
 }
 
 fn validateClientHelloKeyShareExtension(data: []const u8) EngineError!void {
@@ -1119,11 +2414,11 @@ fn validateClientHelloKeyShareGroupsSubset(
     supported_groups_data: []const u8,
     policy: GroupPolicy,
 ) EngineError!void {
+    _ = policy;
     var i: usize = 2;
     const end = key_share_data.len;
     while (i < end) {
         const group = @as(u16, @intCast(readU16(key_share_data[i .. i + 2])));
-        if (!groupAllowedByPolicy(policy, group)) return error.InvalidKeyShareExtension;
         if (!supportedGroupsContain(supported_groups_data, group)) return error.InvalidKeyShareExtension;
         const key_len = readU16(key_share_data[i + 2 .. i + 4]);
         i += 4 + key_len;
@@ -1259,6 +2554,42 @@ fn serverHelloRecord() [63]u8 {
     return frame;
 }
 
+fn serverHelloRecordWithX25519Public(allocator: std.mem.Allocator, suite: u16, public: [32]u8) ![]u8 {
+    var exts = try allocator.alloc(messages.Extension, 2);
+    errdefer allocator.free(exts);
+
+    const versions = try allocator.dupe(u8, &.{ 0x03, 0x04 });
+    var key_share = try allocator.alloc(u8, 2 + 2 + public.len);
+    std.mem.writeInt(u16, key_share[0..2], named_group_x25519, .big);
+    std.mem.writeInt(u16, key_share[2..4], @as(u16, @intCast(public.len)), .big);
+    @memcpy(key_share[4..], &public);
+
+    exts[0] = .{ .extension_type = ext_supported_versions, .data = versions };
+    exts[1] = .{ .extension_type = ext_key_share, .data = key_share };
+
+    var hello = messages.ServerHello{
+        .random = [_]u8{0x11} ** 32,
+        .session_id_echo = try allocator.dupe(u8, ""),
+        .cipher_suite = suite,
+        .compression_method = 0x00,
+        .extensions = exts,
+    };
+    defer hello.deinit(allocator);
+
+    const body = try hello.encode(allocator);
+    defer allocator.free(body);
+
+    var out = try allocator.alloc(u8, 5 + 4 + body.len);
+    out[0] = @intFromEnum(record.ContentType.handshake);
+    std.mem.writeInt(u16, out[1..3], record.tls_legacy_record_version, .big);
+    std.mem.writeInt(u16, out[3..5], @as(u16, @intCast(4 + body.len)), .big);
+    out[5] = @intFromEnum(state.HandshakeType.server_hello);
+    const hs_len = handshake.writeU24(@as(u24, @intCast(body.len)));
+    @memcpy(out[6..9], &hs_len);
+    @memcpy(out[9..], body);
+    return out;
+}
+
 fn clientHelloRecord() [101]u8 {
     // ClientHello body length:
     // base(43) + extensions(49) = 92
@@ -1337,6 +2668,63 @@ fn clientHelloRecord() [101]u8 {
     frame[99] = 'h';
     frame[100] = '2';
     return frame;
+}
+
+fn clientHelloRecordWithX25519Public(allocator: std.mem.Allocator, public: [32]u8) ![]u8 {
+    var exts = try allocator.alloc(messages.Extension, 5);
+    errdefer allocator.free(exts);
+
+    const sni = try allocator.dupe(u8, &.{
+        0x00, 0x08, 0x00, 0x00, 0x05, 'a', '.', 'c', 'o', 'm',
+    });
+    const versions = try allocator.dupe(u8, &.{ 0x02, 0x03, 0x04 });
+    const groups = try allocator.dupe(u8, &.{ 0x00, 0x02, 0x00, 0x1d });
+    var key_share = try allocator.alloc(u8, 2 + 2 + 2 + public.len);
+    std.mem.writeInt(u16, key_share[0..2], @as(u16, @intCast(2 + 2 + public.len)), .big);
+    std.mem.writeInt(u16, key_share[2..4], named_group_x25519, .big);
+    std.mem.writeInt(u16, key_share[4..6], @as(u16, @intCast(public.len)), .big);
+    @memcpy(key_share[6..], &public);
+    const alpn = try allocator.dupe(u8, &.{ 0x00, 0x03, 0x02, 'h', '2' });
+
+    exts[0] = .{ .extension_type = ext_server_name, .data = sni };
+    exts[1] = .{ .extension_type = ext_supported_versions, .data = versions };
+    exts[2] = .{ .extension_type = ext_supported_groups, .data = groups };
+    exts[3] = .{ .extension_type = ext_key_share, .data = key_share };
+    exts[4] = .{ .extension_type = ext_alpn, .data = alpn };
+
+    var hello = messages.ClientHello{
+        .random = [_]u8{0x22} ** 32,
+        .session_id = try allocator.dupe(u8, ""),
+        .cipher_suites = try allocator.dupe(u16, &.{0x1301}),
+        .compression_methods = try allocator.dupe(u8, &.{0x00}),
+        .extensions = exts,
+    };
+    defer hello.deinit(allocator);
+
+    const body = try hello.encode(allocator);
+    defer allocator.free(body);
+
+    var out = try allocator.alloc(u8, 5 + 4 + body.len);
+    out[0] = @intFromEnum(record.ContentType.handshake);
+    std.mem.writeInt(u16, out[1..3], record.tls_legacy_record_version, .big);
+    std.mem.writeInt(u16, out[3..5], @as(u16, @intCast(4 + body.len)), .big);
+    out[5] = @intFromEnum(state.HandshakeType.client_hello);
+    const hs_len = handshake.writeU24(@as(u24, @intCast(body.len)));
+    @memcpy(out[6..9], &hs_len);
+    @memcpy(out[9..], body);
+    return out;
+}
+
+fn finishedRecordFromBody(allocator: std.mem.Allocator, body: []const u8) ![]u8 {
+    var out = try allocator.alloc(u8, 5 + 4 + body.len);
+    out[0] = @intFromEnum(record.ContentType.handshake);
+    std.mem.writeInt(u16, out[1..3], record.tls_legacy_record_version, .big);
+    std.mem.writeInt(u16, out[3..5], @as(u16, @intCast(4 + body.len)), .big);
+    out[5] = @intFromEnum(state.HandshakeType.finished);
+    const hs_len = handshake.writeU24(@as(u24, @intCast(body.len)));
+    @memcpy(out[6..9], &hs_len);
+    @memcpy(out[9..], body);
+    return out;
 }
 
 fn serverHelloRecordWithoutKeyShare() [63]u8 {
@@ -1442,39 +2830,47 @@ fn serverHelloRecordWithLegacyDowngradeMarker() [63]u8 {
     return frame;
 }
 
-fn serverHelloRecordWithShiftedDowngradeLikeBytes() [63]u8 {
-    var frame = serverHelloRecord();
-    // DOWNGRD-like bytes shifted left by one: not a valid tail marker.
-    frame[34] = 0x44;
-    frame[35] = 0x4f;
-    frame[36] = 0x57;
-    frame[37] = 0x4e;
-    frame[38] = 0x47;
-    frame[39] = 0x52;
-    frame[40] = 0x44;
-    frame[41] = 0x01;
-    return frame;
-}
+fn clientHelloRecordWithoutAlpn(allocator: std.mem.Allocator, public: [32]u8) ![]u8 {
+    var exts = try allocator.alloc(messages.Extension, 4);
+    errdefer allocator.free(exts);
 
-fn serverHelloRecordWithNearMatchDowngradeTail() [63]u8 {
-    var frame = serverHelloRecord();
-    // Tail marker with one-byte mismatch must not be treated as downgrade sentinel.
-    frame[35] = 0x44;
-    frame[36] = 0x4f;
-    frame[37] = 0x57;
-    frame[38] = 0x4e;
-    frame[39] = 0x47;
-    frame[40] = 0x52;
-    frame[41] = 0x44;
-    frame[42] = 0x02;
-    return frame;
-}
+    const sni = try allocator.dupe(u8, &.{
+        0x00, 0x08, 0x00, 0x00, 0x05, 'a', '.', 'c', 'o', 'm',
+    });
+    const versions = try allocator.dupe(u8, &.{ 0x02, 0x03, 0x04 });
+    const groups = try allocator.dupe(u8, &.{ 0x00, 0x02, 0x00, 0x1d });
+    var key_share = try allocator.alloc(u8, 2 + 2 + 2 + public.len);
+    std.mem.writeInt(u16, key_share[0..2], @as(u16, @intCast(2 + 2 + public.len)), .big);
+    std.mem.writeInt(u16, key_share[2..4], named_group_x25519, .big);
+    std.mem.writeInt(u16, key_share[4..6], @as(u16, @intCast(public.len)), .big);
+    @memcpy(key_share[6..], &public);
 
-fn clientHelloRecordWithoutAlpn() [101]u8 {
-    var frame = clientHelloRecord();
-    frame[92] = 0xff;
-    frame[93] = 0xfe;
-    return frame;
+    exts[0] = .{ .extension_type = ext_server_name, .data = sni };
+    exts[1] = .{ .extension_type = ext_supported_versions, .data = versions };
+    exts[2] = .{ .extension_type = ext_supported_groups, .data = groups };
+    exts[3] = .{ .extension_type = ext_key_share, .data = key_share };
+
+    var hello = messages.ClientHello{
+        .random = [_]u8{0x22} ** 32,
+        .session_id = try allocator.dupe(u8, ""),
+        .cipher_suites = try allocator.dupe(u16, &.{0x1301}),
+        .compression_methods = try allocator.dupe(u8, &.{0x00}),
+        .extensions = exts,
+    };
+    defer hello.deinit(allocator);
+
+    const body = try hello.encode(allocator);
+    defer allocator.free(body);
+
+    var out = try allocator.alloc(u8, 5 + 4 + body.len);
+    out[0] = @intFromEnum(record.ContentType.handshake);
+    std.mem.writeInt(u16, out[1..3], record.tls_legacy_record_version, .big);
+    std.mem.writeInt(u16, out[3..5], @as(u16, @intCast(4 + body.len)), .big);
+    out[5] = @intFromEnum(state.HandshakeType.client_hello);
+    const hs_len = handshake.writeU24(@as(u24, @intCast(body.len)));
+    @memcpy(out[6..9], &hs_len);
+    @memcpy(out[9..], body);
+    return out;
 }
 
 fn clientHelloRecordWithInvalidAlpnPayload() [101]u8 {
@@ -1953,6 +3349,95 @@ fn finishedRecordSha384() [57]u8 {
     return frame;
 }
 
+const test_server_cert_der = [_]u8{ 0x30, 0x03, 0x02, 0x01, 0x01 };
+const test_server_cert_chain = [_][]const u8{test_server_cert_der[0..]};
+
+fn testSignCertificateVerify(_: []const u8, _: u16, out: []u8, _: usize) anyerror!usize {
+    const ed25519_len = std.crypto.sign.Ed25519.Signature.encoded_length;
+    if (out.len < ed25519_len) return error.OutOfMemory;
+    @memset(out[0..ed25519_len], 0x5a);
+    return ed25519_len;
+}
+
+fn testServerCredentials() ServerCredentials {
+    return .{
+        .cert_chain_der = &test_server_cert_chain,
+        .signature_scheme = 0x0807,
+        .sign_certificate_verify = testSignCertificateVerify,
+    };
+}
+
+fn validFinishedRecordForServer(engine: *Engine, allocator: std.mem.Allocator) ![]u8 {
+    const hs = engine.handshake_read_secret orelse return error.TestUnexpectedResult;
+    switch (hs) {
+        .sha256 => |secret| {
+            const digest = engine.transcriptDigestSha256();
+            const fin_key = keyschedule.finishedKey(.tls_aes_128_gcm_sha256, secret);
+            const verify = keyschedule.finishedVerifyData(.tls_aes_128_gcm_sha256, fin_key, &digest);
+            return finishedRecordFromBody(allocator, verify[0..]);
+        },
+        .sha384 => |secret| {
+            const digest = engine.transcriptDigestSha384();
+            const fin_key = keyschedule.finishedKey(.tls_aes_256_gcm_sha384, secret);
+            const verify = keyschedule.finishedVerifyData(.tls_aes_256_gcm_sha384, fin_key, &digest);
+            return finishedRecordFromBody(allocator, verify[0..]);
+        },
+    }
+}
+
+fn ingestValidClientHelloForServer(engine: *Engine) !void {
+    const client_kp = std.crypto.dh.X25519.KeyPair.generate();
+    const ch = try clientHelloRecordWithX25519Public(std.testing.allocator, client_kp.public_key);
+    defer std.testing.allocator.free(ch);
+    _ = try engine.ingestRecord(ch);
+}
+
+fn ingestValidServerHelloForClient(engine: *Engine) !void {
+    const client_kp = std.crypto.dh.X25519.KeyPair.generate();
+    try engine.setClientX25519SecretKey(client_kp.secret_key);
+    const server_kp = std.crypto.dh.X25519.KeyPair.generate();
+    const suite = configuredCipherSuiteCodepoint(engine.config.suite);
+    const sh = try serverHelloRecordWithX25519Public(std.testing.allocator, suite, server_kp.public_key);
+    defer std.testing.allocator.free(sh);
+    _ = try engine.ingestRecord(sh);
+}
+
+test "client rejects server hello when x25519 secret is not primed" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const server_kp = std.crypto.dh.X25519.KeyPair.generate();
+    const sh = try serverHelloRecordWithX25519Public(std.testing.allocator, 0x1301, server_kp.public_key);
+    defer std.testing.allocator.free(sh);
+
+    try std.testing.expectError(error.MissingKeyExchangeSecret, engine.ingestRecord(sh));
+}
+
+test "setClientX25519SecretKey rejects non-client role" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    try std.testing.expectError(error.IllegalTransition, engine.setClientX25519SecretKey([_]u8{0xaa} ** 32));
+}
+
+test "generateClientX25519KeyShare arms client secret state" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const public = try engine.generateClientX25519KeyShare();
+    try std.testing.expect(public.len == 32);
+    try std.testing.expect(engine.client_x25519_secret_key != null);
+}
+
 test "client side handshake flow reaches connected" {
     var engine = Engine.init(std.testing.allocator, .{
         .role = .client,
@@ -1960,7 +3445,7 @@ test "client side handshake flow reaches connected" {
     });
     defer engine.deinit();
 
-    _ = try engine.ingestRecord(&serverHelloRecord());
+    try ingestValidServerHelloForClient(&engine);
     _ = try engine.ingestRecord(&encryptedExtensionsRecord());
     _ = try engine.ingestRecord(&finishedRecord());
 
@@ -1975,7 +3460,7 @@ test "client side handshake flow reaches connected for chacha20 suite" {
     });
     defer engine.deinit();
 
-    _ = try engine.ingestRecord(&serverHelloRecordWithCipherSuite(0x1303));
+    try ingestValidServerHelloForClient(&engine);
     _ = try engine.ingestRecord(&encryptedExtensionsRecord());
     _ = try engine.ingestRecord(&finishedRecord());
 
@@ -1993,7 +3478,7 @@ test "client side handshake flow reaches connected for aes256 suite" {
     });
     defer engine.deinit();
 
-    _ = try engine.ingestRecord(&serverHelloRecordWithCipherSuite(0x1302));
+    try ingestValidServerHelloForClient(&engine);
     _ = try engine.ingestRecord(&encryptedExtensionsRecord());
     _ = try engine.ingestRecord(&finishedRecordSha384());
 
@@ -2011,9 +3496,10 @@ test "key schedule stages are populated across client handshake milestones" {
     });
     defer engine.deinit();
 
-    _ = try engine.ingestRecord(&serverHelloRecord());
+    try ingestValidServerHelloForClient(&engine);
     try std.testing.expect(engine.early_secret != null);
-    try std.testing.expect(engine.handshake_secret != null);
+    try std.testing.expect(engine.handshake_read_secret != null);
+    try std.testing.expect(engine.handshake_write_secret != null);
     try std.testing.expect(engine.master_secret == null);
     try std.testing.expect(engine.latest_secret == null);
 
@@ -2030,12 +3516,16 @@ test "key schedule stages follow suite digest width" {
     });
     defer engine.deinit();
 
-    _ = try engine.ingestRecord(&serverHelloRecordWithCipherSuite(0x1302));
+    try ingestValidServerHelloForClient(&engine);
     switch (engine.early_secret orelse return error.TestUnexpectedResult) {
         .sha384 => |secret| try std.testing.expectEqual(@as(usize, 48), secret.len),
         .sha256 => return error.TestUnexpectedResult,
     }
-    switch (engine.handshake_secret orelse return error.TestUnexpectedResult) {
+    switch (engine.handshake_read_secret orelse return error.TestUnexpectedResult) {
+        .sha384 => |secret| try std.testing.expectEqual(@as(usize, 48), secret.len),
+        .sha256 => return error.TestUnexpectedResult,
+    }
+    switch (engine.handshake_write_secret orelse return error.TestUnexpectedResult) {
         .sha384 => |secret| try std.testing.expectEqual(@as(usize, 48), secret.len),
         .sha256 => return error.TestUnexpectedResult,
     }
@@ -2049,6 +3539,47 @@ test "key schedule stages follow suite digest width" {
     switch (engine.latest_secret orelse return error.TestUnexpectedResult) {
         .sha384 => |secret| try std.testing.expectEqual(@as(usize, 48), secret.len),
         .sha256 => return error.TestUnexpectedResult,
+    }
+}
+
+test "no-psk key schedule uses hash-length zero ikm for early and master extract" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    try ingestValidServerHelloForClient(&engine);
+
+    const shared = engine.key_exchange_secret orelse return error.TestUnexpectedResult;
+    const zeros = [_]u8{0} ** 32;
+    const empty_digest = Engine.emptyTranscriptHashSha256();
+
+    const expected_early = keyschedule.extract(.tls_aes_128_gcm_sha256, &zeros, &zeros);
+    const wrong_early = keyschedule.extract(.tls_aes_128_gcm_sha256, &zeros, "");
+    switch (engine.early_secret orelse return error.TestUnexpectedResult) {
+        .sha256 => |secret| {
+            try std.testing.expectEqualSlices(u8, &expected_early, &secret);
+            try std.testing.expect(!std.mem.eql(u8, &wrong_early, &secret));
+        },
+        .sha384 => return error.TestUnexpectedResult,
+    }
+
+    _ = try engine.ingestRecord(&encryptedExtensionsRecord());
+    _ = try engine.ingestRecord(&finishedRecord());
+
+    const derived = keyschedule.deriveSecret(.tls_aes_128_gcm_sha256, expected_early, "derived", &empty_digest);
+    const hs_base = keyschedule.extract(.tls_aes_128_gcm_sha256, &derived, shared[0..]);
+    const master_derived = keyschedule.deriveSecret(.tls_aes_128_gcm_sha256, hs_base, "derived", &empty_digest);
+    const expected_master = keyschedule.extract(.tls_aes_128_gcm_sha256, &master_derived, &zeros);
+    const wrong_master = keyschedule.extract(.tls_aes_128_gcm_sha256, &master_derived, "");
+
+    switch (engine.master_secret orelse return error.TestUnexpectedResult) {
+        .sha256 => |secret| {
+            try std.testing.expectEqualSlices(u8, &expected_master, &secret);
+            try std.testing.expect(!std.mem.eql(u8, &wrong_master, &secret));
+        },
+        .sha384 => return error.TestUnexpectedResult,
     }
 }
 
@@ -2069,7 +3600,7 @@ test "invalid finished body length is rejected" {
     });
     defer engine.deinit();
 
-    _ = try engine.ingestRecord(&serverHelloRecord());
+    try ingestValidServerHelloForClient(&engine);
     _ = try engine.ingestRecord(&encryptedExtensionsRecord());
     try std.testing.expectError(error.InvalidFinishedMessage, engine.ingestRecord(&handshakeRecord(.finished)));
 }
@@ -2087,9 +3618,48 @@ test "close_notify transitions to closed" {
     try std.testing.expectEqual(state.ConnectionState.closed, engine.machine.state);
 }
 
+test "ignorable tls13 change_cipher_spec is accepted as no-op" {
+    const ccs = [_]u8{
+        @intFromEnum(record.ContentType.change_cipher_spec),
+        0x03,
+        0x03,
+        0x00,
+        0x01,
+        0x01,
+    };
+
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const res = try engine.ingestRecord(&ccs);
+    try std.testing.expectEqual(@as(usize, 0), res.action_count);
+    try std.testing.expectEqual(state.ConnectionState.start, engine.machine.state);
+}
+
+test "non-ignorable change_cipher_spec is rejected" {
+    const invalid_ccs = [_]u8{
+        @intFromEnum(record.ContentType.change_cipher_spec),
+        0x03,
+        0x03,
+        0x00,
+        0x01,
+        0x02,
+    };
+
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    try std.testing.expectError(error.UnsupportedRecordType, engine.ingestRecord(&invalid_ccs));
+}
+
 test "client accepts hrr then server hello" {
     const hrr = hrrServerHelloRecord();
-    const second_sh = serverHelloRecord();
 
     var engine = Engine.init(std.testing.allocator, .{
         .role = .client,
@@ -2105,7 +3675,7 @@ test "client accepts hrr then server hello" {
         else => return error.TestUnexpectedResult,
     }
 
-    _ = try engine.ingestRecord(&second_sh);
+    try ingestValidServerHelloForClient(&engine);
     try std.testing.expectEqual(state.ConnectionState.wait_encrypted_extensions, engine.machine.state);
 }
 
@@ -2182,7 +3752,7 @@ test "keyupdate request is surfaced in action" {
         .suite = .tls_aes_128_gcm_sha256,
     });
     defer engine.deinit();
-    _ = try engine.ingestRecord(&serverHelloRecord());
+    try ingestValidServerHelloForClient(&engine);
     _ = try engine.ingestRecord(&encryptedExtensionsRecord());
     _ = try engine.ingestRecord(&finishedRecord());
     const before = engine.latest_secret orelse return error.TestUnexpectedResult;
@@ -2220,7 +3790,7 @@ test "keyupdate update_not_requested does not trigger reciprocal send action" {
         .suite = .tls_aes_128_gcm_sha256,
     });
     defer engine.deinit();
-    _ = try engine.ingestRecord(&serverHelloRecord());
+    try ingestValidServerHelloForClient(&engine);
     _ = try engine.ingestRecord(&encryptedExtensionsRecord());
     _ = try engine.ingestRecord(&finishedRecord());
     const before = engine.latest_secret orelse return error.TestUnexpectedResult;
@@ -2251,10 +3821,13 @@ test "server role keyupdate request is surfaced and reciprocated" {
     var engine = Engine.init(std.testing.allocator, .{
         .role = .server,
         .suite = .tls_aes_128_gcm_sha256,
+        .server_credentials = testServerCredentials(),
     });
     defer engine.deinit();
-    _ = try engine.ingestRecord(&clientHelloRecord());
-    _ = try engine.ingestRecord(&finishedRecord());
+    try ingestValidClientHelloForServer(&engine);
+    const fin = try validFinishedRecordForServer(&engine, std.testing.allocator);
+    defer std.testing.allocator.free(fin);
+    _ = try engine.ingestRecord(fin);
     const before = engine.latest_secret orelse return error.TestUnexpectedResult;
 
     const ku = keyUpdateRecord(.update_requested);
@@ -2288,10 +3861,13 @@ test "server role keyupdate update_not_requested does not trigger reciprocal sen
     var engine = Engine.init(std.testing.allocator, .{
         .role = .server,
         .suite = .tls_aes_128_gcm_sha256,
+        .server_credentials = testServerCredentials(),
     });
     defer engine.deinit();
-    _ = try engine.ingestRecord(&clientHelloRecord());
-    _ = try engine.ingestRecord(&finishedRecord());
+    try ingestValidClientHelloForServer(&engine);
+    const fin = try validFinishedRecordForServer(&engine, std.testing.allocator);
+    defer std.testing.allocator.free(fin);
+    _ = try engine.ingestRecord(fin);
     const before = engine.latest_secret orelse return error.TestUnexpectedResult;
 
     const ku = keyUpdateRecord(.update_not_requested);
@@ -2322,7 +3898,7 @@ test "invalid keyupdate request byte is rejected as invalid request" {
         .suite = .tls_aes_128_gcm_sha256,
     });
     defer engine.deinit();
-    _ = try engine.ingestRecord(&serverHelloRecord());
+    try ingestValidServerHelloForClient(&engine);
     _ = try engine.ingestRecord(&encryptedExtensionsRecord());
     _ = try engine.ingestRecord(&finishedRecord());
 
@@ -2336,7 +3912,7 @@ test "invalid keyupdate body length is rejected as invalid length" {
         .suite = .tls_aes_128_gcm_sha256,
     });
     defer engine.deinit();
-    _ = try engine.ingestRecord(&serverHelloRecord());
+    try ingestValidServerHelloForClient(&engine);
     _ = try engine.ingestRecord(&encryptedExtensionsRecord());
     _ = try engine.ingestRecord(&finishedRecord());
 
@@ -2350,7 +3926,7 @@ test "invalid keyupdate request maps to illegal_parameter alert intent" {
         .suite = .tls_aes_128_gcm_sha256,
     });
     defer engine.deinit();
-    _ = try engine.ingestRecord(&serverHelloRecord());
+    try ingestValidServerHelloForClient(&engine);
     _ = try engine.ingestRecord(&encryptedExtensionsRecord());
     _ = try engine.ingestRecord(&finishedRecord());
 
@@ -2370,7 +3946,7 @@ test "invalid keyupdate body length maps to decode_error alert intent" {
         .suite = .tls_aes_128_gcm_sha256,
     });
     defer engine.deinit();
-    _ = try engine.ingestRecord(&serverHelloRecord());
+    try ingestValidServerHelloForClient(&engine);
     _ = try engine.ingestRecord(&encryptedExtensionsRecord());
     _ = try engine.ingestRecord(&finishedRecord());
 
@@ -2698,7 +4274,7 @@ test "client rejects server hello hybrid key_share when hybrid kex is disabled" 
     try std.testing.expectError(error.InvalidKeyShareExtension, engine.ingestRecord(&rec));
 }
 
-test "client accepts server hello hybrid key_share when hybrid kex is enabled" {
+test "client rejects hybrid key_share even when hybrid policy is enabled without runtime hybrid secret wiring" {
     var engine = Engine.init(std.testing.allocator, .{
         .role = .client,
         .suite = .tls_aes_128_gcm_sha256,
@@ -2711,8 +4287,7 @@ test "client accepts server hello hybrid key_share when hybrid kex is enabled" {
     defer engine.deinit();
 
     const rec = serverHelloRecordWithHybridKeyShare();
-    _ = try engine.ingestRecord(&rec);
-    try std.testing.expectEqual(state.ConnectionState.wait_encrypted_extensions, engine.machine.state);
+    try std.testing.expectError(error.InvalidKeyShareExtension, engine.ingestRecord(&rec));
 }
 
 test "client rejects server hello with invalid pre_shared_key payload" {
@@ -2777,8 +4352,21 @@ test "client accepts server hello when downgrade-like bytes are not in tail posi
     });
     defer engine.deinit();
 
-    const rec = serverHelloRecordWithShiftedDowngradeLikeBytes();
-    _ = try engine.ingestRecord(&rec);
+    const client_kp = std.crypto.dh.X25519.KeyPair.generate();
+    try engine.setClientX25519SecretKey(client_kp.secret_key);
+    const server_kp = std.crypto.dh.X25519.KeyPair.generate();
+    var rec = try serverHelloRecordWithX25519Public(std.testing.allocator, 0x1301, server_kp.public_key);
+    defer std.testing.allocator.free(rec);
+    rec[34] = 0x44;
+    rec[35] = 0x4f;
+    rec[36] = 0x57;
+    rec[37] = 0x4e;
+    rec[38] = 0x47;
+    rec[39] = 0x52;
+    rec[40] = 0x44;
+    rec[41] = 0x01;
+
+    _ = try engine.ingestRecord(rec);
     try std.testing.expectEqual(state.ConnectionState.wait_encrypted_extensions, engine.machine.state);
 }
 
@@ -2789,20 +4377,37 @@ test "client accepts server hello when downgrade tail is near-match only" {
     });
     defer engine.deinit();
 
-    const rec = serverHelloRecordWithNearMatchDowngradeTail();
-    _ = try engine.ingestRecord(&rec);
+    const client_kp = std.crypto.dh.X25519.KeyPair.generate();
+    try engine.setClientX25519SecretKey(client_kp.secret_key);
+    const server_kp = std.crypto.dh.X25519.KeyPair.generate();
+    var rec = try serverHelloRecordWithX25519Public(std.testing.allocator, 0x1301, server_kp.public_key);
+    defer std.testing.allocator.free(rec);
+    rec[35] = 0x44;
+    rec[36] = 0x4f;
+    rec[37] = 0x57;
+    rec[38] = 0x4e;
+    rec[39] = 0x47;
+    rec[40] = 0x52;
+    rec[41] = 0x44;
+    rec[42] = 0x02;
+
+    _ = try engine.ingestRecord(rec);
     try std.testing.expectEqual(state.ConnectionState.wait_encrypted_extensions, engine.machine.state);
 }
 
-test "server rejects client hello without required extension" {
+test "server accepts client hello without ALPN extension by default" {
     var engine = Engine.init(std.testing.allocator, .{
         .role = .server,
         .suite = .tls_aes_128_gcm_sha256,
+        .server_credentials = testServerCredentials(),
     });
     defer engine.deinit();
 
-    const rec = clientHelloRecordWithoutAlpn();
-    try std.testing.expectError(error.MissingRequiredClientHelloExtension, engine.ingestRecord(&rec));
+    const client_kp = std.crypto.dh.X25519.KeyPair.generate();
+    const rec = try clientHelloRecordWithoutAlpn(std.testing.allocator, client_kp.public_key);
+    defer std.testing.allocator.free(rec);
+    _ = try engine.ingestRecord(rec);
+    try std.testing.expectEqual(state.ConnectionState.wait_client_certificate_or_finished, engine.machine.state);
 }
 
 test "server rejects client hello with invalid server_name payload" {
@@ -2842,17 +4447,19 @@ test "server rejects client hello hybrid group when hybrid kex is disabled" {
     var engine = Engine.init(std.testing.allocator, .{
         .role = .server,
         .suite = .tls_aes_128_gcm_sha256,
+        .server_credentials = testServerCredentials(),
     });
     defer engine.deinit();
 
     const rec = clientHelloRecordWithHybridGroup();
-    try std.testing.expectError(error.InvalidSupportedGroupsExtension, engine.ingestRecord(&rec));
+    try std.testing.expectError(error.InvalidKeyShareExtension, engine.ingestRecord(&rec));
 }
 
-test "server accepts client hello hybrid group when hybrid kex is enabled" {
+test "server rejects hybrid-only key_share when hybrid kex is enabled but not wired" {
     var engine = Engine.init(std.testing.allocator, .{
         .role = .server,
         .suite = .tls_aes_128_gcm_sha256,
+        .server_credentials = testServerCredentials(),
         .group_policy = .{
             .allowed_named_groups = &.{named_group_x25519_mlkem768},
             .allow_hybrid_kex = true,
@@ -2862,8 +4469,7 @@ test "server accepts client hello hybrid group when hybrid kex is enabled" {
     defer engine.deinit();
 
     const rec = clientHelloRecordWithHybridGroup();
-    _ = try engine.ingestRecord(&rec);
-    try std.testing.expectEqual(state.ConnectionState.wait_client_certificate_or_finished, engine.machine.state);
+    try std.testing.expectError(error.InvalidKeyShareExtension, engine.ingestRecord(&rec));
 }
 
 test "server rejects client hello with invalid key_share payload" {
@@ -3013,11 +4619,222 @@ test "valid client hello body is accepted for server role" {
     var engine = Engine.init(std.testing.allocator, .{
         .role = .server,
         .suite = .tls_aes_128_gcm_sha256,
+        .server_credentials = testServerCredentials(),
     });
     defer engine.deinit();
 
-    _ = try engine.ingestRecord(&clientHelloRecord());
+    try ingestValidClientHelloForServer(&engine);
     try std.testing.expectEqual(state.ConnectionState.wait_client_certificate_or_finished, engine.machine.state);
+}
+
+test "server emits outbound handshake flight when credentials are configured" {
+    const Hooks = struct {
+        fn sign(_: []const u8, _: u16, out: []u8, _: usize) anyerror!usize {
+            const ed25519_len = std.crypto.sign.Ed25519.Signature.encoded_length;
+            if (out.len < ed25519_len) return error.OutOfMemory;
+            @memset(out[0..ed25519_len], 0x2a);
+            return ed25519_len;
+        }
+    };
+
+    const cert = [_]u8{ 0x30, 0x03, 0x02, 0x01, 0x01 };
+    const chain = [_][]const u8{cert[0..]};
+
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+        .server_credentials = .{
+            .cert_chain_der = &chain,
+            .signature_scheme = 0x0807,
+            .sign_certificate_verify = Hooks.sign,
+        },
+    });
+    defer engine.deinit();
+
+    const client_kp = std.crypto.dh.X25519.KeyPair.generate();
+    const ch = try clientHelloRecordWithX25519Public(std.testing.allocator, client_kp.public_key);
+    defer std.testing.allocator.free(ch);
+    const res = try engine.ingestRecord(ch);
+    try std.testing.expectEqual(@as(usize, 3), res.action_count);
+    try std.testing.expectEqual(@as(state.HandshakeType, .client_hello), res.actions[0].handshake);
+    switch (res.actions[1]) {
+        .send_handshake_flight => |count| try std.testing.expectEqual(@as(u8, 5), count),
+        else => return error.TestUnexpectedResult,
+    }
+
+    var idx: usize = 0;
+    while (idx < 5) : (idx += 1) {
+        const rec = engine.popOutboundRecord() orelse return error.TestUnexpectedResult;
+        defer std.testing.allocator.free(rec);
+        const parsed = try record.parseRecord(rec);
+        if (idx == 0) {
+            try std.testing.expectEqual(record.ContentType.handshake, parsed.header.content_type);
+            const hs = try handshake.parseOne(parsed.payload);
+            try std.testing.expectEqual(state.HandshakeType.server_hello, hs.header.handshake_type);
+            var sh = try messages.ServerHello.decode(std.testing.allocator, hs.body);
+            defer sh.deinit(std.testing.allocator);
+            const ext = findExtensionData(sh.extensions, ext_key_share) orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(usize, 36), ext.len);
+            const key_len = readU16(ext[2..4]);
+            try std.testing.expectEqual(@as(usize, 32), key_len);
+            try std.testing.expect(!std.mem.eql(u8, sh.random[0..], &([_]u8{0x33} ** 32)));
+        } else {
+            try std.testing.expectEqual(record.ContentType.application_data, parsed.header.content_type);
+            try std.testing.expect(parsed.payload.len > 17);
+        }
+    }
+    try std.testing.expect(engine.key_exchange_secret != null);
+}
+
+test "server verifies finished when credentials are configured" {
+    const Hooks = struct {
+        fn sign(_: []const u8, _: u16, out: []u8, _: usize) anyerror!usize {
+            const ed25519_len = std.crypto.sign.Ed25519.Signature.encoded_length;
+            if (out.len < ed25519_len) return error.OutOfMemory;
+            @memset(out[0..ed25519_len], 0x2b);
+            return ed25519_len;
+        }
+    };
+
+    const cert = [_]u8{ 0x30, 0x03, 0x02, 0x01, 0x01 };
+    const chain = [_][]const u8{cert[0..]};
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+        .server_credentials = .{
+            .cert_chain_der = &chain,
+            .signature_scheme = 0x0807,
+            .sign_certificate_verify = Hooks.sign,
+        },
+    });
+    defer engine.deinit();
+
+    const client_kp = std.crypto.dh.X25519.KeyPair.generate();
+    const ch = try clientHelloRecordWithX25519Public(std.testing.allocator, client_kp.public_key);
+    defer std.testing.allocator.free(ch);
+    _ = try engine.ingestRecord(ch);
+
+    // Invalid Finished must fail under credential-bound server verification path.
+    try std.testing.expectError(error.InvalidFinishedMessage, engine.ingestRecord(&finishedRecord()));
+
+    // Build a valid Finished from current transcript+handshake secret.
+    const hs = engine.handshake_read_secret orelse return error.TestUnexpectedResult;
+    const verify = switch (hs) {
+        .sha256 => |secret| blk: {
+            const digest = engine.transcriptDigestSha256();
+            const fin_key = keyschedule.finishedKey(.tls_aes_128_gcm_sha256, secret);
+            break :blk keyschedule.finishedVerifyData(.tls_aes_128_gcm_sha256, fin_key, &digest);
+        },
+        .sha384 => return error.TestUnexpectedResult,
+    };
+    const fin_rec = try finishedRecordFromBody(std.testing.allocator, verify[0..]);
+    defer std.testing.allocator.free(fin_rec);
+    _ = try engine.ingestRecord(fin_rec);
+    try std.testing.expectEqual(state.ConnectionState.connected, engine.machine.state);
+}
+
+test "server requires peer certificate before accepting finished when policy demands it" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+        .server_credentials = testServerCredentials(),
+        .peer_validation = .{ .require_peer_certificate = true },
+    });
+    defer engine.deinit();
+
+    try ingestValidClientHelloForServer(&engine);
+    const fin = try validFinishedRecordForServer(&engine, std.testing.allocator);
+    defer std.testing.allocator.free(fin);
+    try std.testing.expectError(error.MissingPeerCertificate, engine.ingestRecord(fin));
+}
+
+test "server infers peer certificate requirement from trust store policy" {
+    var store = trust_store.TrustStore.initEmpty();
+    defer store.deinit(std.testing.allocator);
+
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+        .server_credentials = testServerCredentials(),
+        .peer_validation = .{ .trust_store = &store },
+    });
+    defer engine.deinit();
+
+    try ingestValidClientHelloForServer(&engine);
+    const fin = try validFinishedRecordForServer(&engine, std.testing.allocator);
+    defer std.testing.allocator.free(fin);
+    try std.testing.expectError(error.MissingPeerCertificate, engine.ingestRecord(fin));
+}
+
+test "server rejects outbound flight when ed25519 signer returns invalid length" {
+    const Hooks = struct {
+        fn sign(_: []const u8, _: u16, out: []u8, _: usize) anyerror!usize {
+            if (out.len < 4) return error.OutOfMemory;
+            @memset(out[0..4], 0xaa);
+            return 4;
+        }
+    };
+
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+        .server_credentials = .{
+            .cert_chain_der = &test_server_cert_chain,
+            .signature_scheme = 0x0807,
+            .sign_certificate_verify = Hooks.sign,
+        },
+    });
+    defer engine.deinit();
+
+    const client_kp = std.crypto.dh.X25519.KeyPair.generate();
+    const ch = try clientHelloRecordWithX25519Public(std.testing.allocator, client_kp.public_key);
+    defer std.testing.allocator.free(ch);
+    try std.testing.expectError(error.InvalidCertificateVerifyMessage, engine.ingestRecord(ch));
+}
+
+test "connected plaintext application_data record is rejected without AEAD" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    try ingestValidServerHelloForClient(&engine);
+    _ = try engine.ingestRecord(&encryptedExtensionsRecord());
+    _ = try engine.ingestRecord(&finishedRecord());
+    try std.testing.expectEqual(state.ConnectionState.connected, engine.machine.state);
+
+    const rec = appDataRecord("hello");
+    try std.testing.expectError(error.DecryptFailed, engine.ingestRecord(&rec));
+}
+
+test "application data AEAD roundtrip works across client and server engines" {
+    var client = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer client.deinit();
+    client.machine.state = .connected;
+
+    var server = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer server.deinit();
+    server.machine.state = .connected;
+    const client_ap = [_]u8{0x11} ** 32;
+    const server_ap = [_]u8{0x22} ** 32;
+    client.installApplicationSecrets(.{ .sha256 = client_ap }, .{ .sha256 = server_ap });
+    server.installApplicationSecrets(.{ .sha256 = client_ap }, .{ .sha256 = server_ap });
+
+    const rec = try client.buildApplicationDataRecord(std.testing.allocator, "ping");
+    defer std.testing.allocator.free(rec);
+    const res = try server.ingestRecord(rec);
+    try std.testing.expectEqual(@as(usize, 1), res.action_count);
+    switch (res.actions[0]) {
+        .application_data => |data| try std.testing.expectEqualStrings("ping", data),
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "server rejects client hello without configured cipher suite offer" {
@@ -3038,7 +4855,7 @@ test "metrics counters reflect handshake and alert activity" {
     });
     defer engine.deinit();
 
-    _ = try engine.ingestRecord(&serverHelloRecord());
+    try ingestValidServerHelloForClient(&engine);
     _ = try engine.ingestRecord(&encryptedExtensionsRecord());
     _ = try engine.ingestRecord(&finishedRecord());
     _ = try engine.ingestRecord(&keyUpdateRecord(.update_not_requested));
@@ -3108,6 +4925,18 @@ test "classify error alert maps representative protocol errors" {
         alerts.Alert{ .level = .fatal, .description = .handshake_failure },
         classifyErrorAlert(error.EarlyDataRejected),
     );
+    try std.testing.expectEqual(
+        alerts.Alert{ .level = .fatal, .description = .handshake_failure },
+        classifyErrorAlert(error.MissingKeyExchangeSecret),
+    );
+    try std.testing.expectEqual(
+        alerts.Alert{ .level = .fatal, .description = .certificate_required },
+        classifyErrorAlert(error.MissingPeerCertificate),
+    );
+    try std.testing.expectEqual(
+        alerts.Alert{ .level = .fatal, .description = .bad_certificate },
+        classifyErrorAlert(error.PeerCertificateValidationFailed),
+    );
 }
 
 test "classify error alert falls back to internal_error for unknown errors" {
@@ -3124,7 +4953,13 @@ test "ingest wrapper returns ok outcome on success" {
     });
     defer engine.deinit();
 
-    const out = engine.ingestRecordWithAlertIntent(&serverHelloRecord());
+    const client_kp = std.crypto.dh.X25519.KeyPair.generate();
+    try engine.setClientX25519SecretKey(client_kp.secret_key);
+    const server_kp = std.crypto.dh.X25519.KeyPair.generate();
+    const sh = try serverHelloRecordWithX25519Public(std.testing.allocator, 0x1301, server_kp.public_key);
+    defer std.testing.allocator.free(sh);
+
+    const out = engine.ingestRecordWithAlertIntent(sh);
     switch (out) {
         .ok => |res| {
             try std.testing.expectEqual(@as(usize, 2), res.action_count);
@@ -3171,7 +5006,7 @@ test "invalid certificate body is rejected" {
     });
     defer engine.deinit();
 
-    _ = try engine.ingestRecord(&serverHelloRecord());
+    try ingestValidServerHelloForClient(&engine);
     _ = try engine.ingestRecord(&encryptedExtensionsRecord());
     try std.testing.expectError(error.InvalidCertificateMessage, engine.ingestRecord(&handshakeRecord(.certificate)));
 }
@@ -3180,15 +5015,96 @@ test "certificate path valid bodies progress state" {
     var engine = Engine.init(std.testing.allocator, .{
         .role = .client,
         .suite = .tls_aes_128_gcm_sha256,
+        .peer_validation = .{ .enforce_certificate_verify = false },
     });
     defer engine.deinit();
 
-    _ = try engine.ingestRecord(&serverHelloRecord());
+    try ingestValidServerHelloForClient(&engine);
     _ = try engine.ingestRecord(&encryptedExtensionsRecord());
     _ = try engine.ingestRecord(&certificateRecord());
     _ = try engine.ingestRecord(&certificateVerifyRecord());
     _ = try engine.ingestRecord(&finishedRecord());
     try std.testing.expectEqual(state.ConnectionState.connected, engine.machine.state);
+}
+
+test "certificate_verify crypto enforcement rejects invalid peer certificate" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    try ingestValidServerHelloForClient(&engine);
+    _ = try engine.ingestRecord(&encryptedExtensionsRecord());
+    _ = try engine.ingestRecord(&certificateRecord());
+    try std.testing.expectError(error.InvalidCertificateVerifyMessage, engine.ingestRecord(&certificateVerifyRecord()));
+}
+
+test "certificate_verify payload context uses local role string for signing" {
+    var server = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer server.deinit();
+    const server_payload = try server.buildCertificateVerifyPayload(.local);
+    defer std.testing.allocator.free(server_payload);
+    try std.testing.expectEqualStrings(
+        "TLS 1.3, server CertificateVerify",
+        server_payload[64 .. 64 + "TLS 1.3, server CertificateVerify".len],
+    );
+
+    var client = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer client.deinit();
+    const client_payload = try client.buildCertificateVerifyPayload(.local);
+    defer std.testing.allocator.free(client_payload);
+    try std.testing.expectEqualStrings(
+        "TLS 1.3, client CertificateVerify",
+        client_payload[64 .. 64 + "TLS 1.3, client CertificateVerify".len],
+    );
+}
+
+test "certificate_verify payload context uses peer role string for verification" {
+    var server = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer server.deinit();
+    const server_payload = try server.buildCertificateVerifyPayload(.peer);
+    defer std.testing.allocator.free(server_payload);
+    try std.testing.expectEqualStrings(
+        "TLS 1.3, client CertificateVerify",
+        server_payload[64 .. 64 + "TLS 1.3, client CertificateVerify".len],
+    );
+
+    var client = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer client.deinit();
+    const client_payload = try client.buildCertificateVerifyPayload(.peer);
+    defer std.testing.allocator.free(client_payload);
+    try std.testing.expectEqualStrings(
+        "TLS 1.3, server CertificateVerify",
+        client_payload[64 .. 64 + "TLS 1.3, server CertificateVerify".len],
+    );
+}
+
+test "client peer validation policy rejects malformed leaf certificate" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+        .peer_validation = .{
+            .expected_server_name = "example.com",
+        },
+    });
+    defer engine.deinit();
+
+    try ingestValidServerHelloForClient(&engine);
+    _ = try engine.ingestRecord(&encryptedExtensionsRecord());
+    try std.testing.expectError(error.PeerCertificateValidationFailed, engine.ingestRecord(&certificateRecord()));
 }
 
 test "invalid certificate_verify body is rejected" {
@@ -3198,7 +5114,7 @@ test "invalid certificate_verify body is rejected" {
     });
     defer engine.deinit();
 
-    _ = try engine.ingestRecord(&serverHelloRecord());
+    try ingestValidServerHelloForClient(&engine);
     _ = try engine.ingestRecord(&encryptedExtensionsRecord());
     _ = try engine.ingestRecord(&certificateRecord());
     try std.testing.expectError(error.InvalidCertificateVerifyMessage, engine.ingestRecord(&handshakeRecord(.certificate_verify)));
@@ -3211,7 +5127,7 @@ test "unsupported certificate_verify algorithm is rejected" {
     });
     defer engine.deinit();
 
-    _ = try engine.ingestRecord(&serverHelloRecord());
+    try ingestValidServerHelloForClient(&engine);
     _ = try engine.ingestRecord(&encryptedExtensionsRecord());
     _ = try engine.ingestRecord(&certificateRecord());
     try std.testing.expectError(error.UnsupportedSignatureAlgorithm, engine.ingestRecord(&certificateVerifyRecordWithAlgorithm(0xeeee)));
@@ -3221,13 +5137,17 @@ test "server role certificate path valid bodies progress state" {
     var engine = Engine.init(std.testing.allocator, .{
         .role = .server,
         .suite = .tls_aes_128_gcm_sha256,
+        .server_credentials = testServerCredentials(),
+        .peer_validation = .{ .enforce_certificate_verify = false },
     });
     defer engine.deinit();
 
-    _ = try engine.ingestRecord(&clientHelloRecord());
+    try ingestValidClientHelloForServer(&engine);
     _ = try engine.ingestRecord(&certificateRecord());
     _ = try engine.ingestRecord(&certificateVerifyRecord());
-    _ = try engine.ingestRecord(&finishedRecord());
+    const fin = try validFinishedRecordForServer(&engine, std.testing.allocator);
+    defer std.testing.allocator.free(fin);
+    _ = try engine.ingestRecord(fin);
     try std.testing.expectEqual(state.ConnectionState.connected, engine.machine.state);
 }
 
@@ -3235,10 +5155,11 @@ test "server role invalid certificate body is rejected" {
     var engine = Engine.init(std.testing.allocator, .{
         .role = .server,
         .suite = .tls_aes_128_gcm_sha256,
+        .server_credentials = testServerCredentials(),
     });
     defer engine.deinit();
 
-    _ = try engine.ingestRecord(&clientHelloRecord());
+    try ingestValidClientHelloForServer(&engine);
     try std.testing.expectError(error.InvalidCertificateMessage, engine.ingestRecord(&handshakeRecord(.certificate)));
 }
 
@@ -3246,10 +5167,11 @@ test "server role invalid certificate_verify body is rejected" {
     var engine = Engine.init(std.testing.allocator, .{
         .role = .server,
         .suite = .tls_aes_128_gcm_sha256,
+        .server_credentials = testServerCredentials(),
     });
     defer engine.deinit();
 
-    _ = try engine.ingestRecord(&clientHelloRecord());
+    try ingestValidClientHelloForServer(&engine);
     _ = try engine.ingestRecord(&certificateRecord());
     try std.testing.expectError(error.InvalidCertificateVerifyMessage, engine.ingestRecord(&handshakeRecord(.certificate_verify)));
 }
@@ -3261,7 +5183,7 @@ test "invalid encrypted_extensions body is rejected" {
     });
     defer engine.deinit();
 
-    _ = try engine.ingestRecord(&serverHelloRecord());
+    try ingestValidServerHelloForClient(&engine);
     try std.testing.expectError(error.InvalidEncryptedExtensionsMessage, engine.ingestRecord(&handshakeRecord(.encrypted_extensions)));
 }
 
@@ -3272,7 +5194,7 @@ test "new_session_ticket body is validated in connected state" {
     });
     defer engine.deinit();
 
-    _ = try engine.ingestRecord(&serverHelloRecord());
+    try ingestValidServerHelloForClient(&engine);
     _ = try engine.ingestRecord(&encryptedExtensionsRecord());
     _ = try engine.ingestRecord(&finishedRecord());
     _ = try engine.ingestRecord(&newSessionTicketRecord());
@@ -3286,7 +5208,7 @@ test "invalid new_session_ticket body is rejected" {
     });
     defer engine.deinit();
 
-    _ = try engine.ingestRecord(&serverHelloRecord());
+    try ingestValidServerHelloForClient(&engine);
     _ = try engine.ingestRecord(&encryptedExtensionsRecord());
     _ = try engine.ingestRecord(&finishedRecord());
     try std.testing.expectError(error.InvalidNewSessionTicketMessage, engine.ingestRecord(&handshakeRecord(.new_session_ticket)));
