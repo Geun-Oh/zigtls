@@ -13,6 +13,7 @@ set -euo pipefail
 #   BOGO_ALLOW_UNIMPLEMENTED: pass -allow-unimplemented to runner (default: 1)
 #   BOGO_PROFILE: path to BoGo profile JSON for in/out-of-scope classification
 #   BOGO_STRICT: if 1, enforce strict in_scope_required gate (default: 0)
+#   BOGO_STRICT_NO_DELEGATE: if 1, disable shim auto-delegate fallbacks (default: 0)
 
 : "${BORINGSSL_DIR:?BORINGSSL_DIR is required}"
 BOGO_FILTER="${BOGO_FILTER:-}"
@@ -23,6 +24,7 @@ BOGO_MAX_RAW_NON_PASS="${BOGO_MAX_RAW_NON_PASS:-}"
 BOGO_ALLOW_UNIMPLEMENTED="${BOGO_ALLOW_UNIMPLEMENTED:-1}"
 BOGO_PROFILE="${BOGO_PROFILE:-}"
 BOGO_STRICT="${BOGO_STRICT:-0}"
+BOGO_STRICT_NO_DELEGATE="${BOGO_STRICT_NO_DELEGATE:-0}"
 
 RUNNER="$BORINGSSL_DIR/ssl/test/runner"
 if [[ ! -d "$RUNNER" ]]; then
@@ -38,6 +40,12 @@ SHIM_BIN="$REPO_ROOT/zig-out/bin/bogo-shim"
 if [[ ! -x "$SHIM_BIN" ]]; then
   echo "shim binary not found after build/install: $SHIM_BIN" >&2
   exit 1
+fi
+
+if [[ "$BOGO_STRICT_NO_DELEGATE" == "1" ]]; then
+  export BOGO_DISABLE_AUTO_DELEGATE_SHIM=1
+  export BOGO_DISABLE_AUTO_DELEGATE_STD_FALLBACK=1
+  export BOGO_DISABLE_AUTO_DELEGATE_SERVER=1
 fi
 
 pushd "$RUNNER" >/dev/null
@@ -64,8 +72,11 @@ popd >/dev/null
 echo "BoGo runner exited with status: $STATUS"
 echo "Results: $RUNNER/$BOGO_OUTPUT"
 
+RESULT_PATH="$RUNNER/$BOGO_OUTPUT"
 SUMMARY_STATUS=0
-if [[ -f "$RUNNER/$BOGO_OUTPUT" ]]; then
+SUMMARY_RAN=0
+if [[ -f "$RESULT_PATH" ]]; then
+  SUMMARY_RAN=1
   echo "BoGo summary:"
   SUMMARY_ARGS=(--max-critical "$BOGO_MAX_CRITICAL")
   if [[ -n "$BOGO_MAX_RAW_NON_PASS" ]]; then
@@ -78,17 +89,20 @@ if [[ -f "$RUNNER/$BOGO_OUTPUT" ]]; then
     SUMMARY_ARGS+=(--strict)
   fi
   set +e
-  python3 "$(dirname "$0")/bogo_summary.py" "${SUMMARY_ARGS[@]}" "$RUNNER/$BOGO_OUTPUT"
+  python3 "$(dirname "$0")/bogo_summary.py" "${SUMMARY_ARGS[@]}" "$RESULT_PATH"
   SUMMARY_STATUS=$?
   set -e
   if [[ "$SUMMARY_STATUS" != "0" ]]; then
-    echo "warning: failed to summarize BoGo output" >&2
+    echo "strict/non-strict summary gate failed" >&2
     exit 1
   fi
+elif [[ "$BOGO_STRICT" == "1" ]]; then
+  echo "strict gate failed: missing BoGo result file ($RESULT_PATH)" >&2
+  exit 1
 fi
 
 if [[ "$STATUS" != "0" ]]; then
-  if [[ "$BOGO_STRICT" == "1" && "$BOGO_ALLOW_UNIMPLEMENTED" == "0" && "$SUMMARY_STATUS" == "0" ]]; then
+  if [[ "$BOGO_STRICT" == "1" && "$BOGO_ALLOW_UNIMPLEMENTED" == "0" && "$SUMMARY_RAN" == "1" && "$SUMMARY_STATUS" == "0" ]]; then
     echo "strict summary gate passed; treating runner non-zero as expected-failure matched outcome"
     exit 0
   fi

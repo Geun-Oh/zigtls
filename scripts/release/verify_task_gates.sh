@@ -4,6 +4,7 @@ set -euo pipefail
 MODE="all"
 DRY_RUN=0
 SYNC_EVIDENCE_DOCS=0
+BOGO_REQUIRED_SMOKE_FILTER="${BOGO_REQUIRED_SMOKE_FILTER:-TLS13-1RTT-Server-TLS-Async;TLS13-1RTT-Client-TLS-Async;ALPNServer-Reject-TLS-TLS13;ALPNServer-Async-TLS-TLS13;ALPNClient-TLS-TLS13;KeyUpdate-Requested;TLS13-HelloRetryRequest-Client-TLS-Async;Resume-Client-TLS13-TLS13-TLS}"
 
 usage() {
   cat <<USAGE
@@ -142,6 +143,7 @@ if [[ "$MODE" == "all" || "$MODE" == "strict" ]]; then
   run_cmd "bash scripts/interop/matrix_local.sh --strict"
   run_cmd "bash scripts/interop/generate_evidence.sh"
   run_cmd "BOGO_PROFILE=scripts/interop/bogo_profile_v1_prod.json BOGO_STRICT=1 BOGO_ALLOW_UNIMPLEMENTED=0 BOGO_MAX_CRITICAL=0 BORINGSSL_DIR=${BORINGSSL_DIR} bash scripts/interop/bogo_run.sh"
+  run_cmd "BOGO_STRICT_NO_DELEGATE=1 BOGO_TEST_FILTER='${BOGO_REQUIRED_SMOKE_FILTER}' BOGO_PROFILE=scripts/interop/bogo_profile_v1_prod.json BOGO_STRICT=1 BOGO_ALLOW_UNIMPLEMENTED=0 BOGO_MAX_CRITICAL=0 BORINGSSL_DIR=${BORINGSSL_DIR} bash scripts/interop/bogo_run.sh"
   run_cmd "bash scripts/fuzz/replay_corpus.sh --skip-baseline"
   run_cmd "bash scripts/reliability/run_soak_chaos.sh --profile prod"
   if [[ "$SYNC_EVIDENCE_DOCS" -eq 1 ]]; then

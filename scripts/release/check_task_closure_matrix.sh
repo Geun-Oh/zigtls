@@ -16,8 +16,8 @@ USAGE
 
 extract_ws_ids() {
   local file="$1"
-  grep -E '^## WS-[A-Z][\.: ]' "$file" \
-    | sed -E 's/^## (WS-[A-Z]).*/\1/' \
+  grep -E '^## WS-[A-Z0-9]+([.: ]|$)' "$file" \
+    | sed -E 's/^## (WS-[A-Z0-9]+).*/\1/' \
     | awk '!seen[$0]++'
 }
 
@@ -26,7 +26,7 @@ section_has_reference() {
   local ws="$2"
   awk -v ws="$ws" '
     BEGIN { in_ws = 0; found = 0 }
-    $0 ~ "^## " ws"[.: ]" { in_ws = 1; next }
+    $0 ~ "^## " ws"([.: ]|$)" { in_ws = 1; next }
     in_ws && $0 ~ /^## / { exit }
     in_ws && $0 ~ /`[^`]+`/ { found = 1 }
     END { exit(found ? 0 : 1) }
