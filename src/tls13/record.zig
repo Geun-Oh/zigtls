@@ -13,6 +13,10 @@ pub const ContentType = enum(u8) {
     application_data = 23,
 };
 
+fn isAcceptedLegacyRecordVersion(version: u16) bool {
+    return version >= 0x0301 and version <= tls_legacy_record_version;
+}
+
 pub const Header = struct {
     content_type: ContentType,
     legacy_version: u16,
@@ -46,7 +50,7 @@ pub fn parseHeader(buf: []const u8) ParseError!Header {
 
     const content_type = std.meta.intToEnum(ContentType, buf[0]) catch return error.InvalidContentType;
     const legacy_version = std.mem.readInt(u16, buf[1..3], .big);
-    if (legacy_version != tls_legacy_record_version) return error.InvalidLegacyVersion;
+    if (!isAcceptedLegacyRecordVersion(legacy_version)) return error.InvalidLegacyVersion;
 
     const len = std.mem.readInt(u16, buf[3..5], .big);
     if (len > max_ciphertext) return error.RecordOverflow;
@@ -92,6 +96,12 @@ test "parse record header and payload" {
 test "record parser rejects invalid legacy version" {
     const buf = [_]u8{ @intFromEnum(ContentType.handshake), 0x03, 0x04, 0x00, 0x00 };
     try std.testing.expectError(error.InvalidLegacyVersion, parseRecord(&buf));
+}
+
+test "record parser accepts tls10 legacy version for interoperability" {
+    const buf = [_]u8{ @intFromEnum(ContentType.handshake), 0x03, 0x01, 0x00, 0x00 };
+    const parsed = try parseRecord(&buf);
+    try std.testing.expectEqual(@as(u16, 0x0301), parsed.header.legacy_version);
 }
 
 test "record parser rejects overflow length" {

@@ -6,6 +6,7 @@ const tls13 = @import("tls13.zig");
 
 pub const Config = struct {
     session: tls13.session.Config,
+    dynamic_server_credentials: ?DynamicServerCredentials = null,
     on_client_hello: ?ClientHelloCallback = null,
     callback_userdata: usize = 0,
     client_hello_policy: ClientHelloPolicy = .{},
@@ -29,7 +30,7 @@ pub const Error = error{
     InvalidConfiguration,
     HandshakeRateLimited,
     HandshakePolicyRejected,
-} || tls13.session.EngineError || std.mem.Allocator.Error;
+} || tls13.session.EngineError || cert_reload.Error || std.mem.Allocator.Error;
 
 pub const ClientHelloMetadata = struct {
     server_name: ?[]const u8 = null,
@@ -69,6 +70,14 @@ pub const RuntimeBindings = struct {
     ticket_key_id: ?u32 = null,
 };
 
+pub const DynamicServerCredentials = struct {
+    store: *cert_reload.Store,
+    signature_scheme: u16 = 0x0807,
+    sign_certificate_verify: ?tls13.session.SignCertificateVerifyFn = null,
+    signer_userdata: usize = 0,
+    auto_sign_from_store_ed25519: bool = false,
+};
+
 pub const Connection = struct {
     allocator: std.mem.Allocator,
     config: Config,
@@ -83,6 +92,13 @@ pub const Connection = struct {
     correlation_id: u64 = 0,
     active_cert_generation: ?u64 = null,
     active_ticket_key_id: ?u32 = null,
+    observed_server_name: [255]u8 = [_]u8{0} ** 255,
+    observed_server_name_len: usize = 0,
+    observed_alpn: [255]u8 = [_]u8{0} ** 255,
+    observed_alpn_len: usize = 0,
+    dynamic_cert_chain: ?cert_reload.DerChain = null,
+    dynamic_ed25519_bundle: ?cert_reload.Ed25519ServerCredentialsBundle = null,
+    dynamic_cert_generation: ?u64 = null,
 
     pub fn init(allocator: std.mem.Allocator, config: Config) Connection {
         return .{
@@ -100,6 +116,8 @@ pub const Connection = struct {
     }
 
     pub fn deinit(self: *Connection) void {
+        if (self.dynamic_cert_chain) |*chain| chain.deinit(self.allocator);
+        if (self.dynamic_ed25519_bundle) |*bundle| bundle.deinit(self.allocator);
         self.engine.deinit();
         for (self.pending_records.items) |frame| self.allocator.free(frame);
         self.pending_records.deinit(self.allocator);
@@ -122,6 +140,7 @@ pub const Connection = struct {
             self.observeHandshakeFailureIfNeeded();
             return error.HandshakePolicyRejected;
         }
+        try self.bindDynamicServerCredentialsIfNeeded();
         const result = self.engine.ingestRecord(record_bytes) catch |err| {
             self.observeHandshakeFailureIfNeeded();
             return err;
@@ -144,6 +163,7 @@ pub const Connection = struct {
                 },
             };
         }
+        try self.bindDynamicServerCredentialsIfNeeded();
         const out = self.engine.ingestRecordWithAlertIntent(record_bytes);
         switch (out) {
             .ok => |res| {
@@ -189,19 +209,16 @@ pub const Connection = struct {
         if (plaintext.len == 0) return 0;
 
         var written: usize = 0;
-        const max_payload = std.math.maxInt(u16);
+        const max_payload: usize = tls13.record.max_plaintext - 1;
 
         while (written < plaintext.len) {
             const remaining = plaintext.len - written;
             const chunk_len = @min(remaining, max_payload);
-            const frame = try self.allocator.alloc(u8, 5 + chunk_len);
-            errdefer self.allocator.free(frame);
-
-            frame[0] = @intFromEnum(tls13.record.ContentType.application_data);
-            std.mem.writeInt(u16, frame[1..3], tls13.record.tls_legacy_record_version, .big);
-            std.mem.writeInt(u16, frame[3..5], @as(u16, @intCast(chunk_len)), .big);
-            @memcpy(frame[5..], plaintext[written .. written + chunk_len]);
-            try self.pending_records.append(self.allocator, frame);
+            const frame = try self.engine.buildApplicationDataRecord(
+                self.allocator,
+                plaintext[written .. written + chunk_len],
+            );
+            try self.pushPendingRecordOwned(frame);
             written += chunk_len;
         }
 
@@ -236,6 +253,21 @@ pub const Connection = struct {
         };
     }
 
+    pub fn observedClientHelloServerName(self: *const Connection) ?[]const u8 {
+        if (self.observed_server_name_len == 0) return null;
+        return self.observed_server_name[0..self.observed_server_name_len];
+    }
+
+    pub fn observedClientHelloAlpn(self: *const Connection) ?[]const u8 {
+        if (self.observed_alpn_len == 0) return null;
+        return self.observed_alpn[0..self.observed_alpn_len];
+    }
+
+    pub fn negotiatedAlpn(self: *const Connection) ?[]const u8 {
+        if (self.engine.negotiated_alpn_len == 0) return null;
+        return self.engine.negotiated_alpn[0..self.engine.negotiated_alpn_len];
+    }
+
     fn collectActions(self: *Connection, result: tls13.session.IngestResult) Error!void {
         var i: usize = 0;
         while (i < result.action_count) : (i += 1) {
@@ -252,8 +284,16 @@ pub const Connection = struct {
                 },
                 .send_key_update => |req| {
                     self.telemetry.observeKeyUpdate();
-                    const frame = tls13.session.Engine.buildKeyUpdateRecord(req);
-                    try self.pushPendingRecord(frame[0..]);
+                    const frame = try self.engine.buildProtectedKeyUpdateRecord(self.allocator, req);
+                    try self.pushPendingRecordOwned(frame);
+                    self.engine.onKeyUpdateRecordQueued();
+                },
+                .send_handshake_flight => |count| {
+                    var idx: u8 = 0;
+                    while (idx < count) : (idx += 1) {
+                        const rec = self.engine.popOutboundRecord() orelse break;
+                        try self.pushPendingRecordOwned(rec);
+                    }
                 },
                 .key_update => {
                     self.telemetry.observeKeyUpdate();
@@ -293,6 +333,7 @@ pub const Connection = struct {
                 .server_name = extractServerName(hello.extensions),
                 .alpn_protocol = extractFirstAlpn(hello.extensions),
             };
+            self.captureClientHelloMetadata(meta);
             if (self.config.on_client_hello) |cb| cb(meta, self.config.callback_userdata);
             return self.evaluateClientHelloPolicy(meta);
         }
@@ -335,6 +376,10 @@ pub const Connection = struct {
         const frame = try self.allocator.alloc(u8, bytes.len);
         errdefer self.allocator.free(frame);
         @memcpy(frame, bytes);
+        try self.pending_records.append(self.allocator, frame);
+    }
+
+    fn pushPendingRecordOwned(self: *Connection, frame: []u8) Error!void {
         try self.pending_records.append(self.allocator, frame);
     }
 
@@ -382,7 +427,9 @@ pub const Connection = struct {
     }
 
     fn captureRuntimeBindings(self: *Connection) void {
-        if (self.config.cert_store) |store| {
+        if (self.dynamic_cert_generation) |gen| {
+            self.active_cert_generation = gen;
+        } else if (self.config.cert_store) |store| {
             if (store.snapshot()) |snap| {
                 self.active_cert_generation = snap.generation;
             }
@@ -401,12 +448,75 @@ pub const Connection = struct {
             .alert_description = alert_description,
         }, self.config.log_userdata);
     }
+
+    fn bindDynamicServerCredentialsIfNeeded(self: *Connection) Error!void {
+        const dyn = self.config.dynamic_server_credentials orelse return;
+        if (self.config.session.role != .server) return error.InvalidConfiguration;
+
+        const snap = dyn.store.snapshot() orelse return error.NoActiveSnapshot;
+        if (self.dynamic_cert_generation) |gen| {
+            if (gen == snap.generation) return;
+        }
+
+        if (self.dynamic_cert_chain) |*chain| {
+            chain.deinit(self.allocator);
+            self.dynamic_cert_chain = null;
+        }
+        if (self.dynamic_ed25519_bundle) |*bundle| {
+            bundle.deinit(self.allocator);
+            self.dynamic_ed25519_bundle = null;
+        }
+
+        self.dynamic_cert_generation = snap.generation;
+        if (dyn.auto_sign_from_store_ed25519) {
+            const bundle = try dyn.store.loadActiveEd25519Bundle(self.allocator);
+            self.dynamic_ed25519_bundle = bundle;
+            self.engine.config.server_credentials = self.dynamic_ed25519_bundle.?.serverCredentials();
+            return;
+        }
+
+        const chain = try dyn.store.decodeActiveCertificateChainDer(self.allocator);
+        self.dynamic_cert_chain = chain;
+        const sign_fn = dyn.sign_certificate_verify orelse return error.InvalidConfiguration;
+        self.engine.config.server_credentials = .{
+            .cert_chain_der = self.dynamic_cert_chain.?.certs,
+            .signature_scheme = dyn.signature_scheme,
+            .sign_certificate_verify = sign_fn,
+            .signer_userdata = dyn.signer_userdata,
+        };
+    }
+
+    fn captureClientHelloMetadata(self: *Connection, meta: ClientHelloMetadata) void {
+        self.observed_server_name_len = 0;
+        self.observed_alpn_len = 0;
+
+        if (meta.server_name) |name| {
+            const n = @min(name.len, self.observed_server_name.len);
+            @memcpy(self.observed_server_name[0..n], name[0..n]);
+            self.observed_server_name_len = n;
+        }
+        if (meta.alpn_protocol) |alpn| {
+            const n = @min(alpn.len, self.observed_alpn.len);
+            @memcpy(self.observed_alpn[0..n], alpn[0..n]);
+            self.observed_alpn_len = n;
+        }
+    }
 };
 
 pub fn validateConfig(config: Config) Error!void {
     tls13.session.validateConfig(config.session) catch {
         return error.InvalidConfiguration;
     };
+    if (config.dynamic_server_credentials) |dyn| {
+        if (config.session.server_credentials != null) return error.InvalidConfiguration;
+        if (config.session.role != .server) return error.InvalidConfiguration;
+        if (dyn.auto_sign_from_store_ed25519) {
+            if (dyn.signature_scheme != 0x0807) return error.InvalidConfiguration;
+            if (dyn.sign_certificate_verify != null) return error.InvalidConfiguration;
+        } else if (dyn.sign_certificate_verify == null) {
+            return error.InvalidConfiguration;
+        }
+    }
 }
 
 fn findExtension(extensions: []const tls13.messages.Extension, ext_type: u16) ?[]const u8 {
@@ -502,6 +612,31 @@ fn buildClientHelloRecord(allocator: std.mem.Allocator, opts: ClientHelloBuildOp
     var ext_list = std.ArrayList(tls13.messages.Extension).empty;
     defer ext_list.deinit(allocator);
 
+    const versions_data = try allocator.dupe(u8, &.{ 0x02, 0x03, 0x04 });
+    try ext_list.append(allocator, .{
+        .extension_type = 0x002b,
+        .data = versions_data,
+    });
+
+    var groups_data = try allocator.alloc(u8, 4);
+    std.mem.writeInt(u16, groups_data[0..2], 2, .big);
+    std.mem.writeInt(u16, groups_data[2..4], tls13.session.named_group_x25519, .big);
+    try ext_list.append(allocator, .{
+        .extension_type = 0x000a,
+        .data = groups_data,
+    });
+
+    const kp = std.crypto.dh.X25519.KeyPair.generate();
+    var key_share_data = try allocator.alloc(u8, 2 + 2 + 2 + kp.public_key.len);
+    std.mem.writeInt(u16, key_share_data[0..2], @as(u16, @intCast(2 + 2 + kp.public_key.len)), .big);
+    std.mem.writeInt(u16, key_share_data[2..4], tls13.session.named_group_x25519, .big);
+    std.mem.writeInt(u16, key_share_data[4..6], @as(u16, @intCast(kp.public_key.len)), .big);
+    @memcpy(key_share_data[6..], &kp.public_key);
+    try ext_list.append(allocator, .{
+        .extension_type = 0x0033,
+        .data = key_share_data,
+    });
+
     if (opts.include_sni) {
         const sni_data = try allocator.alloc(u8, 5 + opts.server_name.len);
         sni_data[0] = 0;
@@ -578,17 +713,31 @@ test "write plaintext enqueues application data record" {
     var conn = Connection.init(std.testing.allocator, .{ .session = .{ .role = .client, .suite = .tls_aes_128_gcm_sha256 } });
     defer conn.deinit();
     conn.accept(.{});
+    conn.engine.machine.state = .connected;
+    // Seed application traffic keys directly so write path does not depend on handshake derivation.
+    @memset(conn.engine.app_write_key[0..16], 0x11);
+    @memset(conn.engine.app_write_iv[0..12], 0x22);
+    conn.engine.app_key_len = 16;
+    conn.engine.app_tag_len = 16;
 
     const written = try conn.write_plaintext("ping");
     try std.testing.expectEqual(@as(usize, 4), written);
 
     var out: [32]u8 = undefined;
     const n = try conn.drain_tls_records(&out);
-    try std.testing.expectEqual(@as(usize, 9), n);
+    try std.testing.expectEqual(@as(usize, 26), n);
     try std.testing.expectEqual(@as(u8, 23), out[0]);
     try std.testing.expectEqual(@as(u16, tls13.record.tls_legacy_record_version), std.mem.readInt(u16, out[1..3], .big));
-    try std.testing.expectEqual(@as(u16, 4), std.mem.readInt(u16, out[3..5], .big));
-    try std.testing.expectEqualStrings("ping", out[5..9]);
+    try std.testing.expectEqual(@as(u16, 21), std.mem.readInt(u16, out[3..5], .big));
+    try std.testing.expect(!std.mem.eql(u8, out[5..9], "ping"));
+}
+
+test "write plaintext before handshake completion is rejected" {
+    var conn = Connection.init(std.testing.allocator, .{ .session = .{ .role = .client, .suite = .tls_aes_128_gcm_sha256 } });
+    defer conn.deinit();
+    conn.accept(.{});
+
+    try std.testing.expectError(error.ApplicationCipherNotReady, conn.write_plaintext("ping"));
 }
 
 test "write plaintext requires accept before use" {
@@ -603,7 +752,7 @@ test "ingest with alert intent maps invalid record to fatal outcome" {
     defer conn.deinit();
     conn.accept(.{});
 
-    const out = try conn.ingest_tls_bytes_with_alert(&.{22, 3, 4, 0, 0});
+    const out = try conn.ingest_tls_bytes_with_alert(&.{ 22, 3, 4, 0, 0 });
     switch (out) {
         .fatal => |f| {
             try std.testing.expectEqual(error.InvalidLegacyVersion, f.err);
@@ -630,6 +779,48 @@ test "client hello callback receives sni and alpn metadata" {
     try std.testing.expect(cap.called);
     try std.testing.expectEqualStrings("example.com", cap.sni[0..cap.sni_len]);
     try std.testing.expectEqualStrings("h2", cap.alpn[0..cap.alpn_len]);
+}
+
+test "connection exposes observed and negotiated client hello metadata" {
+    const Hooks = struct {
+        fn sign(_: []const u8, _: u16, out_signature: []u8, _: usize) anyerror!usize {
+            const ed25519_len = std.crypto.sign.Ed25519.Signature.encoded_length;
+            if (out_signature.len < ed25519_len) return error.NoSpaceLeft;
+            @memset(out_signature[0..ed25519_len], 0x44);
+            return ed25519_len;
+        }
+    };
+    const cert_der = [_]u8{ 0x30, 0x03, 0x02, 0x01, 0x01 };
+    const chain = [_][]const u8{cert_der[0..]};
+
+    var conn = Connection.init(std.testing.allocator, .{
+        .session = .{
+            .role = .server,
+            .suite = .tls_aes_128_gcm_sha256,
+            .server_credentials = .{
+                .cert_chain_der = &chain,
+                .signature_scheme = 0x0807,
+                .sign_certificate_verify = Hooks.sign,
+            },
+        },
+    });
+    defer conn.deinit();
+    conn.accept(.{});
+
+    try std.testing.expect(conn.observedClientHelloServerName() == null);
+    try std.testing.expect(conn.observedClientHelloAlpn() == null);
+    try std.testing.expect(conn.negotiatedAlpn() == null);
+
+    const rec = try buildClientHelloRecord(std.testing.allocator, .{
+        .server_name = "api.example.com",
+        .alpn = "h2",
+    });
+    defer std.testing.allocator.free(rec);
+    _ = try conn.ingest_tls_bytes(rec);
+
+    try std.testing.expectEqualStrings("api.example.com", conn.observedClientHelloServerName().?);
+    try std.testing.expectEqualStrings("h2", conn.observedClientHelloAlpn().?);
+    try std.testing.expectEqualStrings("h2", conn.negotiatedAlpn().?);
 }
 
 test "client hello policy rejects mismatched server name with unrecognized_name alert" {
@@ -874,4 +1065,263 @@ test "handshake success captures cert generation and ticket key id bindings" {
     const bindings = conn.snapshot_runtime_bindings();
     try std.testing.expectEqual(@as(?u64, 1), bindings.cert_generation);
     try std.testing.expectEqual(@as(?u32, 88), bindings.ticket_key_id);
+}
+
+test "validate config rejects dynamic credentials for client role" {
+    var store = cert_reload.Store.init(std.testing.allocator);
+    defer store.deinit();
+    const Hooks = struct {
+        fn sign(_: []const u8, _: u16, _: []u8, _: usize) anyerror!usize {
+            return 0;
+        }
+    };
+
+    try std.testing.expectError(error.InvalidConfiguration, validateConfig(.{
+        .session = .{ .role = .client, .suite = .tls_aes_128_gcm_sha256 },
+        .dynamic_server_credentials = .{
+            .store = &store,
+            .sign_certificate_verify = Hooks.sign,
+        },
+    }));
+}
+
+test "validate config rejects mixed static and dynamic server credentials" {
+    var store = cert_reload.Store.init(std.testing.allocator);
+    defer store.deinit();
+    const Hooks = struct {
+        fn sign(_: []const u8, _: u16, _: []u8, _: usize) anyerror!usize {
+            return 0;
+        }
+    };
+    const cert_der = [_]u8{ 0x30, 0x03, 0x02, 0x01, 0x01 };
+    const chain = [_][]const u8{cert_der[0..]};
+
+    try std.testing.expectError(error.InvalidConfiguration, validateConfig(.{
+        .session = .{
+            .role = .server,
+            .suite = .tls_aes_128_gcm_sha256,
+            .server_credentials = .{
+                .cert_chain_der = &chain,
+                .signature_scheme = 0x0807,
+                .sign_certificate_verify = Hooks.sign,
+            },
+        },
+        .dynamic_server_credentials = .{
+            .store = &store,
+            .sign_certificate_verify = Hooks.sign,
+        },
+    }));
+}
+
+test "validate config rejects dynamic manual mode without signer callback" {
+    var store = cert_reload.Store.init(std.testing.allocator);
+    defer store.deinit();
+
+    try std.testing.expectError(error.InvalidConfiguration, validateConfig(.{
+        .session = .{ .role = .server, .suite = .tls_aes_128_gcm_sha256 },
+        .dynamic_server_credentials = .{
+            .store = &store,
+            .signature_scheme = 0x0807,
+        },
+    }));
+}
+
+test "validate config rejects dynamic auto ed25519 mode with mismatched signature scheme" {
+    var store = cert_reload.Store.init(std.testing.allocator);
+    defer store.deinit();
+
+    try std.testing.expectError(error.InvalidConfiguration, validateConfig(.{
+        .session = .{ .role = .server, .suite = .tls_aes_128_gcm_sha256 },
+        .dynamic_server_credentials = .{
+            .store = &store,
+            .signature_scheme = 0x0804,
+            .auto_sign_from_store_ed25519 = true,
+        },
+    }));
+}
+
+test "dynamic server credentials bind active cert store snapshot before server handshake" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cert_pem =
+        \\-----BEGIN CERTIFICATE-----
+        \\MAMCAQE=
+        \\-----END CERTIFICATE-----
+        \\
+    ;
+    try tmp.dir.writeFile(.{ .sub_path = "cert.pem", .data = cert_pem });
+    try tmp.dir.writeFile(.{ .sub_path = "key.pem", .data = "KEY-X" });
+
+    const cert_path = try tmp.dir.realpathAlloc(std.testing.allocator, "cert.pem");
+    defer std.testing.allocator.free(cert_path);
+    const key_path = try tmp.dir.realpathAlloc(std.testing.allocator, "key.pem");
+    defer std.testing.allocator.free(key_path);
+
+    var store = cert_reload.Store.init(std.testing.allocator);
+    defer store.deinit();
+    _ = try store.reloadFromFiles(cert_path, key_path);
+
+    const Hooks = struct {
+        fn sign(_: []const u8, _: u16, out_signature: []u8, _: usize) anyerror!usize {
+            const ed25519_len = std.crypto.sign.Ed25519.Signature.encoded_length;
+            if (out_signature.len < ed25519_len) return error.NoSpaceLeft;
+            @memset(out_signature[0..ed25519_len], 0x45);
+            return ed25519_len;
+        }
+    };
+
+    var conn = try Connection.initChecked(std.testing.allocator, .{
+        .session = .{ .role = .server, .suite = .tls_aes_128_gcm_sha256 },
+        .dynamic_server_credentials = .{
+            .store = &store,
+            .signature_scheme = 0x0807,
+            .sign_certificate_verify = Hooks.sign,
+        },
+    });
+    defer conn.deinit();
+    conn.accept(.{});
+
+    const rec = try buildClientHelloRecord(std.testing.allocator, .{});
+    defer std.testing.allocator.free(rec);
+    _ = try conn.ingest_tls_bytes(rec);
+
+    try std.testing.expectEqual(@as(?u64, 1), conn.dynamic_cert_generation);
+    try std.testing.expect(conn.engine.config.server_credentials != null);
+}
+
+test "dynamic server credentials fail closed when active snapshot is missing" {
+    var store = cert_reload.Store.init(std.testing.allocator);
+    defer store.deinit();
+
+    const Hooks = struct {
+        fn sign(_: []const u8, _: u16, out_signature: []u8, _: usize) anyerror!usize {
+            const ed25519_len = std.crypto.sign.Ed25519.Signature.encoded_length;
+            if (out_signature.len < ed25519_len) return error.NoSpaceLeft;
+            @memset(out_signature[0..ed25519_len], 0x46);
+            return ed25519_len;
+        }
+    };
+
+    var conn = try Connection.initChecked(std.testing.allocator, .{
+        .session = .{ .role = .server, .suite = .tls_aes_128_gcm_sha256 },
+        .dynamic_server_credentials = .{
+            .store = &store,
+            .signature_scheme = 0x0807,
+            .sign_certificate_verify = Hooks.sign,
+        },
+    });
+    defer conn.deinit();
+    conn.accept(.{});
+
+    const rec = try buildClientHelloRecord(std.testing.allocator, .{});
+    defer std.testing.allocator.free(rec);
+    try std.testing.expectError(error.NoActiveSnapshot, conn.ingest_tls_bytes(rec));
+}
+
+test "dynamic auto ed25519 mode binds signer bundle from store" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cert_pem =
+        \\-----BEGIN CERTIFICATE-----
+        \\MAMCAQE=
+        \\-----END CERTIFICATE-----
+        \\
+    ;
+    const key_pem =
+        \\-----BEGIN PRIVATE KEY-----
+        \\MC4CAQAwBQYDK2VwBCIEIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g
+        \\-----END PRIVATE KEY-----
+        \\
+    ;
+    try tmp.dir.writeFile(.{ .sub_path = "cert.pem", .data = cert_pem });
+    try tmp.dir.writeFile(.{ .sub_path = "key.pem", .data = key_pem });
+
+    const cert_path = try tmp.dir.realpathAlloc(std.testing.allocator, "cert.pem");
+    defer std.testing.allocator.free(cert_path);
+    const key_path = try tmp.dir.realpathAlloc(std.testing.allocator, "key.pem");
+    defer std.testing.allocator.free(key_path);
+
+    var store = cert_reload.Store.init(std.testing.allocator);
+    defer store.deinit();
+    _ = try store.reloadFromFiles(cert_path, key_path);
+
+    var conn = try Connection.initChecked(std.testing.allocator, .{
+        .session = .{ .role = .server, .suite = .tls_aes_128_gcm_sha256 },
+        .dynamic_server_credentials = .{
+            .store = &store,
+            .auto_sign_from_store_ed25519 = true,
+        },
+    });
+    defer conn.deinit();
+    conn.accept(.{});
+
+    const rec = try buildClientHelloRecord(std.testing.allocator, .{});
+    defer std.testing.allocator.free(rec);
+    _ = try conn.ingest_tls_bytes(rec);
+
+    try std.testing.expect(conn.dynamic_ed25519_bundle != null);
+    const creds = conn.engine.config.server_credentials orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 0x0807), creds.signature_scheme);
+    const sign_fn = creds.sign_certificate_verify orelse return error.TestUnexpectedResult;
+    var sig: [128]u8 = undefined;
+    const sig_len = try sign_fn("th", 0x0807, sig[0..], creds.signer_userdata);
+    try std.testing.expectEqual(@as(usize, 64), sig_len);
+}
+
+test "runtime bindings pin dynamic cert generation used by connection" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cert_pem =
+        \\-----BEGIN CERTIFICATE-----
+        \\MAMCAQE=
+        \\-----END CERTIFICATE-----
+        \\
+    ;
+    const key_pem =
+        \\-----BEGIN PRIVATE KEY-----
+        \\MC4CAQAwBQYDK2VwBCIEIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g
+        \\-----END PRIVATE KEY-----
+        \\
+    ;
+    try tmp.dir.writeFile(.{ .sub_path = "cert.pem", .data = cert_pem });
+    try tmp.dir.writeFile(.{ .sub_path = "key.pem", .data = key_pem });
+
+    const cert_path = try tmp.dir.realpathAlloc(std.testing.allocator, "cert.pem");
+    defer std.testing.allocator.free(cert_path);
+    const key_path = try tmp.dir.realpathAlloc(std.testing.allocator, "key.pem");
+    defer std.testing.allocator.free(key_path);
+
+    var store = cert_reload.Store.init(std.testing.allocator);
+    defer store.deinit();
+    _ = try store.reloadFromFiles(cert_path, key_path); // generation=1
+
+    var conn = try Connection.initChecked(std.testing.allocator, .{
+        .session = .{ .role = .server, .suite = .tls_aes_128_gcm_sha256 },
+        .dynamic_server_credentials = .{
+            .store = &store,
+            .auto_sign_from_store_ed25519 = true,
+        },
+    });
+    defer conn.deinit();
+    conn.accept(.{});
+
+    const rec = try buildClientHelloRecord(std.testing.allocator, .{});
+    defer std.testing.allocator.free(rec);
+    _ = try conn.ingest_tls_bytes(rec);
+    try std.testing.expectEqual(@as(?u64, 1), conn.dynamic_cert_generation);
+
+    // Rotate store after this connection already bound generation=1.
+    _ = try store.reloadFromFiles(cert_path, key_path); // generation=2
+
+    conn.handshake_started_at_ns = conn.nowNs();
+    var res = tls13.session.IngestResult{
+        .consumed = 0,
+        .actions = undefined,
+        .action_count = 1,
+    };
+    res.actions[0] = .{ .state_changed = .connected };
+    try conn.collectActions(res);
+
+    const bindings = conn.snapshot_runtime_bindings();
+    try std.testing.expectEqual(@as(?u64, 1), bindings.cert_generation);
 }

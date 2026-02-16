@@ -1,5 +1,6 @@
 const std = @import("std");
 const termination = @import("termination.zig");
+const tls13 = @import("tls13.zig");
 
 pub const TransportReadFn = *const fn (userdata: usize, out: []u8) anyerror!usize;
 pub const TransportWriteFn = *const fn (userdata: usize, bytes: []const u8) anyerror!usize;
@@ -20,8 +21,13 @@ pub const PumpResult = struct {
 };
 
 pub const EventLoopAdapter = struct {
+    const max_pending_read_bytes = (5 + tls13.record.max_ciphertext) * 4;
+
     conn: *termination.Connection,
     transport: Transport,
+    pending_read_buf: [max_pending_read_bytes]u8 = undefined,
+    pending_read_off: usize = 0,
+    pending_read_len: usize = 0,
     pending_write_buf: [65_540]u8 = undefined,
     pending_write_len: usize = 0,
     pending_write_off: usize = 0,
@@ -34,8 +40,7 @@ pub const EventLoopAdapter = struct {
         };
     }
 
-    pub fn deinit(_: *EventLoopAdapter) void {
-    }
+    pub fn deinit(_: *EventLoopAdapter) void {}
 
     pub fn pumpRead(self: *EventLoopAdapter, max_iters: usize) Error!PumpResult {
         var out = PumpResult{};
@@ -57,11 +62,8 @@ pub const EventLoopAdapter = struct {
 
             out.read_events += 1;
             out.bytes_read += n;
-            const ingest = try self.conn.ingest_tls_bytes_with_alert(read_buf[0..n]);
-            switch (ingest) {
-                .ok => {},
-                .fatal => return error.FatalAlert,
-            }
+            try self.appendPendingRead(read_buf[0..n]);
+            try self.processPendingRead();
         }
 
         return out;
@@ -103,11 +105,65 @@ pub const EventLoopAdapter = struct {
         self.pending_write_len = 0;
         self.pending_write_off = 0;
     }
+
+    fn appendPendingRead(self: *EventLoopAdapter, chunk: []const u8) Error!void {
+        if (chunk.len == 0) return;
+        if (self.pending_read_off + self.pending_read_len + chunk.len > self.pending_read_buf.len) {
+            if (self.pending_read_len > 0) {
+                const src = self.pending_read_buf[self.pending_read_off .. self.pending_read_off + self.pending_read_len];
+                std.mem.copyForwards(u8, self.pending_read_buf[0..self.pending_read_len], src);
+            }
+            self.pending_read_off = 0;
+        }
+        if (self.pending_read_off + self.pending_read_len + chunk.len > self.pending_read_buf.len) {
+            return error.ReadBufferOverflow;
+        }
+
+        const dst_start = self.pending_read_off + self.pending_read_len;
+        @memcpy(self.pending_read_buf[dst_start .. dst_start + chunk.len], chunk);
+        self.pending_read_len += chunk.len;
+    }
+
+    fn processPendingRead(self: *EventLoopAdapter) Error!void {
+        while (self.pending_read_len > 0) {
+            if (self.pending_read_len < 5) break;
+
+            const pending = self.pending_read_buf[self.pending_read_off .. self.pending_read_off + self.pending_read_len];
+            const header = tls13.record.parseHeader(pending[0..5]) catch |err| switch (err) {
+                error.IncompleteHeader => break,
+                else => {
+                    const ingest = try self.conn.ingest_tls_bytes_with_alert(pending);
+                    switch (ingest) {
+                        .ok => {
+                            self.pending_read_off = 0;
+                            self.pending_read_len = 0;
+                            return;
+                        },
+                        .fatal => return error.FatalAlert,
+                    }
+                },
+            };
+
+            const record_len: usize = 5 + @as(usize, header.length);
+            if (pending.len < record_len) break;
+
+            const ingest = try self.conn.ingest_tls_bytes_with_alert(pending[0..record_len]);
+            switch (ingest) {
+                .ok => {},
+                .fatal => return error.FatalAlert,
+            }
+            self.pending_read_off += record_len;
+            self.pending_read_len -= record_len;
+            if (self.pending_read_len == 0) {
+                self.pending_read_off = 0;
+            }
+        }
+    }
 };
 
 const MockTransport = struct {
     allocator: std.mem.Allocator,
-    read_chunks: [4][]const u8 = [_][]const u8{&.{}, &.{}, &.{}, &.{}},
+    read_chunks: [4][]const u8 = [_][]const u8{ &.{}, &.{}, &.{}, &.{} },
     read_count: usize = 0,
     read_idx: usize = 0,
     writes: std.ArrayList(u8) = .empty,
@@ -160,6 +216,13 @@ test "flushWrite handles partial writes with reentry safety" {
     });
     defer conn.deinit();
     conn.accept(.{});
+    conn.engine.machine.state = .connected;
+    // Seed application traffic keys for write path; fail-closed key-schedule now
+    // rejects connected writes without traffic secret material.
+    @memset(conn.engine.app_write_key[0..16], 0x11);
+    @memset(conn.engine.app_write_iv[0..12], 0x22);
+    conn.engine.app_key_len = 16;
+    conn.engine.app_tag_len = 16;
     _ = try conn.write_plaintext("hello");
 
     var mock = MockTransport.init(std.testing.allocator);
@@ -174,8 +237,10 @@ test "flushWrite handles partial writes with reentry safety" {
     try std.testing.expect(adapter.pending_write_len > 0);
 
     _ = try adapter.flushWrite(16);
-    const expected = [_]u8{ 23, 3, 3, 0, 5, 'h', 'e', 'l', 'l', 'o' };
-    try std.testing.expectEqualSlices(u8, &expected, mock.writes.items);
+    try std.testing.expect(mock.writes.items.len >= 5);
+    try std.testing.expectEqual(@as(u8, 23), mock.writes.items[0]);
+    const payload_len = std.mem.readInt(u16, mock.writes.items[3..5], .big);
+    try std.testing.expectEqual(mock.writes.items.len, 5 + payload_len);
     try std.testing.expectEqual(@as(usize, 0), adapter.pending_write_len);
 }
 
@@ -199,4 +264,72 @@ test "pumpRead consumes readable chunks then returns WouldBlock" {
     try std.testing.expectEqual(@as(usize, 1), out.read_events);
     try std.testing.expectEqual(@as(usize, 5), out.bytes_read);
     try std.testing.expect(out.would_block);
+}
+
+test "pumpRead reassembles fragmented alert record across reads" {
+    var conn = termination.Connection.init(std.testing.allocator, .{
+        .session = .{ .role = .client, .suite = .tls_aes_128_gcm_sha256 },
+    });
+    defer conn.deinit();
+    conn.accept(.{});
+
+    const close_notify = tls13.session.Engine.buildAlertRecord(.{
+        .level = .warning,
+        .description = .close_notify,
+    });
+
+    var mock = MockTransport.init(std.testing.allocator);
+    defer mock.deinit();
+    mock.read_chunks[0] = close_notify[0..3];
+    mock.read_chunks[1] = close_notify[3..];
+    mock.read_count = 2;
+    mock.read_would_block = true;
+
+    var adapter = EventLoopAdapter.init(std.testing.allocator, &conn, mock.asTransport());
+    defer adapter.deinit();
+
+    const out = try adapter.pumpRead(8);
+    try std.testing.expectEqual(@as(usize, 2), out.read_events);
+    try std.testing.expectEqual(@as(usize, close_notify.len), out.bytes_read);
+    try std.testing.expect(out.would_block);
+    try std.testing.expectEqual(@as(usize, 0), adapter.pending_read_len);
+    try std.testing.expect(conn.engine.machine.state == .closed);
+}
+
+test "pumpRead handles full record plus partial next record in one chunk" {
+    var conn = termination.Connection.init(std.testing.allocator, .{
+        .session = .{ .role = .client, .suite = .tls_aes_128_gcm_sha256 },
+    });
+    defer conn.deinit();
+    conn.accept(.{});
+
+    const close_notify = tls13.session.Engine.buildAlertRecord(.{
+        .level = .warning,
+        .description = .close_notify,
+    });
+    const user_cancel = tls13.session.Engine.buildAlertRecord(.{
+        .level = .fatal,
+        .description = .user_canceled,
+    });
+
+    var chunk: [12]u8 = undefined;
+    @memcpy(chunk[0..7], close_notify[0..]);
+    @memcpy(chunk[7..12], user_cancel[0..5]);
+
+    var mock = MockTransport.init(std.testing.allocator);
+    defer mock.deinit();
+    mock.read_chunks[0] = chunk[0..];
+    mock.read_chunks[1] = user_cancel[5..];
+    mock.read_count = 2;
+    mock.read_would_block = true;
+
+    var adapter = EventLoopAdapter.init(std.testing.allocator, &conn, mock.asTransport());
+    defer adapter.deinit();
+
+    const out = try adapter.pumpRead(8);
+    try std.testing.expectEqual(@as(usize, 2), out.read_events);
+    try std.testing.expectEqual(@as(usize, chunk.len + user_cancel.len - 5), out.bytes_read);
+    try std.testing.expect(out.would_block);
+    try std.testing.expectEqual(@as(usize, 0), adapter.pending_read_len);
+    try std.testing.expectEqual(@as(u64, 2), conn.snapshot_metrics().alerts_received);
 }
