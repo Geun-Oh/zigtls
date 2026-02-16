@@ -157,6 +157,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(lb_event_loop_sample);
 
+    const interop_termination_server = b.addExecutable(.{
+        .name = "interop-termination-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop_termination_server.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zigtls", .module = mod },
+            },
+        }),
+    });
+    b.installArtifact(interop_termination_server);
+    const install_interop_termination_server = b.addInstallArtifact(interop_termination_server, .{});
+
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).
     // This will evaluate the `run` step rather than the default step.
@@ -198,6 +212,9 @@ pub fn build(b: *std.Build) void {
     const lb_event_loop_sample_run = b.addRunArtifact(lb_event_loop_sample);
     const lb_event_loop_sample_step = b.step("lb-example", "Run event-loop adapter LB integration sample");
     lb_event_loop_sample_step.dependOn(&lb_event_loop_sample_run.step);
+
+    const interop_termination_server_step = b.step("interop-termination-server", "Build direct interop zigtls termination server tool");
+    interop_termination_server_step.dependOn(&install_interop_termination_server.step);
 
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
@@ -255,6 +272,18 @@ pub fn build(b: *std.Build) void {
     });
     const run_timing_probe_tests = b.addRunArtifact(timing_probe_tests);
 
+    const interop_termination_server_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/interop_termination_server.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zigtls", .module = mod },
+            },
+        }),
+    });
+    const run_interop_termination_server_tests = b.addRunArtifact(interop_termination_server_tests);
+
     const interop_matrix_self_test = b.addSystemCommand(&.{
         "bash",
         "scripts/interop/matrix_local.sh",
@@ -287,6 +316,7 @@ pub fn build(b: *std.Build) void {
     const interop_shell_syntax_check = b.addSystemCommand(&.{
         "bash",
         "-n",
+        "scripts/interop/zigtls_local.sh",
         "scripts/interop/openssl_local.sh",
         "scripts/interop/rustls_local.sh",
         "scripts/interop/nss_local.sh",
@@ -360,6 +390,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_corpus_replay_tests.step);
     test_step.dependOn(&run_bogo_shim_tests.step);
     test_step.dependOn(&run_timing_probe_tests.step);
+    test_step.dependOn(&run_interop_termination_server_tests.step);
     test_step.dependOn(&interop_matrix_self_test.step);
     test_step.dependOn(&bogo_summary_self_test.step);
     test_step.dependOn(&bogo_expected_failures_sync_self_test.step);

@@ -41,18 +41,20 @@ run_target() {
 }
 
 run_matrix() {
-  local openssl_script="$1"
-  local rustls_script="$2"
-  local nss_script="$3"
+  local zigtls_script="$1"
+  local openssl_script="$2"
+  local rustls_script="$3"
+  local nss_script="$4"
 
   local failures=0
 
-  run_target "openssl" "$openssl_script" || failures=$((failures + 1))
-  run_target "rustls" "$rustls_script" || failures=$((failures + 1))
-  run_target "nss" "$nss_script" || failures=$((failures + 1))
+  run_target "zigtls" "$zigtls_script" || failures=$((failures + 1))
+  ZIGTLS_SKIP_LOCAL_CHECK=1 run_target "openssl" "$openssl_script" || failures=$((failures + 1))
+  ZIGTLS_SKIP_LOCAL_CHECK=1 run_target "rustls" "$rustls_script" || failures=$((failures + 1))
+  ZIGTLS_SKIP_LOCAL_CHECK=1 run_target "nss" "$nss_script" || failures=$((failures + 1))
 
   if [[ "$failures" -eq 0 ]]; then
-    echo "[interop] summary: PASS (3/3)"
+    echo "[interop] summary: PASS (4/4)"
     return 0
   fi
 
@@ -72,7 +74,6 @@ require_env() {
 strict_preflight() {
   local failed=0
   require_env "RUSTLS_CLIENT" || failed=1
-  require_env "RUSTLS_SERVER" || failed=1
   require_env "NSS_DIR" || failed=1
   require_env "NSS_BIN_DIR" || failed=1
   require_env "NSS_LIB_DIR" || failed=1
@@ -106,9 +107,9 @@ S
   local code_direct_missing=$?
   run_target "nonexec" "$tmp/nonexec.sh" >/dev/null
   local code_direct_nonexec=$?
-  run_matrix "$tmp/ok.sh" "$tmp/fail.sh" "$tmp/ok.sh" >/dev/null
+  run_matrix "$tmp/ok.sh" "$tmp/ok.sh" "$tmp/fail.sh" "$tmp/ok.sh" >/dev/null
   local code_fail=$?
-  run_matrix "$tmp/ok.sh" "$tmp/missing.sh" "$tmp/ok.sh" >/dev/null
+  run_matrix "$tmp/ok.sh" "$tmp/ok.sh" "$tmp/missing.sh" "$tmp/ok.sh" >/dev/null
   local code_missing=$?
   set -e
   rm -rf "$tmp"
@@ -169,6 +170,7 @@ if [[ "$STRICT_MODE" -eq 1 ]]; then
 fi
 
 run_matrix \
+  "$INTEROP_DIR/zigtls_local.sh" \
   "$INTEROP_DIR/openssl_local.sh" \
   "$INTEROP_DIR/rustls_local.sh" \
   "$INTEROP_DIR/nss_local.sh"
