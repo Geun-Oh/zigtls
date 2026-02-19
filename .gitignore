@@ -5,3 +5,5 @@ artifacts/
 __pycache__/
 _*.md
 AGENTS.md
+.gocache
+.omx
