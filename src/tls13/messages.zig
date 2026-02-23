@@ -11,6 +11,42 @@ const hrr_random = [32]u8{
     0x07, 0x9E, 0x09, 0xE2, 0xC8, 0xA8, 0x33, 0x9C,
 };
 
+fn U16SeenSet(comptime capacity: usize) type {
+    comptime {
+        if (capacity == 0) @compileError("capacity must be > 0");
+    }
+
+    const bucket_count = capacity * 2;
+
+    return struct {
+        const Self = @This();
+
+        used: [bucket_count]bool = [_]bool{false} ** bucket_count,
+        keys: [bucket_count]u16 = [_]u16{0} ** bucket_count,
+
+        fn hash(key: u16) usize {
+            return (@as(usize, key) *% 40503) % bucket_count;
+        }
+
+        pub fn insertOrDuplicate(self: *Self, key: u16) bool {
+            var idx = hash(key);
+            var probes: usize = 0;
+            while (probes < bucket_count) : (probes += 1) {
+                if (!self.used[idx]) {
+                    self.used[idx] = true;
+                    self.keys[idx] = key;
+                    return false;
+                }
+                if (self.keys[idx] == key) return true;
+                idx = (idx + 1) % bucket_count;
+            }
+
+            // Fail closed if the table is unexpectedly saturated.
+            return true;
+        }
+    };
+}
+
 pub const Extension = struct {
     extension_type: u16,
     data: []u8,
@@ -150,6 +186,7 @@ pub const ClientHello = struct {
         }
 
         const exts_end = i + exts_len;
+        var ext_seen: U16SeenSet(max_extensions_per_message) = .{};
         while (i < exts_end) {
             if (i + 4 > exts_end) return error.Truncated;
             const ext_type = readU16(bytes[i .. i + 2]);
@@ -158,7 +195,7 @@ pub const ClientHello = struct {
             i += 2;
             if (i + ext_len > exts_end) return error.Truncated;
             if (ext_list.items.len >= max_extensions_per_message) return error.TooManyExtensions;
-            if (containsExtensionType(ext_list.items, ext_type)) return error.DuplicateExtension;
+            if (ext_seen.insertOrDuplicate(ext_type)) return error.DuplicateExtension;
             try ext_list.append(allocator, .{
                 .extension_type = ext_type,
                 .data = try allocator.dupe(u8, bytes[i .. i + ext_len]),
@@ -266,6 +303,7 @@ pub const ServerHello = struct {
         }
 
         const exts_end = i + exts_len;
+        var ext_seen: U16SeenSet(max_extensions_per_message) = .{};
         while (i < exts_end) {
             if (i + 4 > exts_end) return error.Truncated;
             const ext_type = readU16(bytes[i .. i + 2]);
@@ -274,7 +312,7 @@ pub const ServerHello = struct {
             i += 2;
             if (i + ext_len > exts_end) return error.Truncated;
             if (ext_list.items.len >= max_extensions_per_message) return error.TooManyExtensions;
-            if (containsExtensionType(ext_list.items, ext_type)) return error.DuplicateExtension;
+            if (ext_seen.insertOrDuplicate(ext_type)) return error.DuplicateExtension;
 
             try ext_list.append(allocator, .{
                 .extension_type = ext_type,
@@ -370,6 +408,7 @@ pub const CertificateMsg = struct {
             const ext_end = i + ext_len;
 
             var exts: std.ArrayList(Extension) = .empty;
+            var ext_seen: U16SeenSet(max_extensions_per_message) = .{};
             errdefer {
                 for (exts.items) |*ext| ext.deinit(allocator);
                 exts.deinit(allocator);
@@ -392,7 +431,7 @@ pub const CertificateMsg = struct {
                     allocator.free(cert_data);
                     return error.TooManyExtensions;
                 }
-                if (containsExtensionType(exts.items, ext_type)) {
+                if (ext_seen.insertOrDuplicate(ext_type)) {
                     allocator.free(cert_data);
                     return error.DuplicateExtension;
                 }
@@ -713,6 +752,14 @@ test "encrypted extensions rejects duplicate extension" {
     try std.testing.expectError(error.DuplicateExtension, EncryptedExtensions.decode(allocator, &bytes));
 }
 
+test "u16 seen set handles collisions and duplicates" {
+    var seen: U16SeenSet(4) = .{};
+    try std.testing.expect(!seen.insertOrDuplicate(1));
+    try std.testing.expect(!seen.insertOrDuplicate(9)); // same hash bucket as 1 when bucket_count=8
+    try std.testing.expect(!seen.insertOrDuplicate(17)); // same hash bucket chain
+    try std.testing.expect(seen.insertOrDuplicate(9));
+}
+
 fn readU16(bytes: []const u8) u16 {
     return (@as(u16, bytes[0]) << 8) | @as(u16, bytes[1]);
 }
@@ -733,17 +780,11 @@ fn readU24(bytes: []const u8) usize {
     return (@as(usize, bytes[0]) << 16) | (@as(usize, bytes[1]) << 8) | @as(usize, bytes[2]);
 }
 
-fn containsExtensionType(exts: []const Extension, extension_type: u16) bool {
-    for (exts) |ext| {
-        if (ext.extension_type == extension_type) return true;
-    }
-    return false;
-}
-
 fn decodeExtensionsVector(allocator: std.mem.Allocator, bytes: []const u8, ext_len: usize) ![]Extension {
     if (ext_len > bytes.len) return error.Truncated;
     var i: usize = 0;
     var ext_list: std.ArrayList(Extension) = .empty;
+    var ext_seen: U16SeenSet(max_extensions_per_message) = .{};
     errdefer {
         for (ext_list.items) |*ext| ext.deinit(allocator);
         ext_list.deinit(allocator);
@@ -757,7 +798,7 @@ fn decodeExtensionsVector(allocator: std.mem.Allocator, bytes: []const u8, ext_l
         i += 2;
         if (i + one_ext_len > ext_len) return error.Truncated;
         if (ext_list.items.len >= max_extensions_per_message) return error.TooManyExtensions;
-        if (containsExtensionType(ext_list.items, ext_type)) return error.DuplicateExtension;
+        if (ext_seen.insertOrDuplicate(ext_type)) return error.DuplicateExtension;
 
         try ext_list.append(allocator, .{
             .extension_type = ext_type,

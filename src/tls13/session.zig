@@ -92,19 +92,25 @@ pub fn validateConfig(config: Config) InitError!void {
     if (config.early_data.enabled and config.early_data.replay_filter == null) {
         return error.InvalidConfiguration;
     }
+
     if (config.enable_debug_keylog and config.keylog_callback == null) {
         return error.InvalidConfiguration;
     }
+
     if (config.server_credentials) |creds| {
         if (creds.cert_chain_der.len == 0) return error.InvalidConfiguration;
+
         if (creds.sign_certificate_verify == null) return error.InvalidConfiguration;
+
         if (!containsU16(config.allowed_signature_algorithms, creds.signature_scheme)) {
             return error.InvalidConfiguration;
         }
     }
+
     if (config.peer_validation.expected_server_name) |name| {
         if (name.len == 0) return error.InvalidConfiguration;
     }
+
     if (config.role != .client and config.peer_validation.expected_server_name != null) {
         return error.InvalidConfiguration;
     }
@@ -410,6 +416,7 @@ pub const Engine = struct {
                                 .node_id = self.config.early_data.replay_node_id,
                                 .epoch = self.config.early_data.replay_epoch,
                             };
+
                             if (replay_filter.seenOrInsertScoped(scope, ticket)) return error.EarlyDataRejected;
                             self.early_data_admitted = true;
                         }
@@ -563,35 +570,45 @@ pub const Engine = struct {
         while (cursor.len > 0) {
             const frame = try handshake.parseOne(cursor);
             const frame_len = 4 + @as(usize, @intCast(frame.header.length));
+
             try self.validateHandshakeBody(frame.header.handshake_type, frame.body);
             self.transcript.update(cursor[0..frame_len]);
             self.metrics.handshake_messages += 1;
 
             const prev_state = self.machine.state;
             const event = handshake.classifyEvent(frame);
+
             try self.machine.onEvent(event);
+
             try result.push(.{ .handshake = frame.header.handshake_type });
+
             if (event == .hello_retry_request) {
                 try result.push(.{ .hello_retry_request = {} });
             }
+
             if (self.config.role == .client and
                 event == .server_hello and
                 self.machine.state == .wait_encrypted_extensions)
             {
                 try self.derivePreApplicationKeyScheduleStages();
             }
+
             if (self.config.role == .server and frame.header.handshake_type == .client_hello and prev_state == .start) {
                 const queued = try self.queueServerHandshakeFlight(frame.body);
+
                 if (queued > 0) {
                     try result.push(.{ .send_handshake_flight = queued });
                 }
             }
+
             if (frame.header.handshake_type == .key_update) {
                 self.metrics.keyupdate_messages += 1;
                 const req = try handshake.parseKeyUpdateRequest(frame.body);
                 self.ratchetReadTrafficSecret();
                 self.ratchetLatestTrafficSecret();
+
                 try result.push(.{ .key_update = req });
+
                 if (req == .update_requested) {
                     try result.push(.{ .send_key_update = .update_not_requested });
                 }
@@ -600,6 +617,7 @@ pub const Engine = struct {
 
             if (prev_state != .connected and self.machine.state == .connected) {
                 self.metrics.connected_transitions += 1;
+
                 if (!(self.config.role == .server and self.app_key_len != 0)) {
                     try self.deriveConnectedKeyScheduleStages();
                 }
@@ -616,8 +634,10 @@ pub const Engine = struct {
         result: *IngestResult,
     ) EngineError!void {
         try self.ensureApplicationTrafficReady();
+
         if (payload.len < self.app_tag_len + 1) return error.DecryptFailed;
         const ciphertext_len = payload.len - self.app_tag_len;
+
         if (ciphertext_len > self.app_data_scratch.len) return error.RecordOverflow;
         const ciphertext = payload[0..ciphertext_len];
         var tag: [16]u8 = undefined;
@@ -642,9 +662,11 @@ pub const Engine = struct {
 
         self.app_read_seq = std.math.add(u64, self.app_read_seq, 1) catch return error.SequenceOverflow;
         const inner = std.mem.trimRight(u8, self.app_data_scratch[0..ciphertext_len], "\x00");
+
         if (inner.len == 0) return error.InvalidInnerContentType;
         const inner_type = std.meta.intToEnum(record.ContentType, inner[inner.len - 1]) catch return error.InvalidInnerContentType;
         const clear = inner[0 .. inner.len - 1];
+
         switch (inner_type) {
             .application_data => {
                 try result.push(.{ .application_data = clear });
@@ -652,13 +674,16 @@ pub const Engine = struct {
             .alert => {
                 const alert = try alerts.Alert.decode(clear);
                 self.metrics.alerts_received += 1;
+
                 try result.push(.{ .received_alert = alert });
+
                 if (alert.description == .close_notify) {
                     self.saw_close_notify = true;
                     self.machine.markClosed();
                 } else {
                     self.machine.markClosing();
                 }
+
                 try result.push(.{ .state_changed = self.machine.state });
             },
             .handshake => try self.ingestHandshakePayload(clear, result),
@@ -1736,16 +1761,23 @@ pub const Engine = struct {
     fn validateHandshakeBody(self: *Engine, handshake_type: state.HandshakeType, body: []const u8) EngineError!void {
         switch (handshake_type) {
             .server_hello => {
+                // Validate Body
                 var sh = messages.ServerHello.decode(self.allocator, body) catch return error.InvalidHelloMessage;
                 defer sh.deinit(self.allocator);
+
+                // Detect Downgrade
                 if (self.config.role == .client and hasDowngradeMarker(sh.random)) {
                     return error.DowngradeDetected;
                 }
+
                 if (self.config.role == .client) {
                     if (sh.compression_method != 0x00) return error.InvalidCompressionMethod;
+
+                    // Validate CipherSuite (Extension Structure)
                     if (sh.cipher_suite != configuredCipherSuiteCodepoint(self.config.suite)) {
                         return error.ConfiguredCipherSuiteMismatch;
                     }
+
                     if (messages.serverHelloHasHrrRandom(body)) {
                         try self.requireHrrExtensions(sh.extensions);
                     } else {
@@ -1757,36 +1789,47 @@ pub const Engine = struct {
             .client_hello => {
                 var ch = messages.ClientHello.decode(self.allocator, body) catch return error.InvalidHelloMessage;
                 defer ch.deinit(self.allocator);
+
                 if (self.config.role == .server) {
+                    // Validate all the mandatory extension (SNI, key_share, supported_versions...etc)
                     if (!containsCipherSuite(ch.cipher_suites, configuredCipherSuiteCodepoint(self.config.suite))) {
                         return error.ConfiguredCipherSuiteMismatch;
                     }
+
                     try self.requireClientHelloExtensions(ch.compression_methods, ch.extensions);
                 }
             },
             .certificate => {
                 var cert = messages.CertificateMsg.decode(self.allocator, body) catch return error.InvalidCertificateMessage;
                 defer cert.deinit(self.allocator);
+
                 try self.capturePeerLeafCertificate(cert);
+
+                // Validate validation pollicy
                 try self.validatePeerCertificatePolicy(cert);
             },
             .certificate_verify => {
                 var cert_verify = messages.CertificateVerifyMsg.decode(self.allocator, body) catch return error.InvalidCertificateVerifyMessage;
                 defer cert_verify.deinit(self.allocator);
+
                 if (!self.isAllowedSignatureAlgorithm(cert_verify.algorithm)) {
                     return error.UnsupportedSignatureAlgorithm;
                 }
+
                 if (self.config.peer_validation.enforce_certificate_verify) {
                     try self.verifyPeerCertificateVerify(cert_verify.algorithm, cert_verify.signature);
                 }
             },
             .finished => {
+                // Validate Finished MAC length + HMAC validation
                 if (body.len != keyschedule.digestLen(self.config.suite)) {
                     return error.InvalidFinishedMessage;
                 }
+
                 if (self.config.role == .server and self.peerCertificateIsRequired() and !self.saw_peer_certificate) {
                     return error.MissingPeerCertificate;
                 }
+
                 if (self.config.role == .server and self.config.server_credentials != null and self.handshake_read_secret != null) {
                     const hs_secret = self.handshake_read_secret.?;
                     const ok = switch (self.config.suite) {
@@ -1815,6 +1858,7 @@ pub const Engine = struct {
                             },
                         },
                     };
+
                     if (!ok) return error.InvalidFinishedMessage;
                 }
             },
@@ -1992,12 +2036,19 @@ fn hasExtension(extensions: []const messages.Extension, extension_type: u16) boo
 
 fn requireAllowedExtensions(
     extensions: []const messages.Extension,
-    allowed: []const u16,
+    comptime allowed: []const u16,
     comptime unexpected_err: anytype,
 ) EngineError!void {
     for (extensions) |ext| {
-        if (!containsU16(allowed, ext.extension_type)) return unexpected_err;
+        if (!containsU16Comptime(allowed, ext.extension_type)) return unexpected_err;
     }
+}
+
+fn containsU16Comptime(comptime values: []const u16, wanted: u16) bool {
+    inline for (values) |value| {
+        if (value == wanted) return true;
+    }
+    return false;
 }
 
 fn containsU16(values: []const u16, wanted: u16) bool {

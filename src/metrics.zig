@@ -1,28 +1,33 @@
 const std = @import("std");
 
+const latency_bucket_bounds_ns = [_]u64{
+    std.time.ns_per_ms * 1,
+    std.time.ns_per_ms * 5,
+    std.time.ns_per_ms * 10,
+    std.time.ns_per_ms * 25,
+    std.time.ns_per_ms * 50,
+    std.time.ns_per_ms * 100,
+    std.time.ns_per_ms * 250,
+    std.time.ns_per_ms * 500,
+    std.time.ns_per_ms * 1000,
+};
+
+fn bucketIndexForLatency(comptime bounds: []const u64, latency_ns: u64) usize {
+    inline for (bounds, 0..) |bound, idx| {
+        if (latency_ns <= bound) return idx;
+    }
+    return bounds.len;
+}
+
 pub const LatencyHistogram = struct {
+    pub const bucket_bounds_ns = latency_bucket_bounds_ns;
+
     // <= 1ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1000ms, +Inf
-    bucket_bounds_ns: [9]u64 = .{
-        std.time.ns_per_ms * 1,
-        std.time.ns_per_ms * 5,
-        std.time.ns_per_ms * 10,
-        std.time.ns_per_ms * 25,
-        std.time.ns_per_ms * 50,
-        std.time.ns_per_ms * 100,
-        std.time.ns_per_ms * 250,
-        std.time.ns_per_ms * 500,
-        std.time.ns_per_ms * 1000,
-    },
-    bucket_counts: [10]u64 = [_]u64{0} ** 10,
+    bucket_counts: [bucket_bounds_ns.len + 1]u64 = [_]u64{0} ** (bucket_bounds_ns.len + 1),
 
     pub fn observe(self: *LatencyHistogram, latency_ns: u64) void {
-        for (self.bucket_bounds_ns, 0..) |bound, idx| {
-            if (latency_ns <= bound) {
-                self.bucket_counts[idx] += 1;
-                return;
-            }
-        }
-        self.bucket_counts[self.bucket_counts.len - 1] += 1;
+        const idx = bucketIndexForLatency(bucket_bounds_ns[0..], latency_ns);
+        self.bucket_counts[idx] += 1;
     }
 
     pub fn total(self: LatencyHistogram) u64 {
@@ -41,10 +46,10 @@ pub const LatencyHistogram = struct {
         for (self.bucket_counts, 0..) |count, idx| {
             cumulative += count;
             if (cumulative < target) continue;
-            if (idx < self.bucket_bounds_ns.len) return self.bucket_bounds_ns[idx];
-            return self.bucket_bounds_ns[self.bucket_bounds_ns.len - 1];
+            if (idx < bucket_bounds_ns.len) return bucket_bounds_ns[idx];
+            return bucket_bounds_ns[bucket_bounds_ns.len - 1];
         }
-        return self.bucket_bounds_ns[self.bucket_bounds_ns.len - 1];
+        return bucket_bounds_ns[bucket_bounds_ns.len - 1];
     }
 };
 
@@ -121,10 +126,10 @@ pub const Metrics = struct {
         var cumulative: u64 = 0;
         for (self.handshake_latency.bucket_counts, 0..) |count, idx| {
             cumulative += count;
-            if (idx < self.handshake_latency.bucket_bounds_ns.len) {
+            if (idx < LatencyHistogram.bucket_bounds_ns.len) {
                 try w.print(
                     "zigtls_handshake_latency_bucket{{le=\"{d}\"}} {d}\n",
-                    .{ self.handshake_latency.bucket_bounds_ns[idx], cumulative },
+                    .{ LatencyHistogram.bucket_bounds_ns[idx], cumulative },
                 );
             } else {
                 try w.print("zigtls_handshake_latency_bucket{{le=\"+Inf\"}} {d}\n", .{cumulative});
@@ -182,4 +187,13 @@ test "prometheus export includes key metric families" {
     try std.testing.expect(std.mem.indexOf(u8, body, "zigtls_handshake_started_total 1") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "zigtls_alert_total{code=\"0\"} 1") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "zigtls_handshake_latency_p50_ns") != null);
+}
+
+test "latency histogram boundary and +Inf buckets are tracked correctly" {
+    var h = LatencyHistogram{};
+    h.observe(LatencyHistogram.bucket_bounds_ns[0]);
+    h.observe(LatencyHistogram.bucket_bounds_ns[LatencyHistogram.bucket_bounds_ns.len - 1] + 1);
+
+    try std.testing.expectEqual(@as(u64, 1), h.bucket_counts[0]);
+    try std.testing.expectEqual(@as(u64, 1), h.bucket_counts[h.bucket_counts.len - 1]);
 }
