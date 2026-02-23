@@ -133,26 +133,32 @@ pub const Connection = struct {
 
     pub fn ingest_tls_bytes(self: *Connection, record_bytes: []const u8) Error!tls13.session.IngestResult {
         if (!self.accepted) return error.NotAccepted;
+
         try self.enforceHandshakeRateLimit();
         self.observeHandshakeStartIfNeeded();
+
         if (try self.inspectClientHelloAndCheckPolicy(record_bytes)) |alert_description| {
             try self.rejectClientHelloPolicy(alert_description);
             self.observeHandshakeFailureIfNeeded();
             return error.HandshakePolicyRejected;
         }
+
         try self.bindDynamicServerCredentialsIfNeeded();
         const result = self.engine.ingestRecord(record_bytes) catch |err| {
             self.observeHandshakeFailureIfNeeded();
             return err;
         };
+
         try self.collectActions(result);
         return result;
     }
 
     pub fn ingest_tls_bytes_with_alert(self: *Connection, record_bytes: []const u8) Error!tls13.session.IngestWithAlertOutcome {
         if (!self.accepted) return error.NotAccepted;
+
         try self.enforceHandshakeRateLimit();
         self.observeHandshakeStartIfNeeded();
+
         if (try self.inspectClientHelloAndCheckPolicy(record_bytes)) |alert_description| {
             try self.rejectClientHelloPolicy(alert_description);
             self.observeHandshakeFailureIfNeeded();
@@ -163,6 +169,7 @@ pub const Connection = struct {
                 },
             };
         }
+
         try self.bindDynamicServerCredentialsIfNeeded();
         const out = self.engine.ingestRecordWithAlertIntent(record_bytes);
         switch (out) {
@@ -228,6 +235,7 @@ pub const Connection = struct {
     pub fn shutdown(self: *Connection) Error!void {
         if (!self.accepted) return error.NotAccepted;
         const frame = tls13.session.Engine.buildAlertRecord(.{ .level = .warning, .description = .close_notify });
+
         try self.pushPendingRecord(frame[0..]);
         self.engine.machine.markClosed();
         self.emitLog(.shutdown, tls13.alerts.AlertDescription.close_notify);
@@ -358,17 +366,21 @@ pub const Connection = struct {
         if (policy.require_server_name and meta.server_name == null) {
             return .unrecognized_name;
         }
+
         if (policy.allowed_server_names) |allowed| {
             const observed = meta.server_name orelse return .unrecognized_name;
             if (!containsServerName(allowed, observed)) return .unrecognized_name;
         }
+
         if (policy.require_alpn and meta.alpn_protocol == null) {
             return .no_application_protocol;
         }
+
         if (policy.allowed_alpn_protocols) |allowed| {
             const observed = meta.alpn_protocol orelse return .no_application_protocol;
             if (!containsExactProtocol(allowed, observed)) return .no_application_protocol;
         }
+
         return null;
     }
 
@@ -386,11 +398,13 @@ pub const Connection = struct {
     fn enforceHandshakeRateLimit(self: *Connection) Error!void {
         if (self.engine.machine.state == .connected) return;
         const limiter = self.config.handshake_rate_limiter orelse return;
+
         if (!limiter.allowAt(self.nowNs())) return error.HandshakeRateLimited;
     }
 
     fn observeHandshakeStartIfNeeded(self: *Connection) void {
         if (self.handshake_started_at_ns != null) return;
+
         if (self.engine.machine.state == .connected) return;
         self.handshake_started_at_ns = self.nowNs();
         self.telemetry.observeHandshakeStart();
@@ -427,6 +441,7 @@ pub const Connection = struct {
     }
 
     fn captureRuntimeBindings(self: *Connection) void {
+        // Log activate certificate generation
         if (self.dynamic_cert_generation) |gen| {
             self.active_cert_generation = gen;
         } else if (self.config.cert_store) |store| {
@@ -434,6 +449,8 @@ pub const Connection = struct {
                 self.active_cert_generation = snap.generation;
             }
         }
+
+        // Log activate ticket key ID
         if (self.config.ticket_key_manager) |manager| {
             const key = manager.currentEncryptKey(self.nowUnix()) catch return;
             self.active_ticket_key_id = key.key_id;
@@ -455,6 +472,7 @@ pub const Connection = struct {
 
         const snap = dyn.store.snapshot() orelse return error.NoActiveSnapshot;
         if (self.dynamic_cert_generation) |gen| {
+            // Skip if credential is already latest
             if (gen == snap.generation) return;
         }
 
@@ -467,6 +485,7 @@ pub const Connection = struct {
             self.dynamic_ed25519_bundle = null;
         }
 
+        // Release current cache and load new certification
         self.dynamic_cert_generation = snap.generation;
         if (dyn.auto_sign_from_store_ed25519) {
             const bundle = try dyn.store.loadActiveEd25519Bundle(self.allocator);
@@ -509,9 +528,12 @@ pub fn validateConfig(config: Config) Error!void {
     };
     if (config.dynamic_server_credentials) |dyn| {
         if (config.session.server_credentials != null) return error.InvalidConfiguration;
+
         if (config.session.role != .server) return error.InvalidConfiguration;
+
         if (dyn.auto_sign_from_store_ed25519) {
             if (dyn.signature_scheme != 0x0807) return error.InvalidConfiguration;
+
             if (dyn.sign_certificate_verify != null) return error.InvalidConfiguration;
         } else if (dyn.sign_certificate_verify == null) {
             return error.InvalidConfiguration;
