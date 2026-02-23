@@ -133,6 +133,8 @@ if [[ "$MODE" == "all" || "$MODE" == "basic" ]]; then
   run_cmd "bash scripts/fuzz/replay_corpus.sh --self-test"
   run_cmd "bash scripts/benchmark/run_local_perf.sh --assert"
   run_cmd "bash scripts/security/run_timing_harness.sh --assert"
+  run_cmd "bash scripts/release/check_external_consumer_url.sh --self-test"
+  run_cmd "bash scripts/release/prepare_tag_release.sh --self-test"
   run_cmd "bash scripts/release/check_production_artifacts.sh"
 fi
 

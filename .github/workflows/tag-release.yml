@@ -1,0 +1,73 @@
+name: tag-release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Baseline Tests
+        run: zig build test
+
+      - name: Prepare Tag Release Artifacts
+        id: prepare
+        shell: bash
+        run: |
+          set -euo pipefail
+          out_dir="$RUNNER_TEMP/zigtls-release"
+          bash scripts/release/prepare_tag_release.sh \
+            --tag "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --out-dir "$out_dir"
+
+          # shellcheck disable=SC1090
+          source "$out_dir/metadata.env"
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "tarball_path=$TARBALL_PATH" >> "$GITHUB_OUTPUT"
+          echo "zig_hash=$ZIG_PACKAGE_HASH" >> "$GITHUB_OUTPUT"
+          echo "release_notes_path=$RELEASE_NOTES_PATH" >> "$GITHUB_OUTPUT"
+          echo "snippet_path=$SNIPPET_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Verify External URL/Hash Consumer
+        run: |
+          set -euo pipefail
+          bash scripts/release/check_external_consumer_url.sh \
+            --url "${{ steps.prepare.outputs.tarball_path }}" \
+            --hash "${{ steps.prepare.outputs.zig_hash }}"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.prepare.outputs.tag }}
+          body_path: ${{ steps.prepare.outputs.release_notes_path }}
+          files: ${{ steps.prepare.outputs.tarball_path }}
+          fail_on_unmatched_files: true
+
+      - name: Append Snippet to Job Summary
+        shell: bash
+        run: |
+          {
+            echo '## build.zig.zon snippet'
+            echo
+            echo '```zig'
+            cat "${{ steps.prepare.outputs.snippet_path }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

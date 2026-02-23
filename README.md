@@ -19,16 +19,18 @@ It is built to be imported by other Zig projects and to run behind production-st
 
 Add this repository as a Zig dependency, then import `zigtls` from your build graph.
 
-Example `build.zig.zon` dependency entry (replace URL and hash with your pinned source):
+Example `build.zig.zon` dependency entry (replace tag/hash with your pinned release):
 
 ```zig
 .dependencies = .{
     .zigtls = .{
-        .url = "https://github.com/<org>/zigtls/archive/<tag>.tar.gz",
+        .url = "https://github.com/Geun-Oh/zigtls/releases/download/<tag>/zigtls-<tag>.tar.gz",
         .hash = "<content-hash>",
     },
 },
 ```
+
+Tag releases automatically publish this tarball and emit the exact snippet/hash in release notes via `.github/workflows/tag-release.yml` (trigger: `push` on `v*` tags).
 
 Wire the module in `build.zig`:
 
@@ -120,6 +122,12 @@ External consumer compatibility check:
 
 ```bash
 bash scripts/release/check_external_consumer.sh
+```
+
+External consumer URL/hash compatibility check:
+
+```bash
+bash scripts/release/check_external_consumer_url.sh --url <tarball-url-or-path> --hash <content-hash>
 ```
 
 ## Operational guides
