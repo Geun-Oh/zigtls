@@ -19,7 +19,13 @@ It is built to be imported by other Zig projects and to run behind production-st
 
 Add this repository as a Zig dependency, then import `zigtls` from your build graph.
 
-Example `build.zig.zon` dependency entry (replace tag/hash with your pinned release):
+You can add zigtls in your project like below command.
+
+```zig
+zig fetch --save https://github.com/Geun-Oh/zigtls/releases/download/v0.1.1/zigtls-v0.1.1.tar.gz
+```
+
+Than it will be added into your `build.zig.zon` dependency entry (replace tag/hash with your pinned release):
 
 ```zig
 .dependencies = .{
