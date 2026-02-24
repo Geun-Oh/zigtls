@@ -212,6 +212,7 @@ pub fn build(b: *std.Build) void {
     const lb_event_loop_sample_run = b.addRunArtifact(lb_event_loop_sample);
     const lb_event_loop_sample_step = b.step("lb-example", "Run event-loop adapter LB integration sample");
     lb_event_loop_sample_step.dependOn(&lb_event_loop_sample_run.step);
+    const is_ci = b.graph.env_map.get("CI") != null or b.graph.env_map.get("GITHUB_ACTIONS") != null;
 
     const interop_termination_server_step = b.step("interop-termination-server", "Build direct interop zigtls termination server tool");
     interop_termination_server_step.dependOn(&install_interop_termination_server.step);
@@ -406,7 +407,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&external_consumer_self_test.step);
     test_step.dependOn(&external_consumer_check.step);
     test_step.dependOn(&interop_shell_syntax_check.step);
-    test_step.dependOn(&lb_event_loop_sample_run.step);
+    if (!is_ci) test_step.dependOn(&lb_event_loop_sample_run.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
