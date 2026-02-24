@@ -1,4 +1,4 @@
-# zigtls
+# ⚡ zigtls
 
 `zigtls` is a Zig-first TLS termination library for load balancers and edge proxies.
 It is built to be imported by other Zig projects and to run behind production-style release gates (strict interop, BoGo profile checks, timing/perf assertions, and reliability drills).
