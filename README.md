@@ -63,9 +63,10 @@ Build and run the included event-loop sample:
 zig build lb-example
 ```
 
-Sample source: `examples/lb_event_loop_sample.zig`
+Sample source: `examples/lb_event_loop_sample.zig`  
+This sample is an event-loop/protocol flow demo. It uses mock credentials, not production certificate issuance or rotation.
 
-Minimal server-side usage shape:
+Production-oriented server-side usage shape (real cert/key binding):
 
 ```zig
 const std = @import("std");
@@ -76,8 +77,22 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var conn = zigtls.termination.Connection.init(allocator, .{
-        .session = .{ .role = .server, .suite = .tls_aes_128_gcm_sha256 },
+    var store = zigtls.cert_reload.Store.init(allocator);
+    defer store.deinit();
+
+    // PEM files are provisioned/rotated by external tooling (ACME, cert-manager, etc.).
+    _ = try store.reloadFromFiles("./certs/server-cert.pem", "./certs/server-key.pem");
+
+    var conn = try zigtls.termination.Connection.initChecked(allocator, .{
+        .session = .{
+            .role = .server,
+            .suite = .tls_aes_128_gcm_sha256,
+        },
+        .dynamic_server_credentials = .{
+            .store = &store,
+            // Auto signer path expects Ed25519 PKCS#8 private key.
+            .auto_sign_from_store_ed25519 = true,
+        },
     });
     defer conn.deinit();
 
@@ -91,6 +106,8 @@ pub fn main() !void {
     // _ = conn.read_plaintext(app_buf);
 }
 ```
+
+For non-Ed25519 keys, use manual signer callback mode via `dynamic_server_credentials.sign_certificate_verify`.
 
 ## API map
 
