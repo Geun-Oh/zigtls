@@ -134,6 +134,26 @@ pub fn main() !void {
     }
     if (drained_total == 0) return error.NoHandshakeFlight;
 
+    // Force semantic analysis/instantiation of externally visible termination APIs
+    // so lazy analysis cannot hide stdlib compatibility regressions.
+    var zero_plain_out: [0]u8 = .{};
+    const plain_n = conn.read_plaintext(zero_plain_out[0..]);
+    if (plain_n != 0) return error.UnexpectedPlaintextCount;
+
+    const wrote_n = try conn.write_plaintext("");
+    if (wrote_n != 0) return error.UnexpectedWrittenCount;
+
+    _ = conn.snapshot_metrics();
+    _ = conn.snapshot_telemetry();
+    _ = conn.snapshot_runtime_bindings();
+
+    const observed_sni = conn.observedClientHelloServerName() orelse return error.MissingObservedSni;
+    if (!std.mem.eql(u8, observed_sni, "example.com")) return error.UnexpectedObservedSni;
+    const observed_alpn = conn.observedClientHelloAlpn() orelse return error.MissingObservedAlpn;
+    if (!std.mem.eql(u8, observed_alpn, "h2")) return error.UnexpectedObservedAlpn;
+    const negotiated_alpn = conn.negotiatedAlpn() orelse return error.MissingNegotiatedAlpn;
+    if (!std.mem.eql(u8, negotiated_alpn, "h2")) return error.UnexpectedNegotiatedAlpn;
+
     std.debug.print("external-consumer-ok:{s}:{d}\n", .{ zigtls.version(), drained_total });
 }
 
