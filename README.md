@@ -22,7 +22,7 @@ Add this repository as a Zig dependency, then import `zigtls` from your build gr
 You can add zigtls in your project like below command.
 
 ```zig
-zig fetch --save https://github.com/Geun-Oh/zigtls/releases/download/v0.1.1/zigtls-v0.1.1.tar.gz
+zig fetch --save https://github.com/Geun-Oh/zigtls/releases/download/v0.1.2/zigtls-v0.1.2.tar.gz
 ```
 
 Than it will be added into your `build.zig.zon` dependency entry (replace tag/hash with your pinned release):
