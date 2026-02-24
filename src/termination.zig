@@ -206,7 +206,7 @@ pub const Connection = struct {
         if (n == self.pending_plaintext.items.len) {
             self.pending_plaintext.clearRetainingCapacity();
         } else {
-            _ = self.pending_plaintext.orderedRemoveRange(0, n);
+            self.pending_plaintext.replaceRangeAssumeCapacity(0, n, &.{});
         }
         return n;
     }
@@ -760,6 +760,48 @@ test "write plaintext before handshake completion is rejected" {
     conn.accept(.{});
 
     try std.testing.expectError(error.ApplicationCipherNotReady, conn.write_plaintext("ping"));
+}
+
+test "read plaintext drains full pending buffer when output is large enough" {
+    var conn = Connection.init(std.testing.allocator, .{ .session = .{ .role = .client, .suite = .tls_aes_128_gcm_sha256 } });
+    defer conn.deinit();
+
+    try conn.pending_plaintext.appendSlice(std.testing.allocator, "hello");
+
+    var out: [16]u8 = undefined;
+    const n = conn.read_plaintext(out[0..]);
+    try std.testing.expectEqual(@as(usize, 5), n);
+    try std.testing.expectEqualStrings("hello", out[0..n]);
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_plaintext.items.len);
+}
+
+test "read plaintext partial drain preserves ordering for remaining bytes" {
+    var conn = Connection.init(std.testing.allocator, .{ .session = .{ .role = .client, .suite = .tls_aes_128_gcm_sha256 } });
+    defer conn.deinit();
+
+    try conn.pending_plaintext.appendSlice(std.testing.allocator, "abcdef");
+
+    var out: [3]u8 = undefined;
+    const n = conn.read_plaintext(out[0..]);
+    try std.testing.expectEqual(@as(usize, 3), n);
+    try std.testing.expectEqualStrings("abc", out[0..n]);
+    try std.testing.expectEqualStrings("def", conn.pending_plaintext.items);
+}
+
+test "read plaintext boundary paths keep data stable" {
+    var conn = Connection.init(std.testing.allocator, .{ .session = .{ .role = .client, .suite = .tls_aes_128_gcm_sha256 } });
+    defer conn.deinit();
+
+    try conn.pending_plaintext.appendSlice(std.testing.allocator, "xy");
+    var zero_out: [0]u8 = .{};
+    try std.testing.expectEqual(@as(usize, 0), conn.read_plaintext(zero_out[0..]));
+    try std.testing.expectEqualStrings("xy", conn.pending_plaintext.items);
+
+    var out: [4]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 2), conn.read_plaintext(out[0..]));
+    try std.testing.expectEqualStrings("xy", out[0..2]);
+
+    try std.testing.expectEqual(@as(usize, 0), conn.read_plaintext(out[0..]));
 }
 
 test "write plaintext requires accept before use" {
