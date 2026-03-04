@@ -218,6 +218,7 @@ pub const EngineError = error{
     MissingKeyExchangeSecret,
     MissingPeerCertificate,
     PeerCertificateValidationFailed,
+    MissingPeerValidationPolicy,
     InvalidQuicHandshakeLevel,
     ApplicationCipherNotReady,
     DecryptFailed,
@@ -294,6 +295,11 @@ pub const OutboundQuicHandshake = struct {
     }
 };
 
+pub const QuicClientHelloOptions = struct {
+    server_name: ?[]const u8 = null,
+    alpn_protocol: ?[]const u8 = null,
+};
+
 pub const Engine = struct {
     allocator: std.mem.Allocator,
     config: Config,
@@ -342,6 +348,11 @@ pub const Engine = struct {
     pending_quic_application_key_ready: bool = false,
     observed_quic_handshake_key_ready: bool = false,
     observed_quic_application_key_ready: bool = false,
+    pending_quic_hello_retry_request: bool = false,
+    outbound_client_hello_count: u8 = 0,
+    expected_alpn: [255]u8 = [_]u8{0} ** 255,
+    expected_alpn_len: usize = 0,
+    runtime_expected_server_name: ?[]u8 = null,
 
     pub fn init(allocator: std.mem.Allocator, config: Config) Engine {
         return .{
@@ -369,6 +380,7 @@ pub const Engine = struct {
         self.zeroizeHandshakeTrafficState();
         self.zeroizeApplicationTrafficState();
         self.clearPeerQuicTransportParameters();
+        self.clearRuntimeExpectedServerName();
         while (self.outbound_records.items.len > 0) {
             const rec = self.outbound_records.orderedRemove(0);
             self.allocator.free(rec);
@@ -389,6 +401,33 @@ pub const Engine = struct {
     pub fn popOutboundQuicHandshake(self: *Engine) ?OutboundQuicHandshake {
         if (self.outbound_quic_handshakes.items.len == 0) return null;
         return self.outbound_quic_handshakes.orderedRemove(0);
+    }
+
+    pub fn beginQuicClientHandshake(
+        self: *Engine,
+        options: QuicClientHelloOptions,
+    ) EngineError!void {
+        try self.assertClientQuicClientHelloEmissionAllowed();
+        try self.prepareClientQuicBootstrapPolicy(options);
+        try self.setExpectedAlpn(options.alpn_protocol);
+
+        const client_pub = try self.ensureClientX25519PublicKey();
+        const body = try self.buildClientHelloBody(options, client_pub);
+        defer self.allocator.free(body);
+
+        const payload = try buildHandshakePayload(self.allocator, .client_hello, body);
+        errdefer self.allocator.free(payload);
+
+        try self.outbound_quic_handshakes.append(self.allocator, .{
+            .level = .initial,
+            .payload = payload,
+        });
+        errdefer {
+            var queued = self.outbound_quic_handshakes.orderedRemove(self.outbound_quic_handshakes.items.len - 1);
+            queued.deinit(self.allocator);
+        }
+
+        try self.noteOutboundQuicHandshake(payload);
     }
 
     pub fn beginEarlyData(self: *Engine, ticket: []const u8, idempotent: bool) !void {
@@ -441,18 +480,20 @@ pub const Engine = struct {
     }
 
     pub fn noteOutboundQuicHandshake(self: *Engine, payload: []const u8) EngineError!void {
-        if (!self.config.quic_mode) return error.IllegalTransition;
-        if (self.config.role != .client or self.machine.state != .wait_server_hello) return error.IllegalTransition;
+        try self.assertClientQuicClientHelloEmissionAllowed();
+        try self.ensureClientPeerValidationPolicy(self.effectiveExpectedServerName());
 
         var cursor = payload;
         while (cursor.len > 0) {
             const frame = try handshake.parseOne(cursor);
             if (frame.header.handshake_type != .client_hello) return error.InvalidQuicHandshakeLevel;
+            try self.syncExpectedAlpnFromClientHello(frame.body);
             const frame_len = 4 + @as(usize, @intCast(frame.header.length));
             self.transcript.update(cursor[0..frame_len]);
             self.metrics.handshake_messages += 1;
             cursor = frame.rest;
         }
+        self.noteClientHelloEmission();
     }
 
     pub fn ingestQuicHandshake(
@@ -699,6 +740,9 @@ pub const Engine = struct {
             try result.push(.{ .handshake = frame.header.handshake_type });
 
             if (event == .hello_retry_request) {
+                if (self.config.quic_mode and self.config.role == .client) {
+                    self.pending_quic_hello_retry_request = true;
+                }
                 try result.push(.{ .hello_retry_request = {} });
             }
 
@@ -925,6 +969,141 @@ pub const Engine = struct {
         return sh.encode(self.allocator) catch return error.InvalidHelloMessage;
     }
 
+    fn ensureClientX25519PublicKey(self: *Engine) EngineError![32]u8 {
+        if (self.client_x25519_secret_key) |secret| {
+            var basepoint = [_]u8{0} ** 32;
+            basepoint[0] = 0x09;
+            return std.crypto.dh.X25519.scalarmult(secret, basepoint) catch return error.InvalidKeyShareExtension;
+        }
+        return self.generateClientX25519KeyShare();
+    }
+
+    fn assertClientQuicClientHelloEmissionAllowed(self: *Engine) EngineError!void {
+        if (!self.config.quic_mode) return error.IllegalTransition;
+        if (self.config.role != .client) return error.IllegalTransition;
+        if (self.machine.state != .wait_server_hello) return error.IllegalTransition;
+        if (self.outbound_client_hello_count == 0) return;
+        if (self.outbound_client_hello_count == 1 and self.pending_quic_hello_retry_request) return;
+        return error.IllegalTransition;
+    }
+
+    fn noteClientHelloEmission(self: *Engine) void {
+        if (self.outbound_client_hello_count < std.math.maxInt(u8)) {
+            self.outbound_client_hello_count += 1;
+        }
+        self.pending_quic_hello_retry_request = false;
+    }
+
+    fn setExpectedAlpn(self: *Engine, protocol: ?[]const u8) EngineError!void {
+        self.expected_alpn_len = 0;
+        const proto = protocol orelse return;
+        if (proto.len == 0 or proto.len > self.expected_alpn.len) return error.InvalidAlpnExtension;
+        @memcpy(self.expected_alpn[0..proto.len], proto);
+        self.expected_alpn_len = proto.len;
+    }
+
+    fn expectedAlpnSlice(self: *const Engine) ?[]const u8 {
+        if (self.expected_alpn_len == 0) return null;
+        return self.expected_alpn[0..self.expected_alpn_len];
+    }
+
+    fn effectiveExpectedServerName(self: *const Engine) ?[]const u8 {
+        if (self.runtime_expected_server_name) |name| return name;
+        return self.config.peer_validation.expected_server_name;
+    }
+
+    fn prepareClientQuicBootstrapPolicy(self: *Engine, options: QuicClientHelloOptions) EngineError!void {
+        if (options.server_name) |override_name| {
+            if (self.config.peer_validation.expected_server_name) |configured| {
+                if (!std.mem.eql(u8, configured, override_name)) return error.InvalidServerNameExtension;
+            }
+            self.clearRuntimeExpectedServerName();
+            self.runtime_expected_server_name = try self.allocator.dupe(u8, override_name);
+        } else if (self.outbound_client_hello_count == 0) {
+            self.clearRuntimeExpectedServerName();
+        }
+
+        try self.ensureClientPeerValidationPolicy(self.effectiveExpectedServerName());
+    }
+
+    fn ensureClientPeerValidationPolicy(self: *Engine, expected_server_name: ?[]const u8) EngineError!void {
+        if (!self.config.peer_validation.enforce_certificate_verify) return;
+        if (self.config.peer_validation.trust_store == null) return error.MissingPeerValidationPolicy;
+        const name = expected_server_name orelse return error.MissingPeerValidationPolicy;
+        if (name.len == 0) return error.MissingPeerValidationPolicy;
+    }
+
+    fn buildClientHelloBody(
+        self: *Engine,
+        options: QuicClientHelloOptions,
+        client_pub: [32]u8,
+    ) EngineError![]u8 {
+        var ext_list: std.ArrayList(messages.Extension) = .empty;
+        errdefer {
+            for (ext_list.items) |*ext| ext.deinit(self.allocator);
+            ext_list.deinit(self.allocator);
+        }
+
+        const selected_server_name = options.server_name orelse self.effectiveExpectedServerName();
+        if (selected_server_name) |name| {
+            const sni = try encodeServerNameExtension(self.allocator, name);
+            try ext_list.append(self.allocator, .{
+                .extension_type = ext_server_name,
+                .data = sni,
+            });
+        }
+
+        const versions = try self.allocator.dupe(u8, &.{ 0x02, 0x03, 0x04 });
+        try ext_list.append(self.allocator, .{
+            .extension_type = ext_supported_versions,
+            .data = versions,
+        });
+
+        const groups = try self.allocator.dupe(u8, &.{ 0x00, 0x02, 0x00, 0x1d });
+        try ext_list.append(self.allocator, .{
+            .extension_type = ext_supported_groups,
+            .data = groups,
+        });
+
+        var key_share = try self.allocator.alloc(u8, 2 + 2 + 2 + client_pub.len);
+        std.mem.writeInt(u16, key_share[0..2], @as(u16, @intCast(2 + 2 + client_pub.len)), .big);
+        std.mem.writeInt(u16, key_share[2..4], named_group_x25519, .big);
+        std.mem.writeInt(u16, key_share[4..6], @as(u16, @intCast(client_pub.len)), .big);
+        @memcpy(key_share[6..], &client_pub);
+        try ext_list.append(self.allocator, .{
+            .extension_type = ext_key_share,
+            .data = key_share,
+        });
+
+        if (options.alpn_protocol) |proto| {
+            const alpn = try encodeSingleAlpnExtension(self.allocator, proto);
+            try ext_list.append(self.allocator, .{
+                .extension_type = ext_alpn,
+                .data = alpn,
+            });
+        }
+
+        const quic_tp = self.config.quic_transport_parameters orelse return error.MissingQuicTransportParameters;
+        const quic_tp_owned = try self.allocator.dupe(u8, quic_tp);
+        try ext_list.append(self.allocator, .{
+            .extension_type = ext_quic_transport_parameters,
+            .data = quic_tp_owned,
+        });
+
+        var random: [32]u8 = undefined;
+        std.crypto.random.bytes(&random);
+
+        var hello = messages.ClientHello{
+            .random = random,
+            .session_id = try self.allocator.dupe(u8, ""),
+            .cipher_suites = try self.allocator.dupe(u16, &.{configuredCipherSuiteCodepoint(self.config.suite)}),
+            .compression_methods = try self.allocator.dupe(u8, &.{0x00}),
+            .extensions = try ext_list.toOwnedSlice(self.allocator),
+        };
+        defer hello.deinit(self.allocator);
+        return hello.encode(self.allocator) catch return error.InvalidHelloMessage;
+    }
+
     fn buildEncryptedExtensionsBody(self: *Engine) EngineError![]u8 {
         const include_alpn = self.negotiated_alpn_len != 0;
         const include_quic_tp = self.config.quic_mode;
@@ -996,6 +1175,29 @@ pub const Engine = struct {
         if (selected.len > self.negotiated_alpn.len) return error.InvalidAlpnExtension;
         @memcpy(self.negotiated_alpn[0..selected.len], selected);
         self.negotiated_alpn_len = selected.len;
+    }
+
+    fn validateExpectedServerAlpn(self: *Engine, extensions: []const messages.Extension) EngineError!void {
+        const expected = self.expectedAlpnSlice() orelse return;
+        const alpn = findExtensionData(extensions, ext_alpn) orelse return error.InvalidAlpnExtension;
+        const selected = try firstEncryptedExtensionsAlpnProtocol(alpn);
+        if (!std.mem.eql(u8, selected, expected)) return error.InvalidAlpnExtension;
+    }
+
+    fn syncExpectedAlpnFromClientHello(self: *Engine, body: []const u8) EngineError!void {
+        var hello = messages.ClientHello.decode(self.allocator, body) catch return error.InvalidHelloMessage;
+        defer hello.deinit(self.allocator);
+
+        const alpn = findExtensionData(hello.extensions, ext_alpn) orelse {
+            self.expected_alpn_len = 0;
+            return;
+        };
+        const selected = try firstClientHelloAlpnProtocol(alpn);
+        if (self.expectedAlpnSlice()) |expected| {
+            if (!std.mem.eql(u8, expected, selected)) return error.InvalidAlpnExtension;
+            return;
+        }
+        try self.setExpectedAlpn(selected);
     }
 
     fn buildCertificateBody(self: *Engine, creds: ServerCredentials) EngineError![]u8 {
@@ -1720,6 +1922,13 @@ pub const Engine = struct {
         self.peer_quic_transport_parameters = try self.allocator.dupe(u8, bytes);
     }
 
+    fn clearRuntimeExpectedServerName(self: *Engine) void {
+        if (self.runtime_expected_server_name) |name| {
+            self.allocator.free(name);
+            self.runtime_expected_server_name = null;
+        }
+    }
+
     fn appendPendingQuicKeyReadyActions(self: *Engine, result: *IngestResult) EngineError!void {
         if (self.pending_quic_handshake_key_ready) {
             self.pending_quic_handshake_key_ready = false;
@@ -1773,7 +1982,8 @@ pub const Engine = struct {
     }
 
     fn validatePeerCertificatePolicy(self: *Engine, cert_msg: messages.CertificateMsg) EngineError!void {
-        const has_name_policy = self.config.role == .client and self.config.peer_validation.expected_server_name != null;
+        const expected_server_name = self.effectiveExpectedServerName();
+        const has_name_policy = self.config.role == .client and expected_server_name != null;
         const has_trust_policy = self.config.peer_validation.trust_store != null;
         const has_ocsp_policy = self.config.peer_validation.enforce_ocsp;
         if (!has_name_policy and !has_trust_policy and !has_ocsp_policy) return;
@@ -1797,8 +2007,8 @@ pub const Engine = struct {
             }
         }
 
-        if (self.config.peer_validation.expected_server_name) |expected_server_name| {
-            parsed_chain[0].verifyHostName(expected_server_name) catch return error.PeerCertificateValidationFailed;
+        if (expected_server_name) |expected_name| {
+            parsed_chain[0].verifyHostName(expected_name) catch return error.PeerCertificateValidationFailed;
         }
         if (self.config.peer_validation.trust_store) |store| {
             var trusted = false;
@@ -2101,6 +2311,7 @@ pub const Engine = struct {
                 var ee = messages.EncryptedExtensions.decode(self.allocator, body) catch return error.InvalidEncryptedExtensionsMessage;
                 defer ee.deinit(self.allocator);
                 if (self.config.quic_mode and self.config.role == .client) {
+                    try self.validateExpectedServerAlpn(ee.extensions);
                     const peer_tp = findExtensionData(ee.extensions, ext_quic_transport_parameters) orelse return error.MissingQuicTransportParameters;
                     try self.setPeerQuicTransportParameters(peer_tp);
                 }
@@ -2241,6 +2452,7 @@ pub fn classifyErrorAlert(err: anyerror) alerts.Alert {
         error.EarlyDataTicketTooLarge,
         error.MissingServerCredentials,
         error.MissingKeyExchangeSecret,
+        error.MissingPeerValidationPolicy,
         => .handshake_failure,
 
         error.MissingPeerCertificate => .certificate_required,
@@ -2637,6 +2849,52 @@ fn extractClientHelloX25519Public(extensions: []const messages.Extension) ![32]u
     return error.InvalidKeyShareExtension;
 }
 
+fn buildHandshakePayload(
+    allocator: std.mem.Allocator,
+    handshake_type: state.HandshakeType,
+    body: []const u8,
+) EngineError![]u8 {
+    if (body.len > std.math.maxInt(u24)) return error.InvalidHelloMessage;
+
+    var out = try allocator.alloc(u8, 4 + body.len);
+    out[0] = @intFromEnum(handshake_type);
+    const len_u24 = handshake.writeU24(@as(u24, @intCast(body.len)));
+    @memcpy(out[1..4], &len_u24);
+    @memcpy(out[4..], body);
+    return out;
+}
+
+fn encodeServerNameExtension(allocator: std.mem.Allocator, server_name: []const u8) EngineError![]u8 {
+    if (server_name.len == 0) return error.InvalidServerNameExtension;
+    if (server_name.len > std.math.maxInt(u16)) return error.InvalidServerNameExtension;
+
+    const list_len = 1 + 2 + server_name.len;
+    if (list_len > std.math.maxInt(u16)) return error.InvalidServerNameExtension;
+
+    var out = try allocator.alloc(u8, 2 + list_len);
+    std.mem.writeInt(u16, out[0..2], @as(u16, @intCast(list_len)), .big);
+    out[2] = 0x00; // host_name
+    std.mem.writeInt(u16, out[3..5], @as(u16, @intCast(server_name.len)), .big);
+    @memcpy(out[5..], server_name);
+    try validateClientHelloServerNameExtension(out);
+    return out;
+}
+
+fn encodeSingleAlpnExtension(allocator: std.mem.Allocator, protocol: []const u8) EngineError![]u8 {
+    if (protocol.len == 0) return error.InvalidAlpnExtension;
+    if (protocol.len > std.math.maxInt(u8)) return error.InvalidAlpnExtension;
+
+    const list_len = 1 + protocol.len;
+    if (list_len > std.math.maxInt(u16)) return error.InvalidAlpnExtension;
+
+    var out = try allocator.alloc(u8, 2 + list_len);
+    std.mem.writeInt(u16, out[0..2], @as(u16, @intCast(list_len)), .big);
+    out[2] = @as(u8, @intCast(protocol.len));
+    @memcpy(out[3..], protocol);
+    try validateClientHelloAlpnExtension(out);
+    return out;
+}
+
 fn validateClientHelloServerNameExtension(data: []const u8) EngineError!void {
     if (data.len < 5) return error.InvalidServerNameExtension;
     const list_len = readU16(data[0..2]);
@@ -2674,6 +2932,12 @@ fn firstClientHelloAlpnProtocol(data: []const u8) EngineError![]const u8 {
     if (first_len == 0) return error.InvalidAlpnExtension;
     if (3 + first_len > data.len) return error.InvalidAlpnExtension;
     return data[3 .. 3 + first_len];
+}
+
+fn firstEncryptedExtensionsAlpnProtocol(data: []const u8) EngineError![]const u8 {
+    const first = try firstClientHelloAlpnProtocol(data);
+    if (3 + first.len != data.len) return error.InvalidAlpnExtension;
+    return first;
 }
 
 fn validateClientHelloSupportedGroupsExtension(data: []const u8, policy: GroupPolicy) EngineError!void {
@@ -3631,6 +3895,63 @@ fn encryptedExtensionsRecordWithQuicTransportParameters(
     std.mem.writeInt(u16, out[11..13], ext_quic_transport_parameters, .big);
     std.mem.writeInt(u16, out[13..15], @as(u16, @intCast(quic_tp.len)), .big);
     @memcpy(out[15 .. 15 + quic_tp.len], quic_tp);
+    return out;
+}
+
+fn encryptedExtensionsRecordWithAlpnAndQuicTransportParameters(
+    allocator: std.mem.Allocator,
+    alpn: []const u8,
+    quic_tp: []const u8,
+) ![]u8 {
+    if (alpn.len == 0 or alpn.len > std.math.maxInt(u8)) return error.LengthOverflow;
+
+    const alpn_list_len = 1 + alpn.len;
+    const alpn_data_len = 2 + alpn_list_len;
+    const alpn_ext_len = 4 + alpn_data_len;
+    const quic_tp_ext_len = 4 + quic_tp.len;
+    const ext_len = alpn_ext_len + quic_tp_ext_len;
+    if (ext_len > std.math.maxInt(u16)) return error.LengthOverflow;
+
+    const body_len = 2 + ext_len;
+    if (body_len > std.math.maxInt(u24)) return error.LengthOverflow;
+    if (body_len > std.math.maxInt(u16)) return error.LengthOverflow;
+
+    var out = try allocator.alloc(u8, 5 + 4 + body_len);
+    out[0] = @intFromEnum(record.ContentType.handshake);
+    out[1] = 0x03;
+    out[2] = 0x03;
+    std.mem.writeInt(u16, out[3..5], @as(u16, @intCast(4 + body_len)), .big);
+    out[5] = @intFromEnum(state.HandshakeType.encrypted_extensions);
+    const hs_len = handshake.writeU24(@as(u24, @intCast(body_len)));
+    @memcpy(out[6..9], &hs_len);
+    std.mem.writeInt(u16, out[9..11], @as(u16, @intCast(ext_len)), .big);
+
+    var i: usize = 11;
+    out[i] = @as(u8, @intCast((ext_alpn >> 8) & 0xff));
+    out[i + 1] = @as(u8, @intCast(ext_alpn & 0xff));
+    i += 2;
+    const alpn_data_len_u16: u16 = @intCast(alpn_data_len);
+    out[i] = @as(u8, @intCast((alpn_data_len_u16 >> 8) & 0xff));
+    out[i + 1] = @as(u8, @intCast(alpn_data_len_u16 & 0xff));
+    i += 2;
+    const alpn_list_len_u16: u16 = @intCast(alpn_list_len);
+    out[i] = @as(u8, @intCast((alpn_list_len_u16 >> 8) & 0xff));
+    out[i + 1] = @as(u8, @intCast(alpn_list_len_u16 & 0xff));
+    i += 2;
+    out[i] = @as(u8, @intCast(alpn.len));
+    i += 1;
+    @memcpy(out[i .. i + alpn.len], alpn);
+    i += alpn.len;
+
+    out[i] = @as(u8, @intCast((ext_quic_transport_parameters >> 8) & 0xff));
+    out[i + 1] = @as(u8, @intCast(ext_quic_transport_parameters & 0xff));
+    i += 2;
+    const quic_tp_len_u16: u16 = @intCast(quic_tp.len);
+    out[i] = @as(u8, @intCast((quic_tp_len_u16 >> 8) & 0xff));
+    out[i + 1] = @as(u8, @intCast(quic_tp_len_u16 & 0xff));
+    i += 2;
+    @memcpy(out[i .. i + quic_tp.len], quic_tp);
+
     return out;
 }
 
@@ -5250,7 +5571,124 @@ test "quic client captures peer transport parameters from encrypted extensions i
     try std.testing.expectEqualStrings(peer_tp, captured);
 }
 
-test "noteOutboundQuicHandshake only accepts client_hello at start in quic mode" {
+test "quic client rejects encrypted extensions ALPN mismatch when begin sets expected alpn" {
+    const local_tp = "\x01\x00";
+    const peer_tp = "\x00\x08srvquic!";
+
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+        .quic_mode = true,
+        .quic_transport_parameters = local_tp,
+        .peer_validation = .{
+            .enforce_certificate_verify = false,
+        },
+    });
+    defer engine.deinit();
+
+    try engine.beginQuicClientHandshake(.{
+        .server_name = "api.example.com",
+        .alpn_protocol = "h3",
+    });
+    var queued = engine.popOutboundQuicHandshake() orelse return error.TestUnexpectedResult;
+    queued.deinit(std.testing.allocator);
+
+    try ingestValidServerHelloForClient(&engine);
+
+    const ee = try encryptedExtensionsRecordWithAlpnAndQuicTransportParameters(std.testing.allocator, "h2", peer_tp);
+    defer std.testing.allocator.free(ee);
+    const parsed = try record.parseRecord(ee);
+    try std.testing.expectError(error.InvalidAlpnExtension, engine.ingestQuicHandshake(.handshake, parsed.payload));
+}
+
+test "beginQuicClientHandshake queues initial ClientHello with QUIC extensions" {
+    const local_tp = "\x01\x00";
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+        .quic_mode = true,
+        .quic_transport_parameters = local_tp,
+        .peer_validation = .{
+            .enforce_certificate_verify = false,
+        },
+    });
+    defer engine.deinit();
+
+    try engine.beginQuicClientHandshake(.{
+        .server_name = "api.example.com",
+        .alpn_protocol = "h3",
+    });
+
+    var outbound = engine.popOutboundQuicHandshake() orelse return error.TestUnexpectedResult;
+    defer outbound.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(QuicEncryptionLevel.initial, outbound.level);
+    const hs = try handshake.parseOne(outbound.payload);
+    try std.testing.expectEqual(state.HandshakeType.client_hello, hs.header.handshake_type);
+    try std.testing.expectEqual(@as(usize, 0), hs.rest.len);
+
+    var hello = try messages.ClientHello.decode(std.testing.allocator, hs.body);
+    defer hello.deinit(std.testing.allocator);
+
+    const sni = findExtensionData(hello.extensions, ext_server_name) orelse return error.TestUnexpectedResult;
+    try validateClientHelloServerNameExtension(sni);
+    try std.testing.expectEqualStrings("api.example.com", sni[5..]);
+
+    const alpn = findExtensionData(hello.extensions, ext_alpn) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("h3", try firstClientHelloAlpnProtocol(alpn));
+
+    const quic_tp = findExtensionData(hello.extensions, ext_quic_transport_parameters) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(local_tp, quic_tp);
+    try std.testing.expectEqual(@as(u64, 1), engine.snapshotMetrics().handshake_messages);
+}
+
+test "beginQuicClientHandshake uses expected_server_name fallback when option is omitted" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+        .quic_mode = true,
+        .quic_transport_parameters = "\x01\x00",
+        .peer_validation = .{
+            .enforce_certificate_verify = false,
+            .expected_server_name = "fallback.example",
+        },
+    });
+    defer engine.deinit();
+
+    try engine.beginQuicClientHandshake(.{});
+    var outbound = engine.popOutboundQuicHandshake() orelse return error.TestUnexpectedResult;
+    defer outbound.deinit(std.testing.allocator);
+
+    const hs = try handshake.parseOne(outbound.payload);
+    var hello = try messages.ClientHello.decode(std.testing.allocator, hs.body);
+    defer hello.deinit(std.testing.allocator);
+
+    const sni = findExtensionData(hello.extensions, ext_server_name) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("fallback.example", sni[5..]);
+}
+
+test "beginQuicClientHandshake validates SNI and ALPN option encoding" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+        .quic_mode = true,
+        .quic_transport_parameters = "\x01\x00",
+        .peer_validation = .{
+            .enforce_certificate_verify = false,
+        },
+    });
+    defer engine.deinit();
+
+    try std.testing.expectError(error.InvalidServerNameExtension, engine.beginQuicClientHandshake(.{
+        .server_name = "",
+    }));
+    try std.testing.expectError(error.InvalidAlpnExtension, engine.beginQuicClientHandshake(.{
+        .server_name = "ok.example",
+        .alpn_protocol = "",
+    }));
+}
+
+test "beginQuicClientHandshake rejects insecure default verification policy" {
     var engine = Engine.init(std.testing.allocator, .{
         .role = .client,
         .suite = .tls_aes_128_gcm_sha256,
@@ -5259,11 +5697,114 @@ test "noteOutboundQuicHandshake only accepts client_hello at start in quic mode"
     });
     defer engine.deinit();
 
-    const ch = handshakeRecord(.client_hello);
+    try std.testing.expectError(error.MissingPeerValidationPolicy, engine.beginQuicClientHandshake(.{
+        .server_name = "api.example.com",
+    }));
+}
+
+test "beginQuicClientHandshake rejects repeated calls without hello retry request" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+        .quic_mode = true,
+        .quic_transport_parameters = "\x01\x00",
+        .peer_validation = .{
+            .enforce_certificate_verify = false,
+        },
+    });
+    defer engine.deinit();
+
+    try engine.beginQuicClientHandshake(.{ .server_name = "api.example.com" });
+    try std.testing.expectError(error.IllegalTransition, engine.beginQuicClientHandshake(.{
+        .server_name = "api.example.com",
+    }));
+}
+
+test "beginQuicClientHandshake allows one retry after hello retry request" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+        .quic_mode = true,
+        .quic_transport_parameters = "\x01\x00",
+        .peer_validation = .{
+            .enforce_certificate_verify = false,
+        },
+    });
+    defer engine.deinit();
+
+    try engine.beginQuicClientHandshake(.{ .server_name = "api.example.com" });
+    var first = engine.popOutboundQuicHandshake() orelse return error.TestUnexpectedResult;
+    first.deinit(std.testing.allocator);
+
+    const hrr = hrrServerHelloRecord();
+    const parsed = try record.parseRecord(&hrr);
+    _ = try engine.ingestQuicHandshake(.initial, parsed.payload);
+
+    try engine.beginQuicClientHandshake(.{ .server_name = "api.example.com" });
+    var second = engine.popOutboundQuicHandshake() orelse return error.TestUnexpectedResult;
+    second.deinit(std.testing.allocator);
+
+    try std.testing.expectError(error.IllegalTransition, engine.beginQuicClientHandshake(.{
+        .server_name = "api.example.com",
+    }));
+}
+
+test "noteOutboundQuicHandshake only accepts client_hello at start in quic mode" {
+    const local_tp = "\x01\x00";
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+        .quic_mode = true,
+        .quic_transport_parameters = local_tp,
+        .peer_validation = .{
+            .enforce_certificate_verify = false,
+        },
+    });
+    defer engine.deinit();
+
+    const client_kp = std.crypto.dh.X25519.KeyPair.generate();
+    const ch = try clientHelloRecordWithX25519PublicAndQuicTransportParameters(
+        std.testing.allocator,
+        client_kp.public_key,
+        local_tp,
+    );
+    defer std.testing.allocator.free(ch);
     try engine.noteOutboundQuicHandshake(ch[5..]);
 
     const fin = handshakeRecord(.finished);
-    try std.testing.expectError(error.InvalidQuicHandshakeLevel, engine.noteOutboundQuicHandshake(fin[5..]));
+    try std.testing.expectError(error.IllegalTransition, engine.noteOutboundQuicHandshake(fin[5..]));
+}
+
+test "noteOutboundQuicHandshake pins expected ALPN and rejects encrypted extensions mismatch" {
+    const local_tp = "\x01\x00";
+    const peer_tp = "\x00\x08srvquic!";
+
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+        .quic_mode = true,
+        .quic_transport_parameters = local_tp,
+        .peer_validation = .{
+            .enforce_certificate_verify = false,
+        },
+    });
+    defer engine.deinit();
+
+    const client_kp = std.crypto.dh.X25519.KeyPair.generate();
+    const ch = try clientHelloRecordWithX25519PublicAndQuicTransportParameters(
+        std.testing.allocator,
+        client_kp.public_key,
+        local_tp,
+    );
+    defer std.testing.allocator.free(ch);
+    try engine.noteOutboundQuicHandshake(ch[5..]);
+
+    try ingestValidServerHelloForClient(&engine);
+
+    const ee = try encryptedExtensionsRecordWithAlpnAndQuicTransportParameters(std.testing.allocator, "h3", peer_tp);
+    defer std.testing.allocator.free(ee);
+    const parsed = try record.parseRecord(ee);
+    try std.testing.expectError(error.InvalidAlpnExtension, engine.ingestQuicHandshake(.handshake, parsed.payload));
 }
 
 test "server emits outbound handshake flight when credentials are configured" {
@@ -5567,6 +6108,10 @@ test "classify error alert maps representative protocol errors" {
     try std.testing.expectEqual(
         alerts.Alert{ .level = .fatal, .description = .handshake_failure },
         classifyErrorAlert(error.MissingKeyExchangeSecret),
+    );
+    try std.testing.expectEqual(
+        alerts.Alert{ .level = .fatal, .description = .handshake_failure },
+        classifyErrorAlert(error.MissingPeerValidationPolicy),
     );
     try std.testing.expectEqual(
         alerts.Alert{ .level = .fatal, .description = .certificate_required },

@@ -146,16 +146,19 @@ A full QUIC transport stack is out of scope for this library.
 ### Integration flow
 
 1. Build/parse QUIC transport parameters in your QUIC engine, and pass serialized local parameters to TLS config (`quic_mode`, `quic_transport_parameters`).
-2. Feed reassembled CRYPTO payload bytes into `engine.ingestQuicHandshake(level, payload)`.
-3. Drain TLS-generated handshake payloads with `engine.popOutboundQuicHandshake()` and send them as QUIC CRYPTO data at the returned level.
-4. Watch `IngestResult.actions` for `.quic_key_ready` and/or poll `engine.snapshotQuicSecrets()` to detect newly available Handshake/1-RTT secrets.
-5. Convert exported secret bytes to `zigtls.quic.tls13.TrafficSecret`, derive packet-protection keys with `derivePacketProtectionKeys`, and install them in your QUIC packet protection path.
-6. Read validated peer transport parameters through `engine.peerQuicTransportParameters()` after ClientHello/EncryptedExtensions ingress validation.
+2. Client side: start handshake with `engine.beginQuicClientHandshake(options)` and send returned egress frames from `engine.popOutboundQuicHandshake()` as QUIC Initial CRYPTO.
+   - If `peer_validation.enforce_certificate_verify == true` (default), configure both `peer_validation.trust_store` and an expected server name (`peer_validation.expected_server_name` or `options.server_name`).
+3. Feed reassembled peer CRYPTO payload bytes into `engine.ingestQuicHandshake(level, payload)`.
+4. After each ingest, drain `engine.popOutboundQuicHandshake()` and emit those payloads at the returned QUIC encryption level.
+5. Watch `IngestResult.actions` for `.quic_key_ready` and/or poll `engine.snapshotQuicSecrets()` to detect newly available Handshake/1-RTT secrets.
+6. Convert exported secret bytes to `zigtls.quic.tls13.TrafficSecret`, derive packet-protection keys with `derivePacketProtectionKeys`, and install them in your QUIC packet protection path.
+7. Read captured peer transport-parameters bytes through `engine.peerQuicTransportParameters()` after ClientHello/EncryptedExtensions ingress validation, then decode/validate in your QUIC engine.
 
 QUIC-native handshake API surface in `zigtls.tls13.session.Engine`:
+- `beginQuicClientHandshake(options)`: client-only helper that builds/enqueues TLS ClientHello and updates transcript internally. `options.server_name` falls back to `peer_validation.expected_server_name` when omitted. Re-entrant calls are rejected except one retry after a valid HelloRetryRequest ingress event.
 - `ingestQuicHandshake(level, payload)`: ingress path for QUIC CRYPTO payload bytes (`initial`/`handshake`/`application`).
 - `popOutboundQuicHandshake()`: egress path that returns `{ level, payload }` for QUIC CRYPTO emission.
-- `noteOutboundQuicHandshake(payload)`: transcript sync hook for user-generated outbound ClientHello frames only (do not call for payloads returned by `popOutboundQuicHandshake()`).
+- `noteOutboundQuicHandshake(payload)`: compatibility hook only when your QUIC engine still constructs ClientHello bytes itself (do not call for payloads returned by `popOutboundQuicHandshake()`).
 - `peerQuicTransportParameters()`: returns the peer QUIC TP bytes captured during handshake validation.
 - `snapshotQuicSecrets()`: exports currently available handshake/application traffic secrets.
 

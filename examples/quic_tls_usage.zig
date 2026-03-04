@@ -98,15 +98,16 @@ fn decodeSnapshotSecret(
     return quic_tls.trafficSecretFromBytes(suite, secret.bytes[0..secret.len]);
 }
 
-// 1) If your QUIC engine builds ClientHello itself, sync transcript once.
+// 1) Ask TLS engine to emit QUIC ClientHello at Initial level.
 fn bootstrapClientHello(
     engine: *session.Engine,
     quic: *ExampleQuicEngine,
-    client_hello_payload: []const u8,
 ) !void {
-    try engine.noteOutboundQuicHandshake(client_hello_payload);
-    try quic.queueCryptoAtLevel(.initial, quic.send_offset_initial, client_hello_payload);
-    quic.send_offset_initial += @as(u64, @intCast(client_hello_payload.len));
+    try engine.beginQuicClientHandshake(.{
+        .server_name = "api.example.com",
+        .alpn_protocol = "h3",
+    });
+    try drainTlsOutboundCrypto(engine, quic);
 }
 
 // 2) Ingress QUIC CRYPTO payload into TLS engine.
@@ -196,17 +197,16 @@ test "quic tls usage example: bootstrap and no-op ingress path" {
         .suite = .tls_aes_128_gcm_sha256,
         .quic_mode = true,
         .quic_transport_parameters = "\x01\x00",
+        .peer_validation = .{
+            .enforce_certificate_verify = false,
+        },
     });
     defer engine.deinit();
 
     var quic = ExampleQuicEngine.init(std.testing.allocator);
     defer quic.deinit();
 
-    const ch_frame = [_]u8{
-        @intFromEnum(zigtls.tls13.state.HandshakeType.client_hello),
-        0x00, 0x00, 0x00,
-    };
-    try bootstrapClientHello(&engine, &quic, ch_frame[0..]);
+    try bootstrapClientHello(&engine, &quic);
     try std.testing.expectEqual(@as(usize, 1), quic.pending_crypto.items.len);
     try std.testing.expectEqual(QuicTransportLevel.initial, quic.pending_crypto.items[0].level);
     try std.testing.expectEqual(@as(u64, 0), quic.pending_crypto.items[0].offset);
