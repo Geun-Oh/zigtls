@@ -64,6 +64,8 @@ zig build lb-example
 ```
 
 Sample source: `examples/lb_event_loop_sample.zig`  
+Examples index: `examples/README.md`  
+QUIC TLS integration example guide: `examples/quic_tls_usage.zig`
 This sample is an event-loop/protocol flow demo. It uses mock credentials, not production certificate issuance or rotation.
 
 Production-oriented server-side usage shape (real cert/key binding):
@@ -113,13 +115,67 @@ For non-Ed25519 keys, use manual signer callback mode via `dynamic_server_creden
 
 - Library root exports: `src/root.zig`
   - `zigtls.tls13`
+  - `zigtls.quic` (experimental QUIC TLS 1.3 helpers)
   - `zigtls.termination`
   - `zigtls.adapter`
   - `zigtls.cert_reload`
   - `zigtls.rate_limit`
   - `zigtls.metrics`
+- `zigtls.quic.tls13` provides QUIC-facing TLS key schedule helpers only: Initial secret derivation, packet protection key/IV/HP derivation, key-update derivation, and QUIC packet nonce construction.
+- `zigtls.quic.transport_parameters` provides QUIC transport-parameters varint encode/decode helpers with duplicate/truncation validation.
+- QUIC transport engine responsibilities (packetization, ACK/loss recovery, congestion control, CID lifecycle, UDP IO) are intentionally out of `zigtls.quic` public API scope and are expected to be implemented by the embedding QUIC engine.
 - Termination API details: `docs/termination-api.md`
 - Error matrix: `docs/error-termination-matrix.md`
+
+## QUIC support boundary and usage
+
+### Scope boundary
+
+| Area | Provided by zigtls | Must be implemented by QUIC engine |
+| --- | --- | --- |
+| TLS 1.3 handshake state machine | Yes (`zigtls.tls13.session`) | No |
+| QUIC transport-parameter encoding/decoding | Yes (`zigtls.quic.transport_parameters`) | No |
+| QUIC key derivation (Initial/Handshake/1-RTT key material helpers) | Yes (`zigtls.quic.tls13`) | No |
+| Packet format/seal/open, ACK/loss recovery, congestion control | No | Yes |
+| Connection ID lifecycle/migration | No | Yes |
+| UDP socket I/O and timers | No | Yes |
+
+`zigtls` intentionally follows a BoringSSL-style boundary: TLS + crypto primitives only.  
+A full QUIC transport stack is out of scope for this library.
+
+### Integration flow
+
+1. Build/parse QUIC transport parameters in your QUIC engine, and pass serialized local parameters to TLS config (`quic_mode`, `quic_transport_parameters`).
+2. Feed reassembled CRYPTO payload bytes into `engine.ingestQuicHandshake(level, payload)`.
+3. Drain TLS-generated handshake payloads with `engine.popOutboundQuicHandshake()` and send them as QUIC CRYPTO data at the returned level.
+4. Watch `IngestResult.actions` for `.quic_key_ready` and/or poll `engine.snapshotQuicSecrets()` to detect newly available Handshake/1-RTT secrets.
+5. Convert exported secret bytes to `zigtls.quic.tls13.TrafficSecret`, derive packet-protection keys with `derivePacketProtectionKeys`, and install them in your QUIC packet protection path.
+6. Read validated peer transport parameters through `engine.peerQuicTransportParameters()` after ClientHello/EncryptedExtensions ingress validation.
+
+QUIC-native handshake API surface in `zigtls.tls13.session.Engine`:
+- `ingestQuicHandshake(level, payload)`: ingress path for QUIC CRYPTO payload bytes (`initial`/`handshake`/`application`).
+- `popOutboundQuicHandshake()`: egress path that returns `{ level, payload }` for QUIC CRYPTO emission.
+- `noteOutboundQuicHandshake(payload)`: transcript sync hook for user-generated outbound ClientHello frames only (do not call for payloads returned by `popOutboundQuicHandshake()`).
+- `peerQuicTransportParameters()`: returns the peer QUIC TP bytes captured during handshake validation.
+- `snapshotQuicSecrets()`: exports currently available handshake/application traffic secrets.
+
+Example secret-export -> key-derivation path:
+
+```zig
+const snap = engine.snapshotQuicSecrets();
+if (snap.application_write) |sec| {
+    const ts = try zigtls.quic.tls13.trafficSecretFromBytes(
+        snap.suite,
+        sec.bytes[0..sec.len],
+    );
+    const keys = try zigtls.quic.tls13.derivePacketProtectionKeys(snap.suite, &ts);
+    _ = keys; // install into your QUIC packet protection path
+}
+```
+
+Companion transport-engine example code (packet/recovery/session glue) lives in:
+- `../zigtls-test-quic/src/quic/*.zig`
+- `../zigtls-test-quic/src/main.zig`
 
 ## Production gate commands
 
@@ -127,6 +183,12 @@ Base regression gate:
 
 ```bash
 zig build test
+```
+
+QUIC helper regression subset:
+
+```bash
+zig test src/quic.zig
 ```
 
 Task/release gate entrypoint:

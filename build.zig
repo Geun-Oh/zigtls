@@ -157,6 +157,19 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(lb_event_loop_sample);
 
+    const quic_tls_usage_example = b.addExecutable(.{
+        .name = "quic-tls-usage-example",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/quic_tls_usage.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zigtls", .module = mod },
+            },
+        }),
+    });
+    b.installArtifact(quic_tls_usage_example);
+
     const interop_termination_server = b.addExecutable(.{
         .name = "interop-termination-server",
         .root_module = b.createModule(.{
@@ -212,6 +225,8 @@ pub fn build(b: *std.Build) void {
     const lb_event_loop_sample_run = b.addRunArtifact(lb_event_loop_sample);
     const lb_event_loop_sample_step = b.step("lb-example", "Run event-loop adapter LB integration sample");
     lb_event_loop_sample_step.dependOn(&lb_event_loop_sample_run.step);
+    const quic_tls_usage_example_step = b.step("quic-tls-example", "Build QUIC TLS boundary usage example");
+    quic_tls_usage_example_step.dependOn(&quic_tls_usage_example.step);
     const is_ci = b.graph.env_map.get("CI") != null or b.graph.env_map.get("GITHUB_ACTIONS") != null;
 
     const interop_termination_server_step = b.step("interop-termination-server", "Build direct interop zigtls termination server tool");

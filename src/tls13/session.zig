@@ -65,6 +65,8 @@ pub const PeerValidationConfig = struct {
 pub const Config = struct {
     role: state.Role,
     suite: keyschedule.CipherSuite,
+    quic_mode: bool = false,
+    quic_transport_parameters: ?[]const u8 = null,
     early_data: EarlyDataConfig = .{},
     group_policy: GroupPolicy = .{},
     allowed_signature_algorithms: []const u16 = &default_signature_algorithms,
@@ -114,6 +116,13 @@ pub fn validateConfig(config: Config) InitError!void {
     if (config.role != .client and config.peer_validation.expected_server_name != null) {
         return error.InvalidConfiguration;
     }
+
+    if (config.quic_mode and config.quic_transport_parameters == null) {
+        return error.InvalidConfiguration;
+    }
+    if (config.quic_transport_parameters) |tp| {
+        if (tp.len > std.math.maxInt(u16)) return error.InvalidConfiguration;
+    }
 }
 
 pub const Metrics = struct {
@@ -129,6 +138,7 @@ pub const Action = union(enum) {
     hello_retry_request: void,
     key_update: handshake.KeyUpdateRequest,
     send_key_update: handshake.KeyUpdateRequest,
+    quic_key_ready: QuicKeyEpoch,
     send_handshake_flight: u8,
     received_alert: alerts.Alert,
     send_alert: alerts.Alert,
@@ -179,6 +189,7 @@ pub const EngineError = error{
     InvalidCertificateVerifyMessage,
     InvalidFinishedMessage,
     InvalidEncryptedExtensionsMessage,
+    MissingQuicTransportParameters,
     InvalidNewSessionTicketMessage,
     MissingRequiredClientHelloExtension,
     InvalidServerNameExtension,
@@ -207,6 +218,7 @@ pub const EngineError = error{
     MissingKeyExchangeSecret,
     MissingPeerCertificate,
     PeerCertificateValidationFailed,
+    InvalidQuicHandshakeLevel,
     ApplicationCipherNotReady,
     DecryptFailed,
     InvalidInnerContentType,
@@ -221,6 +233,7 @@ const ext_cookie: u16 = 0x002c;
 const ext_key_share: u16 = 0x0033;
 const ext_pre_shared_key: u16 = 0x0029;
 const ext_psk_key_exchange_modes: u16 = 0x002d;
+const ext_quic_transport_parameters: u16 = 0x0039;
 const max_peer_chain_depth: usize = 8;
 
 const Transcript = union(enum) {
@@ -247,6 +260,40 @@ pub const TrafficSecret = union(enum) {
     sha384: [48]u8,
 };
 
+pub const QuicTrafficSecret = struct {
+    bytes: [48]u8 = [_]u8{0} ** 48,
+    len: usize = 0,
+};
+
+pub const QuicSecretsSnapshot = struct {
+    suite: keyschedule.CipherSuite,
+    handshake_read: ?QuicTrafficSecret = null,
+    handshake_write: ?QuicTrafficSecret = null,
+    application_read: ?QuicTrafficSecret = null,
+    application_write: ?QuicTrafficSecret = null,
+};
+
+pub const QuicEncryptionLevel = enum {
+    initial,
+    handshake,
+    application,
+};
+
+pub const QuicKeyEpoch = enum {
+    handshake,
+    application,
+};
+
+pub const OutboundQuicHandshake = struct {
+    level: QuicEncryptionLevel,
+    payload: []u8,
+
+    pub fn deinit(self: *OutboundQuicHandshake, allocator: std.mem.Allocator) void {
+        allocator.free(self.payload);
+        self.* = undefined;
+    }
+};
+
 pub const Engine = struct {
     allocator: std.mem.Allocator,
     config: Config,
@@ -270,6 +317,8 @@ pub const Engine = struct {
     saw_close_notify: bool = false,
     metrics: Metrics = .{},
     outbound_records: std.ArrayList([]u8),
+    outbound_quic_handshakes: std.ArrayList(OutboundQuicHandshake),
+    peer_quic_transport_parameters: ?[]u8 = null,
     app_read_secret: ?TrafficSecret = null,
     app_write_secret: ?TrafficSecret = null,
     hs_read_key: [32]u8 = [_]u8{0} ** 32,
@@ -289,6 +338,10 @@ pub const Engine = struct {
     app_read_seq: u64 = 0,
     app_write_seq: u64 = 0,
     app_data_scratch: [record.max_plaintext]u8 = [_]u8{0} ** record.max_plaintext,
+    pending_quic_handshake_key_ready: bool = false,
+    pending_quic_application_key_ready: bool = false,
+    observed_quic_handshake_key_ready: bool = false,
+    observed_quic_application_key_ready: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, config: Config) Engine {
         return .{
@@ -297,6 +350,7 @@ pub const Engine = struct {
             .machine = state.Machine.init(config.role),
             .transcript = Transcript.init(config.suite),
             .outbound_records = .empty,
+            .outbound_quic_handshakes = .empty,
         };
     }
 
@@ -314,16 +368,27 @@ pub const Engine = struct {
         self.clearEarlyDataTicket();
         self.zeroizeHandshakeTrafficState();
         self.zeroizeApplicationTrafficState();
+        self.clearPeerQuicTransportParameters();
         while (self.outbound_records.items.len > 0) {
             const rec = self.outbound_records.orderedRemove(0);
             self.allocator.free(rec);
         }
         self.outbound_records.deinit(self.allocator);
+        while (self.outbound_quic_handshakes.items.len > 0) {
+            var frame = self.outbound_quic_handshakes.orderedRemove(0);
+            frame.deinit(self.allocator);
+        }
+        self.outbound_quic_handshakes.deinit(self.allocator);
     }
 
     pub fn popOutboundRecord(self: *Engine) ?[]u8 {
         if (self.outbound_records.items.len == 0) return null;
         return self.outbound_records.orderedRemove(0);
+    }
+
+    pub fn popOutboundQuicHandshake(self: *Engine) ?OutboundQuicHandshake {
+        if (self.outbound_quic_handshakes.items.len == 0) return null;
+        return self.outbound_quic_handshakes.orderedRemove(0);
     }
 
     pub fn beginEarlyData(self: *Engine, ticket: []const u8, idempotent: bool) !void {
@@ -361,6 +426,47 @@ pub const Engine = struct {
         return self.metrics;
     }
 
+    pub fn snapshotQuicSecrets(self: *const Engine) QuicSecretsSnapshot {
+        return .{
+            .suite = self.config.suite,
+            .handshake_read = snapshotQuicSecret(self.handshake_read_secret),
+            .handshake_write = snapshotQuicSecret(self.handshake_write_secret),
+            .application_read = snapshotQuicSecret(self.app_read_secret),
+            .application_write = snapshotQuicSecret(self.app_write_secret),
+        };
+    }
+
+    pub fn peerQuicTransportParameters(self: *const Engine) ?[]const u8 {
+        return self.peer_quic_transport_parameters;
+    }
+
+    pub fn noteOutboundQuicHandshake(self: *Engine, payload: []const u8) EngineError!void {
+        if (!self.config.quic_mode) return error.IllegalTransition;
+        if (self.config.role != .client or self.machine.state != .wait_server_hello) return error.IllegalTransition;
+
+        var cursor = payload;
+        while (cursor.len > 0) {
+            const frame = try handshake.parseOne(cursor);
+            if (frame.header.handshake_type != .client_hello) return error.InvalidQuicHandshakeLevel;
+            const frame_len = 4 + @as(usize, @intCast(frame.header.length));
+            self.transcript.update(cursor[0..frame_len]);
+            self.metrics.handshake_messages += 1;
+            cursor = frame.rest;
+        }
+    }
+
+    pub fn ingestQuicHandshake(
+        self: *Engine,
+        level: QuicEncryptionLevel,
+        payload: []const u8,
+    ) EngineError!IngestResult {
+        if (!self.config.quic_mode) return error.IllegalTransition;
+        var result = IngestResult.init(payload.len);
+        try self.ingestHandshakePayload(payload, &result, level);
+        try self.appendPendingQuicKeyReadyActions(&result);
+        return result;
+    }
+
     pub fn setClientX25519SecretKey(self: *Engine, secret_key: [32]u8) EngineError!void {
         if (self.config.role != .client) return error.IllegalTransition;
         self.zeroizeClientEphemeralState();
@@ -381,7 +487,7 @@ pub const Engine = struct {
 
         switch (parsed.header.content_type) {
             .handshake => {
-                try self.ingestHandshakePayload(parsed.payload, &result);
+                try self.ingestHandshakePayload(parsed.payload, &result, null);
             },
             .change_cipher_spec => {
                 if (!isIgnorableTls13ChangeCipherSpec(parsed.payload)) return error.UnsupportedRecordType;
@@ -427,6 +533,7 @@ pub const Engine = struct {
             else => return error.UnsupportedRecordType,
         }
 
+        try self.appendPendingQuicKeyReadyActions(&result);
         return result;
     }
 
@@ -565,11 +672,20 @@ pub const Engine = struct {
         return frame;
     }
 
-    fn ingestHandshakePayload(self: *Engine, payload: []const u8, result: *IngestResult) EngineError!void {
+    fn ingestHandshakePayload(
+        self: *Engine,
+        payload: []const u8,
+        result: *IngestResult,
+        quic_level: ?QuicEncryptionLevel,
+    ) EngineError!void {
         var cursor = payload;
         while (cursor.len > 0) {
             const frame = try handshake.parseOne(cursor);
             const frame_len = 4 + @as(usize, @intCast(frame.header.length));
+
+            if (quic_level) |level| {
+                try validateQuicHandshakeTypeForLevel(level, frame.header.handshake_type);
+            }
 
             try self.validateHandshakeBody(frame.header.handshake_type, frame.body);
             self.transcript.update(cursor[0..frame_len]);
@@ -686,7 +802,7 @@ pub const Engine = struct {
 
                 try result.push(.{ .state_changed = self.machine.state });
             },
-            .handshake => try self.ingestHandshakePayload(clear, result),
+            .handshake => try self.ingestHandshakePayload(clear, result, null),
             else => return error.InvalidInnerContentType,
         }
     }
@@ -727,7 +843,7 @@ pub const Engine = struct {
         const inner_type = std.meta.intToEnum(record.ContentType, inner[inner.len - 1]) catch return error.InvalidInnerContentType;
         const clear = inner[0 .. inner.len - 1];
         switch (inner_type) {
-            .handshake => try self.ingestHandshakePayload(clear, result),
+            .handshake => try self.ingestHandshakePayload(clear, result, null),
             .alert => {
                 const alert = try alerts.Alert.decode(clear);
                 self.metrics.alerts_received += 1;
@@ -810,25 +926,66 @@ pub const Engine = struct {
     }
 
     fn buildEncryptedExtensionsBody(self: *Engine) EngineError![]u8 {
-        if (self.negotiated_alpn_len == 0) {
-            const out = try self.allocator.alloc(u8, 2);
-            out[0] = 0x00;
-            out[1] = 0x00;
-            return out;
+        const include_alpn = self.negotiated_alpn_len != 0;
+        const include_quic_tp = self.config.quic_mode;
+        const quic_tp = if (include_quic_tp)
+            (self.config.quic_transport_parameters orelse return error.MissingQuicTransportParameters)
+        else
+            "";
+
+        var ext_total_len: usize = 0;
+        if (include_alpn) {
+            const protocol_len = self.negotiated_alpn_len;
+            const list_len = 1 + protocol_len;
+            const ext_data_len = 2 + list_len;
+            ext_total_len += 4 + ext_data_len;
+        }
+        if (include_quic_tp) {
+            ext_total_len += 4 + quic_tp.len;
         }
 
-        const protocol_len = self.negotiated_alpn_len;
-        const list_len = 1 + protocol_len;
-        const ext_data_len = 2 + list_len;
-        const ext_len = 4 + ext_data_len;
-        const out_len = 2 + ext_len;
+        if (ext_total_len > std.math.maxInt(u16)) return error.InvalidEncryptedExtensionsMessage;
+
+        const out_len = 2 + ext_total_len;
         var out = try self.allocator.alloc(u8, out_len);
-        std.mem.writeInt(u16, out[0..2], @as(u16, @intCast(ext_len)), .big);
-        std.mem.writeInt(u16, out[2..4], ext_alpn, .big);
-        std.mem.writeInt(u16, out[4..6], @as(u16, @intCast(ext_data_len)), .big);
-        std.mem.writeInt(u16, out[6..8], @as(u16, @intCast(list_len)), .big);
-        out[8] = @as(u8, @intCast(protocol_len));
-        @memcpy(out[9 .. 9 + protocol_len], self.negotiated_alpn[0..protocol_len]);
+        std.mem.writeInt(u16, out[0..2], @as(u16, @intCast(ext_total_len)), .big);
+
+        var i: usize = 2;
+        if (include_alpn) {
+            const protocol_len = self.negotiated_alpn_len;
+            const list_len = 1 + protocol_len;
+            const ext_data_len = 2 + list_len;
+
+            out[i] = @as(u8, @intCast((ext_alpn >> 8) & 0xff));
+            out[i + 1] = @as(u8, @intCast(ext_alpn & 0xff));
+            i += 2;
+            const ext_data_len_u16: u16 = @intCast(ext_data_len);
+            out[i] = @as(u8, @intCast((ext_data_len_u16 >> 8) & 0xff));
+            out[i + 1] = @as(u8, @intCast(ext_data_len_u16 & 0xff));
+            i += 2;
+            const list_len_u16: u16 = @intCast(list_len);
+            out[i] = @as(u8, @intCast((list_len_u16 >> 8) & 0xff));
+            out[i + 1] = @as(u8, @intCast(list_len_u16 & 0xff));
+            i += 2;
+            out[i] = @as(u8, @intCast(protocol_len));
+            i += 1;
+            @memcpy(out[i .. i + protocol_len], self.negotiated_alpn[0..protocol_len]);
+            i += protocol_len;
+        }
+
+        if (include_quic_tp) {
+            out[i] = @as(u8, @intCast((ext_quic_transport_parameters >> 8) & 0xff));
+            out[i + 1] = @as(u8, @intCast(ext_quic_transport_parameters & 0xff));
+            i += 2;
+            const quic_tp_len_u16: u16 = @intCast(quic_tp.len);
+            out[i] = @as(u8, @intCast((quic_tp_len_u16 >> 8) & 0xff));
+            out[i + 1] = @as(u8, @intCast(quic_tp_len_u16 & 0xff));
+            i += 2;
+            @memcpy(out[i .. i + quic_tp.len], quic_tp);
+            i += quic_tp.len;
+        }
+
+        if (i != out.len) return error.InvalidEncryptedExtensionsMessage;
         return out;
     }
 
@@ -926,6 +1083,9 @@ pub const Engine = struct {
         @memcpy(frame[9..], body);
         self.transcript.update(frame[5..]);
         try self.outbound_records.append(self.allocator, frame);
+        if (self.config.quic_mode) {
+            try self.enqueueOutboundQuicHandshake(hs_type, body);
+        }
         self.allocator.free(@constCast(body));
     }
 
@@ -971,7 +1131,28 @@ pub const Engine = struct {
 
         self.transcript.update(clear[0..hs_payload_len]);
         try self.outbound_records.append(self.allocator, frame);
+        if (self.config.quic_mode) {
+            try self.enqueueOutboundQuicHandshake(hs_type, body);
+        }
         self.allocator.free(@constCast(body));
+    }
+
+    fn enqueueOutboundQuicHandshake(
+        self: *Engine,
+        hs_type: state.HandshakeType,
+        body: []const u8,
+    ) EngineError!void {
+        const payload_len = 4 + body.len;
+        var payload = try self.allocator.alloc(u8, payload_len);
+        errdefer self.allocator.free(payload);
+        payload[0] = @intFromEnum(hs_type);
+        const hs_len_u24 = handshake.writeU24(@as(u24, @intCast(body.len)));
+        @memcpy(payload[1..4], &hs_len_u24);
+        @memcpy(payload[4..], body);
+        try self.outbound_quic_handshakes.append(self.allocator, .{
+            .level = quicLevelForHandshakeType(hs_type),
+            .payload = payload,
+        });
     }
 
     fn deriveConnectedKeyScheduleStages(self: *Engine) EngineError!void {
@@ -1165,6 +1346,10 @@ pub const Engine = struct {
         self.hs_tag_len = 16;
         self.hs_write_seq = 0;
         self.hs_read_seq = 0;
+        if (self.config.quic_mode and !self.observed_quic_handshake_key_ready) {
+            self.observed_quic_handshake_key_ready = true;
+            self.pending_quic_handshake_key_ready = true;
+        }
     }
 
     fn keyExchangeIkm(self: *Engine) EngineError![]const u8 {
@@ -1255,6 +1440,10 @@ pub const Engine = struct {
         self.app_tag_len = 16;
         self.app_write_seq = 0;
         self.app_read_seq = 0;
+        if (self.config.quic_mode and !self.observed_quic_application_key_ready) {
+            self.observed_quic_application_key_ready = true;
+            self.pending_quic_application_key_ready = true;
+        }
     }
 
     fn ratchetReadTrafficSecret(self: *Engine) void {
@@ -1374,6 +1563,8 @@ pub const Engine = struct {
         self.app_tag_len = 16;
         self.app_read_seq = 0;
         self.app_write_seq = 0;
+        self.pending_quic_application_key_ready = false;
+        self.observed_quic_application_key_ready = false;
     }
 
     fn zeroizeHandshakeTrafficState(self: *Engine) void {
@@ -1385,6 +1576,8 @@ pub const Engine = struct {
         self.hs_tag_len = 16;
         self.hs_write_seq = 0;
         self.hs_read_seq = 0;
+        self.pending_quic_handshake_key_ready = false;
+        self.observed_quic_handshake_key_ready = false;
     }
 
     fn transcriptDigestSha256(self: *Engine) [32]u8 {
@@ -1514,6 +1707,30 @@ pub const Engine = struct {
         self.saw_peer_certificate = false;
     }
 
+    fn clearPeerQuicTransportParameters(self: *Engine) void {
+        if (self.peer_quic_transport_parameters) |tp| {
+            std.crypto.secureZero(u8, tp);
+            self.allocator.free(tp);
+            self.peer_quic_transport_parameters = null;
+        }
+    }
+
+    fn setPeerQuicTransportParameters(self: *Engine, bytes: []const u8) std.mem.Allocator.Error!void {
+        self.clearPeerQuicTransportParameters();
+        self.peer_quic_transport_parameters = try self.allocator.dupe(u8, bytes);
+    }
+
+    fn appendPendingQuicKeyReadyActions(self: *Engine, result: *IngestResult) EngineError!void {
+        if (self.pending_quic_handshake_key_ready) {
+            self.pending_quic_handshake_key_ready = false;
+            try result.push(.{ .quic_key_ready = .handshake });
+        }
+        if (self.pending_quic_application_key_ready) {
+            self.pending_quic_application_key_ready = false;
+            try result.push(.{ .quic_key_ready = .application });
+        }
+    }
+
     fn nowUnix(self: Engine) i64 {
         if (self.config.peer_validation.now_unix) |f| return f();
         return std.time.timestamp();
@@ -1528,6 +1745,24 @@ pub const Engine = struct {
             }
             slot.* = null;
         }
+    }
+
+    fn snapshotQuicSecret(secret: ?TrafficSecret) ?QuicTrafficSecret {
+        if (secret) |raw| {
+            var out: QuicTrafficSecret = .{};
+            switch (raw) {
+                .sha256 => |bytes| {
+                    @memcpy(out.bytes[0..bytes.len], bytes[0..]);
+                    out.len = bytes.len;
+                },
+                .sha384 => |bytes| {
+                    @memcpy(out.bytes[0..bytes.len], bytes[0..]);
+                    out.len = bytes.len;
+                },
+            }
+            return out;
+        }
+        return null;
     }
 
     fn capturePeerLeafCertificate(self: *Engine, cert: messages.CertificateMsg) EngineError!void {
@@ -1865,6 +2100,10 @@ pub const Engine = struct {
             .encrypted_extensions => {
                 var ee = messages.EncryptedExtensions.decode(self.allocator, body) catch return error.InvalidEncryptedExtensionsMessage;
                 defer ee.deinit(self.allocator);
+                if (self.config.quic_mode and self.config.role == .client) {
+                    const peer_tp = findExtensionData(ee.extensions, ext_quic_transport_parameters) orelse return error.MissingQuicTransportParameters;
+                    try self.setPeerQuicTransportParameters(peer_tp);
+                }
             },
             .new_session_ticket => {
                 var nst = messages.NewSessionTicketMsg.decode(self.allocator, body) catch return error.InvalidNewSessionTicketMessage;
@@ -1881,7 +2120,7 @@ pub const Engine = struct {
         return false;
     }
 
-    fn requireClientHelloExtensions(self: Engine, compression_methods: []const u8, extensions: []const messages.Extension) EngineError!void {
+    fn requireClientHelloExtensions(self: *Engine, compression_methods: []const u8, extensions: []const messages.Extension) EngineError!void {
         const supported_versions = findExtensionData(extensions, ext_supported_versions) orelse return error.MissingRequiredClientHelloExtension;
         if (!clientHelloSupportedVersionsContainTls13(supported_versions)) return error.InvalidSupportedVersionExtension;
         const server_name = findExtensionData(extensions, ext_server_name) orelse return error.MissingRequiredClientHelloExtension;
@@ -1893,6 +2132,10 @@ pub const Engine = struct {
         try validateClientHelloKeyShareGroupsSubset(key_share, supported_groups, self.config.group_policy);
         if (findExtensionData(extensions, ext_alpn)) |alpn| {
             try validateClientHelloAlpnExtension(alpn);
+        }
+        if (self.config.quic_mode) {
+            const peer_tp = findExtensionData(extensions, ext_quic_transport_parameters) orelse return error.MissingQuicTransportParameters;
+            try self.setPeerQuicTransportParameters(peer_tp);
         }
         if (!isStrictTls13LegacyCompressionVector(compression_methods)) return error.InvalidCompressionMethod;
         try validatePskOfferExtensions(extensions, self.config.suite);
@@ -1961,6 +2204,7 @@ pub fn classifyErrorAlert(err: anyerror) alerts.Alert {
         error.MissingRequiredClientHelloExtension,
         error.MissingRequiredServerHelloExtension,
         error.MissingRequiredHrrExtension,
+        error.MissingQuicTransportParameters,
         => .missing_extension,
 
         error.InvalidLegacyVersion => .protocol_version,
@@ -1988,6 +2232,7 @@ pub fn classifyErrorAlert(err: anyerror) alerts.Alert {
         error.UnsupportedSignatureAlgorithm,
         error.InvalidInnerContentType,
         error.InvalidRequest,
+        error.InvalidQuicHandshakeLevel,
         => .illegal_parameter,
 
         error.EarlyDataRejected,
@@ -2335,6 +2580,32 @@ fn indexOfExtension(extensions: []const messages.Extension, extension_type: u16)
         if (ext.extension_type == extension_type) return i;
     }
     return null;
+}
+
+fn quicLevelForHandshakeType(handshake_type: state.HandshakeType) QuicEncryptionLevel {
+    return switch (handshake_type) {
+        .client_hello, .server_hello => .initial,
+        .new_session_ticket, .key_update => .application,
+        else => .handshake,
+    };
+}
+
+fn validateQuicHandshakeTypeForLevel(level: QuicEncryptionLevel, handshake_type: state.HandshakeType) EngineError!void {
+    switch (level) {
+        .initial => {
+            if (handshake_type != .client_hello and handshake_type != .server_hello) {
+                return error.InvalidQuicHandshakeLevel;
+            }
+        },
+        .handshake => switch (handshake_type) {
+            .client_hello, .server_hello, .new_session_ticket, .key_update => return error.InvalidQuicHandshakeLevel,
+            else => {},
+        },
+        .application => switch (handshake_type) {
+            .new_session_ticket => {},
+            else => return error.InvalidQuicHandshakeLevel,
+        },
+    }
 }
 
 fn isIgnorableTls13ChangeCipherSpec(payload: []const u8) bool {
@@ -2742,6 +3013,57 @@ fn clientHelloRecordWithX25519Public(allocator: std.mem.Allocator, public: [32]u
     exts[2] = .{ .extension_type = ext_supported_groups, .data = groups };
     exts[3] = .{ .extension_type = ext_key_share, .data = key_share };
     exts[4] = .{ .extension_type = ext_alpn, .data = alpn };
+
+    var hello = messages.ClientHello{
+        .random = [_]u8{0x22} ** 32,
+        .session_id = try allocator.dupe(u8, ""),
+        .cipher_suites = try allocator.dupe(u16, &.{0x1301}),
+        .compression_methods = try allocator.dupe(u8, &.{0x00}),
+        .extensions = exts,
+    };
+    defer hello.deinit(allocator);
+
+    const body = try hello.encode(allocator);
+    defer allocator.free(body);
+
+    var out = try allocator.alloc(u8, 5 + 4 + body.len);
+    out[0] = @intFromEnum(record.ContentType.handshake);
+    std.mem.writeInt(u16, out[1..3], record.tls_legacy_record_version, .big);
+    std.mem.writeInt(u16, out[3..5], @as(u16, @intCast(4 + body.len)), .big);
+    out[5] = @intFromEnum(state.HandshakeType.client_hello);
+    const hs_len = handshake.writeU24(@as(u24, @intCast(body.len)));
+    @memcpy(out[6..9], &hs_len);
+    @memcpy(out[9..], body);
+    return out;
+}
+
+fn clientHelloRecordWithX25519PublicAndQuicTransportParameters(
+    allocator: std.mem.Allocator,
+    public: [32]u8,
+    quic_tp: []const u8,
+) ![]u8 {
+    var exts = try allocator.alloc(messages.Extension, 6);
+    errdefer allocator.free(exts);
+
+    const sni = try allocator.dupe(u8, &.{
+        0x00, 0x08, 0x00, 0x00, 0x05, 'a', '.', 'c', 'o', 'm',
+    });
+    const versions = try allocator.dupe(u8, &.{ 0x02, 0x03, 0x04 });
+    const groups = try allocator.dupe(u8, &.{ 0x00, 0x02, 0x00, 0x1d });
+    var key_share = try allocator.alloc(u8, 2 + 2 + 2 + public.len);
+    std.mem.writeInt(u16, key_share[0..2], @as(u16, @intCast(2 + 2 + public.len)), .big);
+    std.mem.writeInt(u16, key_share[2..4], named_group_x25519, .big);
+    std.mem.writeInt(u16, key_share[4..6], @as(u16, @intCast(public.len)), .big);
+    @memcpy(key_share[6..], &public);
+    const alpn = try allocator.dupe(u8, &.{ 0x00, 0x03, 0x02, 'h', '2' });
+    const tp = try allocator.dupe(u8, quic_tp);
+
+    exts[0] = .{ .extension_type = ext_server_name, .data = sni };
+    exts[1] = .{ .extension_type = ext_supported_versions, .data = versions };
+    exts[2] = .{ .extension_type = ext_supported_groups, .data = groups };
+    exts[3] = .{ .extension_type = ext_key_share, .data = key_share };
+    exts[4] = .{ .extension_type = ext_alpn, .data = alpn };
+    exts[5] = .{ .extension_type = ext_quic_transport_parameters, .data = tp };
 
     var hello = messages.ClientHello{
         .random = [_]u8{0x22} ** 32,
@@ -3287,6 +3609,31 @@ fn encryptedExtensionsRecord() [11]u8 {
     return frame;
 }
 
+fn encryptedExtensionsRecordWithQuicTransportParameters(
+    allocator: std.mem.Allocator,
+    quic_tp: []const u8,
+) ![]u8 {
+    const ext_len = 4 + quic_tp.len;
+    if (ext_len > std.math.maxInt(u16)) return error.LengthOverflow;
+    const body_len = 2 + ext_len;
+    if (body_len > std.math.maxInt(u24)) return error.LengthOverflow;
+    if (body_len > std.math.maxInt(u16)) return error.LengthOverflow;
+
+    var out = try allocator.alloc(u8, 5 + 4 + body_len);
+    out[0] = @intFromEnum(record.ContentType.handshake);
+    out[1] = 0x03;
+    out[2] = 0x03;
+    std.mem.writeInt(u16, out[3..5], @as(u16, @intCast(4 + body_len)), .big);
+    out[5] = @intFromEnum(state.HandshakeType.encrypted_extensions);
+    const hs_len = handshake.writeU24(@as(u24, @intCast(body_len)));
+    @memcpy(out[6..9], &hs_len);
+    std.mem.writeInt(u16, out[9..11], @as(u16, @intCast(ext_len)), .big);
+    std.mem.writeInt(u16, out[11..13], ext_quic_transport_parameters, .big);
+    std.mem.writeInt(u16, out[13..15], @as(u16, @intCast(quic_tp.len)), .big);
+    @memcpy(out[15 .. 15 + quic_tp.len], quic_tp);
+    return out;
+}
+
 fn newSessionTicketRecord() [25]u8 {
     // lifetime(4), age_add(4), nonce_len(1)=1, nonce(1), ticket_len(2)=2, ticket(2), ext_len(2)=0
     var frame: [25]u8 = undefined;
@@ -3558,6 +3905,56 @@ test "key schedule stages are populated across client handshake milestones" {
     _ = try engine.ingestRecord(&finishedRecord());
     try std.testing.expect(engine.master_secret != null);
     try std.testing.expect(engine.latest_secret != null);
+}
+
+test "quic secret snapshot starts empty before key schedule is installed" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    const snap = engine.snapshotQuicSecrets();
+    try std.testing.expectEqual(keyschedule.CipherSuite.tls_aes_128_gcm_sha256, snap.suite);
+    try std.testing.expect(snap.handshake_read == null);
+    try std.testing.expect(snap.handshake_write == null);
+    try std.testing.expect(snap.application_read == null);
+    try std.testing.expect(snap.application_write == null);
+}
+
+test "quic secret snapshot exposes handshake then application secrets" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+    });
+    defer engine.deinit();
+
+    try ingestValidServerHelloForClient(&engine);
+
+    const hs = engine.snapshotQuicSecrets();
+    try std.testing.expect(hs.handshake_read != null);
+    try std.testing.expect(hs.handshake_write != null);
+    try std.testing.expect(hs.application_read == null);
+    try std.testing.expect(hs.application_write == null);
+
+    const hs_read = hs.handshake_read orelse return error.TestUnexpectedResult;
+    const hs_write = hs.handshake_write orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 32), hs_read.len);
+    try std.testing.expectEqual(@as(usize, 32), hs_write.len);
+
+    _ = try engine.ingestRecord(&encryptedExtensionsRecord());
+    _ = try engine.ingestRecord(&finishedRecord());
+
+    const app = engine.snapshotQuicSecrets();
+    try std.testing.expect(app.handshake_read != null);
+    try std.testing.expect(app.handshake_write != null);
+    try std.testing.expect(app.application_read != null);
+    try std.testing.expect(app.application_write != null);
+
+    const app_read = app.application_read orelse return error.TestUnexpectedResult;
+    const app_write = app.application_write orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 32), app_read.len);
+    try std.testing.expectEqual(@as(usize, 32), app_write.len);
 }
 
 test "key schedule stages follow suite digest width" {
@@ -4676,6 +5073,197 @@ test "valid client hello body is accepted for server role" {
 
     try ingestValidClientHelloForServer(&engine);
     try std.testing.expectEqual(state.ConnectionState.wait_client_certificate_or_finished, engine.machine.state);
+}
+
+test "validate config rejects quic mode without transport parameters" {
+    try std.testing.expectError(error.InvalidConfiguration, validateConfig(.{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+        .quic_mode = true,
+    }));
+}
+
+test "server requires client hello quic transport parameters in quic mode" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+        .quic_mode = true,
+        .quic_transport_parameters = "\x01\x00",
+        .server_credentials = testServerCredentials(),
+    });
+    defer engine.deinit();
+
+    const rec = clientHelloRecord();
+    try std.testing.expectError(error.MissingQuicTransportParameters, engine.ingestRecord(&rec));
+}
+
+test "encrypted extensions include quic transport parameters when quic mode is enabled" {
+    const tp = "\x00\x08abcdefgh";
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+        .quic_mode = true,
+        .quic_transport_parameters = tp,
+    });
+    defer engine.deinit();
+
+    const ee_body = try engine.buildEncryptedExtensionsBody();
+    defer std.testing.allocator.free(ee_body);
+
+    var ee = try messages.EncryptedExtensions.decode(std.testing.allocator, ee_body);
+    defer ee.deinit(std.testing.allocator);
+    const got = findExtensionData(ee.extensions, ext_quic_transport_parameters) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(tp, got);
+}
+
+test "ingestQuicHandshake rejects handshake types on wrong encryption level" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+        .quic_mode = true,
+        .quic_transport_parameters = "\x01\x00",
+    });
+    defer engine.deinit();
+
+    const fin = handshakeRecord(.finished);
+    try std.testing.expectError(error.InvalidQuicHandshakeLevel, engine.ingestQuicHandshake(.initial, fin[5..]));
+}
+
+test "ingestQuicHandshake rejects key_update on application level" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+        .quic_mode = true,
+        .quic_transport_parameters = "\x01\x00",
+    });
+    defer engine.deinit();
+
+    const ku = keyUpdateRecord(.update_not_requested);
+    try std.testing.expectError(error.InvalidQuicHandshakeLevel, engine.ingestQuicHandshake(.application, ku[5..]));
+}
+
+test "quic server captures peer transport parameters and emits key-ready actions" {
+    const local_tp = "\x01\x00";
+    const peer_tp = "\x00\x08peerquic";
+
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+        .quic_mode = true,
+        .quic_transport_parameters = local_tp,
+        .server_credentials = testServerCredentials(),
+    });
+    defer engine.deinit();
+
+    const client_kp = std.crypto.dh.X25519.KeyPair.generate();
+    const ch = try clientHelloRecordWithX25519PublicAndQuicTransportParameters(
+        std.testing.allocator,
+        client_kp.public_key,
+        peer_tp,
+    );
+    defer std.testing.allocator.free(ch);
+
+    const parsed = try record.parseRecord(ch);
+    const res = try engine.ingestQuicHandshake(.initial, parsed.payload);
+
+    const captured = engine.peerQuicTransportParameters() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(peer_tp, captured);
+
+    var saw_hs_ready = false;
+    var saw_app_ready = false;
+    var i: usize = 0;
+    while (i < res.action_count) : (i += 1) {
+        switch (res.actions[i]) {
+            .quic_key_ready => |epoch| switch (epoch) {
+                .handshake => saw_hs_ready = true,
+                .application => saw_app_ready = true,
+            },
+            else => {},
+        }
+    }
+
+    try std.testing.expect(saw_hs_ready);
+    try std.testing.expect(saw_app_ready);
+}
+
+test "quic server exposes outbound handshake flight via popOutboundQuicHandshake" {
+    const local_tp = "\x01\x00";
+    const peer_tp = "\x00\x08peerquic";
+
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .server,
+        .suite = .tls_aes_128_gcm_sha256,
+        .quic_mode = true,
+        .quic_transport_parameters = local_tp,
+        .server_credentials = testServerCredentials(),
+    });
+    defer engine.deinit();
+
+    const client_kp = std.crypto.dh.X25519.KeyPair.generate();
+    const ch = try clientHelloRecordWithX25519PublicAndQuicTransportParameters(
+        std.testing.allocator,
+        client_kp.public_key,
+        peer_tp,
+    );
+    defer std.testing.allocator.free(ch);
+
+    const parsed = try record.parseRecord(ch);
+    _ = try engine.ingestQuicHandshake(.initial, parsed.payload);
+
+    var idx: usize = 0;
+    while (idx < 5) : (idx += 1) {
+        var outbound = engine.popOutboundQuicHandshake() orelse return error.TestUnexpectedResult;
+        defer outbound.deinit(std.testing.allocator);
+        const hs = try handshake.parseOne(outbound.payload);
+
+        if (idx == 0) {
+            try std.testing.expectEqual(QuicEncryptionLevel.initial, outbound.level);
+            try std.testing.expectEqual(state.HandshakeType.server_hello, hs.header.handshake_type);
+        } else {
+            try std.testing.expectEqual(QuicEncryptionLevel.handshake, outbound.level);
+        }
+    }
+
+    try std.testing.expect(engine.popOutboundQuicHandshake() == null);
+}
+
+test "quic client captures peer transport parameters from encrypted extensions ingress" {
+    const local_tp = "\x01\x00";
+    const peer_tp = "\x00\x08srvquic!";
+
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+        .quic_mode = true,
+        .quic_transport_parameters = local_tp,
+    });
+    defer engine.deinit();
+
+    try ingestValidServerHelloForClient(&engine);
+
+    const ee = try encryptedExtensionsRecordWithQuicTransportParameters(std.testing.allocator, peer_tp);
+    defer std.testing.allocator.free(ee);
+    const parsed = try record.parseRecord(ee);
+    _ = try engine.ingestQuicHandshake(.handshake, parsed.payload);
+
+    const captured = engine.peerQuicTransportParameters() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(peer_tp, captured);
+}
+
+test "noteOutboundQuicHandshake only accepts client_hello at start in quic mode" {
+    var engine = Engine.init(std.testing.allocator, .{
+        .role = .client,
+        .suite = .tls_aes_128_gcm_sha256,
+        .quic_mode = true,
+        .quic_transport_parameters = "\x01\x00",
+    });
+    defer engine.deinit();
+
+    const ch = handshakeRecord(.client_hello);
+    try engine.noteOutboundQuicHandshake(ch[5..]);
+
+    const fin = handshakeRecord(.finished);
+    try std.testing.expectError(error.InvalidQuicHandshakeLevel, engine.noteOutboundQuicHandshake(fin[5..]));
 }
 
 test "server emits outbound handshake flight when credentials are configured" {

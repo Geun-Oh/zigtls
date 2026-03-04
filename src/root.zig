@@ -2,6 +2,7 @@
 const std = @import("std");
 
 pub const tls13 = @import("tls13.zig");
+pub const quic = @import("quic.zig");
 pub const termination = @import("termination.zig");
 pub const adapter = @import("adapter.zig");
 pub const cert_reload = @import("cert_reload.zig");
