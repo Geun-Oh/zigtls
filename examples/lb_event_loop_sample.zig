@@ -49,7 +49,16 @@ pub fn main() !void {
 
     var store = cert_reload.Store.init(allocator);
     defer store.deinit();
-    _ = try store.reloadFromFiles(cfg.cert_path, cfg.key_path);
+    _ = store.reloadFromFiles(cfg.cert_path, cfg.key_path) catch |err| switch (err) {
+        error.FileNotFound => {
+            std.debug.print("certificate files not found (cert={s}, key={s}); skipping sample run\n", .{
+                cfg.cert_path,
+                cfg.key_path,
+            });
+            return;
+        },
+        else => return err,
+    };
 
     const address = try std.net.Address.parseIp(cfg.host, cfg.port);
     var server = try address.listen(.{ .reuse_address = true });
